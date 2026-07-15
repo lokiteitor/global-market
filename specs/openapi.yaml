@@ -1,0 +1,3908 @@
+openapi: 3.2.0
+$self: https://play.imperio-industrial.example/api/v1/openapi.yaml
+
+info:
+  title: Imperio Industrial — API pública
+  version: 1.0.0
+  summary: API REST del MMO de simulación económica, industrial y logística "Imperio Industrial".
+  description: |
+    API pública del servidor autoritativo de **Imperio Industrial** (GDD/SAD v1.2).
+
+    ## Principios del contrato de API
+
+    - **Una sola API para humanos y bots** (igualdad de API literal, ADR-010): mismos
+      endpoints y mismos rate limits lógicos. El motor no distingue el origen de un comando.
+    - **Servidor autoritativo**: el cliente solo envía intenciones; toda validación
+      (espacio, fondos, stock, plazos) ocurre server-side.
+    - **REST para operaciones no urgentes**; los eventos en tiempo real del área de interés
+      (movimiento de vehículos, alertas configuradas) se distribuyen por **WebSocket**
+      a través del Notification/Event Gateway y quedan fuera de este documento.
+    - **El tablón global es pull, no push**: se consulta bajo demanda con filtros
+      (producto, ubicación, precio, plazo); nunca hay push mundial de mercado.
+    - **Sim-time en el contrato**: todo plazo de dominio (contratos, producción, viajes)
+      se define y transmite en sim-time (segundos desde el génesis del mundo, ratio 24×).
+      La traducción a tiempo real es responsabilidad exclusiva de la UI. Las dos únicas
+      mecánicas en tiempo real son la ventana de sorteo y el cooldown anti-parpadeo.
+    - **Dinero y stock como enteros/punto fijo serializados en strings** — nunca floats
+      (invariante del ledger).
+    - **Identificadores ULID con espacio de nombres por tipo** (`veh_...`, `ctr_...`,
+      `crg_...`), únicos globalmente e independientes del esquema donde residan.
+    - **Autorización por propiedad de recursos**: una corporación solo comanda sus
+      edificios, vehículos y contratos (403 en caso contrario). Las cuentas de sistema
+      (ciudades, banco central) operan por esta misma API sin canal privilegiado.
+
+    ## Estructura de respuestas
+
+    Toda respuesta exitosa envuelve el resultado en `{ "data": ..., "meta": ... }`,
+    donde `meta` incluye `sim_time` y `server_time`. Los errores usan
+    `{ "error": { "code", "message", "details" } }`.
+
+    ## Ventana de mantenimiento
+
+    El mundo pausa diariamente 10–30 min con sim-time congelado (ADR-003). Durante la
+    ventana la API responde `503` con cabecera `Retry-After`. La pausa es económicamente
+    transparente: ningún plazo de sim-time avanza.
+  contact:
+    name: Equipo de Arquitectura / Backend — Imperio Industrial
+    email: backend@imperio-industrial.example
+  license:
+    name: Proprietary
+    identifier: LicenseRef-Proprietary
+
+servers:
+  - url: https://play.imperio-industrial.example/api/v1
+    description: Producción (vía Caddy, TLS). Los bots consumen exactamente esta misma superficie por un camino de red interno multiplexado.
+  - url: https://stress.imperio-industrial.example/api/v1
+    description: Cluster de stress test (entorno efímero y separado; nunca toca el mundo real).
+
+security:
+  - sessionToken: []
+
+tags:
+  # Módulos (nivel superior, convención /api/v1/{modulo}/{recurso})
+  - name: auth
+    summary: Autenticación e identidad
+    description: Sesiones y cuentas. Jugadores, bots, ciudades y banco central comparten el mismo modelo de cuenta.
+    kind: nav
+  - name: ledger
+    summary: Ledger de doble entrada
+    description: Consulta de cuentas de valor (cash, escrow, garantías, stock comprometible) y extractos. Solo lectura por API — el valor solo se mueve mediante operaciones de dominio.
+    kind: nav
+  - name: contracts
+    summary: Contract Service (CCRI)
+    description: Tablón global, publicaciones, ventana de sorteo, contratos CCRI de bienes y CCRI-Flete (Fase 2).
+    kind: nav
+  - name: market
+    summary: Historial de mercado
+    description: Velas OHLC construidas a partir de contratos efectivamente liquidados (no de órdenes vivas).
+    kind: nav
+  - name: world
+    summary: Mundo físico
+    description: Regiones, catálogos, ciudades, concesiones, edificios, producción, flotas y cargamentos.
+    kind: nav
+  - name: logistics
+    summary: Logistics Service
+    description: Planificación sin estado de tránsito — topología del grafo, pathfinding jerárquico y ETAs informativas.
+    kind: nav
+  # Sub-agrupaciones
+  - name: board
+    summary: Tablón global de contratos
+    parent: contracts
+    kind: nav
+  - name: fleet
+    summary: Gestión de flotas
+    parent: world
+    kind: nav
+  - name: production
+    summary: Edificios y producción
+    parent: world
+    kind: nav
+
+paths:
+  # ───────────────────────── AUTH ─────────────────────────
+  /auth/sessions:
+    post:
+      operationId: createSession
+      tags: [auth]
+      summary: Iniciar sesión
+      description: |
+        Crea una sesión para una cuenta (humano o bot; credenciales por cuenta).
+        Única capa del sistema donde el wall-clock es regla legítima.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SessionCreateRequest'
+      responses:
+        '201':
+          description: Sesión creada. El token se devuelve una única vez (el servidor solo almacena su hash).
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: '#/components/schemas/SessionCreated'
+                  meta:
+                    $ref: '#/components/schemas/Meta'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/Maintenance' }
+
+  /auth/sessions/current:
+    delete:
+      operationId: deleteCurrentSession
+      tags: [auth]
+      summary: Cerrar la sesión actual
+      responses:
+        '204':
+          description: Sesión invalidada.
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/Maintenance' }
+
+  /auth/me:
+    get:
+      operationId: getCurrentAccount
+      tags: [auth]
+      summary: Cuenta autenticada
+      description: Devuelve la corporación asociada a la sesión actual.
+      responses:
+        '200':
+          description: Cuenta actual.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: '#/components/schemas/Account'
+                  meta:
+                    $ref: '#/components/schemas/Meta'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/Maintenance' }
+
+  # ───────────────────────── LEDGER ─────────────────────────
+  /ledger/accounts:
+    get:
+      operationId: listLedgerAccounts
+      tags: [ledger]
+      summary: Cuentas de valor propias
+      description: |
+        Cuentas del ledger de doble entrada cuyo titular es la corporación autenticada:
+        `cash` (saldo líquido, nunca negativo — no existe deuda), `escrow`, `guarantee`,
+        `stock_free`, `stock_reserved` y `custody`. El saldo es derivado y protegido por
+        triggers; esta API es de solo lectura.
+      parameters:
+        - name: kind
+          in: query
+          description: Filtra por tipo de cuenta.
+          schema:
+            $ref: '#/components/schemas/LedgerAccountKind'
+        - name: product_id
+          in: query
+          description: Filtra cuentas de stock por producto.
+          schema:
+            $ref: '#/components/schemas/ProductId'
+        - $ref: '#/components/parameters/cursor'
+        - $ref: '#/components/parameters/limit'
+      responses:
+        '200':
+          description: Cuentas del ledger de la corporación.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/LedgerAccount'
+                  meta:
+                    $ref: '#/components/schemas/Meta'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/Maintenance' }
+
+  /ledger/accounts/{ledgerAccountId}/entries:
+    get:
+      operationId: listLedgerEntries
+      tags: [ledger]
+      summary: Extracto de una cuenta del ledger
+      description: Partidas append-only de la cuenta (auditoría). Solo accesible por el titular.
+      parameters:
+        - name: ledgerAccountId
+          in: path
+          required: true
+          schema:
+            $ref: '#/components/schemas/LedgerAccountId'
+        - name: from_sim
+          in: query
+          description: Sim-time mínimo del asiento.
+          schema:
+            $ref: '#/components/schemas/SimTime'
+        - name: to_sim
+          in: query
+          description: Sim-time máximo del asiento.
+          schema:
+            $ref: '#/components/schemas/SimTime'
+        - $ref: '#/components/parameters/cursor'
+        - $ref: '#/components/parameters/limit'
+      responses:
+        '200':
+          description: Partidas de la cuenta, de más reciente a más antigua.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/LedgerEntry'
+                  meta:
+                    $ref: '#/components/schemas/Meta'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/Maintenance' }
+
+  # ───────────────────────── CONTRACTS: TABLÓN ─────────────────────────
+  /contracts/board:
+    get:
+      operationId: queryBoard
+      tags: [contracts, board]
+      summary: Consultar el tablón global (pull con filtros)
+      description: |
+        Tablón **único, global e interregional** (GDD 5.3.1). Devuelve publicaciones
+        visibles (`draw_window`, `open`, `micro_window`) del canal `board`.
+        Invariante por construcción: **toda publicación visible es ejecutable al 100%**
+        (su garantía íntegra quedó bloqueada al publicar).
+        Consulta bajo demanda — nunca hay suscripción push al tablón mundial.
+      parameters:
+        - name: kind
+          in: query
+          description: Tipo de publicación (`sell`, `buy` o `freight` — fletes desde Fase 2).
+          schema:
+            $ref: '#/components/schemas/PublicationKind'
+        - name: product_id
+          in: query
+          schema:
+            $ref: '#/components/schemas/ProductId'
+        - name: origin_region_id
+          in: query
+          description: Región del nodo de origen.
+          schema:
+            $ref: '#/components/schemas/RegionId'
+        - name: destination_region_id
+          in: query
+          description: Región del nodo de destino.
+          schema:
+            $ref: '#/components/schemas/RegionId'
+        - name: max_unit_price
+          in: query
+          description: Precio unitario máximo (string de punto fijo).
+          schema:
+            $ref: '#/components/schemas/MoneyAmount'
+        - name: min_unit_price
+          in: query
+          schema:
+            $ref: '#/components/schemas/MoneyAmount'
+        - name: min_quantity_remaining
+          in: query
+          schema:
+            $ref: '#/components/schemas/StockQty'
+        - name: max_delivery_sim_seconds
+          in: query
+          description: Plazo de entrega máximo aceptable, en sim-time.
+          schema:
+            $ref: '#/components/schemas/SimTime'
+        - name: sort
+          in: query
+          schema:
+            type: string
+            enum: [unit_price_asc, unit_price_desc, published_at_desc, deadline_asc]
+            default: unit_price_asc
+        - $ref: '#/components/parameters/cursor'
+        - $ref: '#/components/parameters/limit'
+      responses:
+        '200':
+          description: Página del tablón.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Publication'
+                  meta:
+                    $ref: '#/components/schemas/Meta'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/Maintenance' }
+
+  /contracts/publications:
+    post:
+      operationId: createPublication
+      tags: [contracts, board]
+      summary: Publicar en el tablón (o negociar en privado)
+      description: |
+        Crea una publicación con su **garantía propia bloqueada íntegramente** en el
+        mismo acto (ADR-014):
+
+        - `sell`: stock congelado en el almacén de origen + garantía monetaria del 10%.
+        - `buy`: 100% del pago retenido en escrow.
+        - `freight` (Fase 2): escrow del flete (cargador) o garantía sobre valor declarado (transportista).
+
+        Solo se publica sobre **stock que ya existe físicamente** (regla base del CCRI;
+        no hay contratos sobre producción futura). Con `channel = private` la publicación
+        solo es visible para `counterparty_account_id`, con las mismas garantías y liquidación.
+        Al publicarse abre su ventana de sorteo (30–60 s reales).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PublicationCreate'
+      responses:
+        '201':
+          description: Publicación creada, garantía bloqueada, ventana de sorteo abierta.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: '#/components/schemas/Publication'
+                  meta:
+                    $ref: '#/components/schemas/Meta'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422':
+          description: 'Garantía insuficiente o requisitos no cumplidos (p. ej. `INSUFFICIENT_COLLATERAL`).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              examples:
+                insufficient-collateral:
+                  summary: Garantía insuficiente
+                  value:
+                    error:
+                      code: INSUFFICIENT_COLLATERAL
+                      message: La garantía disponible no cubre la publicación solicitada
+                      details: { required: "1000", available: "740" }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/Maintenance' }
+
+  /contracts/publications/{publicationId}:
+    parameters:
+      - name: publicationId
+        in: path
+        required: true
+        schema:
+          $ref: '#/components/schemas/PublicationId'
+    get:
+      operationId: getPublication
+      tags: [contracts, board]
+      summary: Detalle de una publicación
+      responses:
+        '200':
+          description: Publicación.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: '#/components/schemas/Publication'
+                  meta:
+                    $ref: '#/components/schemas/Meta'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/Maintenance' }
+    delete:
+      operationId: cancelPublication
+      tags: [contracts, board]
+      summary: Cancelar una publicación no aceptada
+      description: |
+        Cancela la cantidad restante y libera su garantía, respetando el **cooldown
+        anti-parpadeo** (409 `CANCEL_COOLDOWN_ACTIVE` durante los primeros segundos tras
+        publicar). La parte ya convertida en contrato aceptado no es cancelable.
+      responses:
+        '200':
+          description: Publicación cancelada; garantía restante liberada.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: '#/components/schemas/Publication'
+                  meta:
+                    $ref: '#/components/schemas/Meta'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: 'Cancelación dentro del cooldown anti-parpadeo, o publicación ya agotada/cancelada.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              examples:
+                cooldown:
+                  value:
+                    error:
+                      code: CANCEL_COOLDOWN_ACTIVE
+                      message: La publicación no puede cancelarse durante el cooldown anti-parpadeo
+                      details: { cancel_cooldown_until: "2026-07-15T10:00:42Z" }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/Maintenance' }
+
+  /contracts/publications/{publicationId}/acceptances:
+    post:
+      operationId: acceptPublication
+      tags: [contracts, board]
+      summary: Aceptar una publicación (total o parcial)
+      description: |
+        Registra una aceptación en la **ventana de sorteo** (ADR-011): las aceptaciones
+        concurren durante la ventana; al cierre se sortea un orden aleatorio y se sirven
+        hasta agotar la cantidad — **la latencia no otorga ventaja**. Aceptar K de N
+        divide la publicación (contrato por K con garantías proporcionales).
+        La garantía del aceptante se bloquea al aceptar y se libera si no resulta servido.
+        Sobre una publicación madura (`open`), la aceptación abre una micro-ventana (15–30 s).
+      parameters:
+        - name: publicationId
+          in: path
+          required: true
+          schema:
+            $ref: '#/components/schemas/PublicationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AcceptanceCreate'
+      responses:
+        '201':
+          description: Aceptación registrada, pendiente del sorteo (`pending_draw`).
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: '#/components/schemas/Acceptance'
+                  meta:
+                    $ref: '#/components/schemas/Meta'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Publicación agotada, cancelada o expirada (`PUBLICATION_EXHAUSTED`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '422':
+          description: 'Lote menor al mínimo de aceptación (`BELOW_MIN_LOT`) o garantía insuficiente (`INSUFFICIENT_COLLATERAL`).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/Maintenance' }
+
+  /contracts/acceptances/{acceptanceId}:
+    get:
+      operationId: getAcceptance
+      tags: [contracts, board]
+      summary: Resultado de una aceptación
+      description: |
+        Estado de la aceptación tras el sorteo: `served` (con `quantity_served` y el
+        contrato resultante) o `released` (garantía liberada). Solo visible para el aceptante.
+      parameters:
+        - name: acceptanceId
+          in: path
+          required: true
+          schema:
+            $ref: '#/components/schemas/AcceptanceId'
+      responses:
+        '200':
+          description: Aceptación.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: '#/components/schemas/Acceptance'
+                  meta:
+                    $ref: '#/components/schemas/Meta'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/Maintenance' }
+
+  # ───────────────────────── CONTRACTS: CCRI ─────────────────────────
+  /contracts/contracts:
+    get:
+      operationId: listContracts
+      tags: [contracts]
+      summary: Contratos CCRI propios
+      description: Contratos en los que la corporación autenticada es compradora o vendedora.
+      parameters:
+        - name: role
+          in: query
+          schema:
+            type: string
+            enum: [buyer, seller]
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/ContractStatus'
+        - name: product_id
+          in: query
+          schema:
+            $ref: '#/components/schemas/ProductId'
+        - $ref: '#/components/parameters/cursor'
+        - $ref: '#/components/parameters/limit'
+      responses:
+        '200':
+          description: Contratos.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Contract'
+                  meta:
+                    $ref: '#/components/schemas/Meta'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/Maintenance' }
+
+  /contracts/contracts/{contractId}:
+    get:
+      operationId: getContract
+      tags: [contracts]
+      summary: Detalle de un contrato CCRI
+      parameters:
+        - name: contractId
+          in: path
+          required: true
+          schema:
+            $ref: '#/components/schemas/ContractId'
+      responses:
+        '200':
+          description: Contrato con sus cuentas espejo del bloqueo triple.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: '#/components/schemas/Contract'
+                  meta:
+                    $ref: '#/components/schemas/Meta'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/Maintenance' }
+
+  /contracts/contracts/{contractId}/deliveries:
+    get:
+      operationId: listContractDeliveries
+      tags: [contracts]
+      summary: Entregas parciales confirmadas de un contrato
+      description: |
+        Verificación de entrega **acumulativa** (GDD 5.3 paso 5): cada llegada física
+        parcial al nodo de destino, confirmada por el shard, genera una entrega.
+        Un contrato puede cumplirse con varios envíos/vehículos.
+      parameters:
+        - name: contractId
+          in: path
+          required: true
+          schema:
+            $ref: '#/components/schemas/ContractId'
+      responses:
+        '200':
+          description: Entregas confirmadas.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ContractDelivery'
+                  meta:
+                    $ref: '#/components/schemas/Meta'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/Maintenance' }
+
+  /contracts/freight-contracts:
+    get:
+      operationId: listFreightContracts
+      tags: [contracts]
+      summary: Contratos de flete propios (CCRI-Flete, Fase 2)
+      description: |
+        Contratos de servicio de transporte (GDD 5.3.2) en los que la corporación es
+        cargadora o transportista. La mercancía cargada pasa a la cuenta `custody` del
+        contrato — el transportista la lleva físicamente pero el ledger le impide venderla.
+      parameters:
+        - name: role
+          in: query
+          schema:
+            type: string
+            enum: [shipper, carrier]
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/ContractStatus'
+        - $ref: '#/components/parameters/cursor'
+        - $ref: '#/components/parameters/limit'
+      responses:
+        '200':
+          description: Contratos de flete.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/FreightContract'
+                  meta:
+                    $ref: '#/components/schemas/Meta'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/Maintenance' }
+
+  /contracts/freight-contracts/{freightContractId}:
+    get:
+      operationId: getFreightContract
+      tags: [contracts]
+      summary: Detalle de un contrato de flete
+      parameters:
+        - name: freightContractId
+          in: path
+          required: true
+          schema:
+            $ref: '#/components/schemas/FreightContractId'
+      responses:
+        '200':
+          description: Contrato de flete.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: '#/components/schemas/FreightContract'
+                  meta:
+                    $ref: '#/components/schemas/Meta'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/Maintenance' }
+
+  # ───────────────────────── MARKET ─────────────────────────
+  /market/ohlc:
+    get:
+      operationId: getMarketOhlc
+      tags: [market]
+      summary: Velas OHLC por producto y región
+      description: |
+        Historial de precios construido a partir de **contratos efectivamente liquidados**
+        (no de órdenes vivas), agregado por producto y región. Referencia de precio de
+        mercado visible para todos los jugadores. Buckets en sim-time.
+      parameters:
+        - name: product_id
+          in: query
+          required: true
+          schema:
+            $ref: '#/components/schemas/ProductId'
+        - name: region_id
+          in: query
+          schema:
+            $ref: '#/components/schemas/RegionId'
+        - name: bucket_sim_secs
+          in: query
+          description: Tamaño del bucket en segundos de sim-time (p. ej. 3600 = 1 hora de juego).
+          schema:
+            type: integer
+            format: int64
+            minimum: 1
+            default: 3600
+        - name: from_sim
+          in: query
+          schema:
+            $ref: '#/components/schemas/SimTime'
+        - name: to_sim
+          in: query
+          schema:
+            $ref: '#/components/schemas/SimTime'
+        - $ref: '#/components/parameters/limit'
+      responses:
+        '200':
+          description: Serie OHLC.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/OhlcCandle'
+                  meta:
+                    $ref: '#/components/schemas/Meta'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/Maintenance' }
+
+  # ───────────────────────── WORLD: MUNDO ESTÁTICO Y CATÁLOGOS ─────────────────────────
+  /world/regions:
+    get:
+      operationId: listRegions
+      tags: [world]
+      summary: Macro-regiones del mundo
+      description: Regiones (jurisdicción fiscal y unidad de sharding) con sus parámetros fiscales visibles.
+      parameters:
+        - name: biome
+          in: query
+          schema:
+            $ref: '#/components/schemas/Biome'
+        - $ref: '#/components/parameters/cursor'
+        - $ref: '#/components/parameters/limit'
+      responses:
+        '200':
+          description: Regiones.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Region'
+                  meta:
+                    $ref: '#/components/schemas/Meta'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/Maintenance' }
+
+  /world/regions/{regionId}:
+    get:
+      operationId: getRegion
+      tags: [world]
+      summary: Detalle de una región
+      parameters:
+        - name: regionId
+          in: path
+          required: true
+          schema:
+            $ref: '#/components/schemas/RegionId'
+      responses:
+        '200':
+          description: Región.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: '#/components/schemas/Region'
+                  meta:
+                    $ref: '#/components/schemas/Meta'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/Maintenance' }
+
+  /world/products:
+    get:
+      operationId: listProducts
+      tags: [world]
+      summary: Catálogo de productos
+      description: Bienes del juego (materias primas, intermedios, finales, combustible) con sus clamps de precio.
+      parameters:
+        - name: class
+          in: query
+          schema:
+            $ref: '#/components/schemas/ProductClass'
+        - name: is_fuel
+          in: query
+          schema:
+            type: boolean
+        - $ref: '#/components/parameters/cursor'
+        - $ref: '#/components/parameters/limit'
+      responses:
+        '200':
+          description: Productos.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Product'
+                  meta:
+                    $ref: '#/components/schemas/Meta'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/Maintenance' }
+
+  /world/building-types:
+    get:
+      operationId: listBuildingTypes
+      tags: [world]
+      summary: Catálogo de tipos de edificio
+      parameters:
+        - $ref: '#/components/parameters/cursor'
+        - $ref: '#/components/parameters/limit'
+      responses:
+        '200':
+          description: Tipos de edificio con reglas de emplazamiento y curva de niveles.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/BuildingType'
+                  meta:
+                    $ref: '#/components/schemas/Meta'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/Maintenance' }
+
+  /world/recipes:
+    get:
+      operationId: listRecipes
+      tags: [world]
+      summary: Catálogo de recetas
+      description: Recetas fijas en estructura, flexibles en configuración (GDD 6.1). Incluyen insumos/productos y combustible por lote.
+      parameters:
+        - name: building_type_id
+          in: query
+          schema:
+            $ref: '#/components/schemas/BuildingTypeId'
+        - name: product_id
+          in: query
+          description: Filtra recetas que producen o consumen este producto.
+          schema:
+            $ref: '#/components/schemas/ProductId'
+        - $ref: '#/components/parameters/cursor'
+        - $ref: '#/components/parameters/limit'
+      responses:
+        '200':
+          description: Recetas.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Recipe'
+                  meta:
+                    $ref: '#/components/schemas/Meta'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/Maintenance' }
+
+  /world/resource-deposits:
+    get:
+      operationId: listResourceDeposits
+      tags: [world]
+      summary: Yacimientos de recursos naturales
+      description: Minerales estrictamente finitos (se agotan a cero); renovables con tasa de regeneración.
+      parameters:
+        - name: region_id
+          in: query
+          schema:
+            $ref: '#/components/schemas/RegionId'
+        - name: product_id
+          in: query
+          schema:
+            $ref: '#/components/schemas/ProductId'
+        - name: only_available
+          in: query
+          description: Solo yacimientos con cantidad restante > 0.
+          schema:
+            type: boolean
+            default: true
+        - $ref: '#/components/parameters/cursor'
+        - $ref: '#/components/parameters/limit'
+      responses:
+        '200':
+          description: Yacimientos.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ResourceDeposit'
+                  meta:
+                    $ref: '#/components/schemas/Meta'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/Maintenance' }
+
+  # ───────────────────────── WORLD: CIUDADES ─────────────────────────
+  /world/cities:
+    get:
+      operationId: listCities
+      tags: [world]
+      summary: Ciudades del mundo
+      description: |
+        Las ciudades son el **único consumidor final** de la economía. Crecen (o decaen)
+        según el índice de suministro histórico; su crecimiento es un objetivo estratégico
+        observable por todos los jugadores de la región.
+      parameters:
+        - name: region_id
+          in: query
+          schema:
+            $ref: '#/components/schemas/RegionId'
+        - name: min_level
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+        - $ref: '#/components/parameters/cursor'
+        - $ref: '#/components/parameters/limit'
+      responses:
+        '200':
+          description: Ciudades.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/City'
+                  meta:
+                    $ref: '#/components/schemas/Meta'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/Maintenance' }
+
+  /world/cities/{cityId}:
+    get:
+      operationId: getCity
+      tags: [world]
+      summary: Detalle de una ciudad
+      parameters:
+        - name: cityId
+          in: path
+          required: true
+          schema:
+            $ref: '#/components/schemas/CityId'
+      responses:
+        '200':
+          description: Ciudad.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: '#/components/schemas/City'
+                  meta:
+                    $ref: '#/components/schemas/Meta'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/Maintenance' }
+
+  /world/cities/{cityId}/demand:
+    get:
+      operationId: getCityDemand
+      tags: [world]
+      summary: Curva de demanda vigente de una ciudad
+      description: |
+        Demanda dinámica por producto (GDD 5.6):
+        `Demanda_efectiva = D0(producto, nivel) × factor_saturación(oferta_reciente)`.
+        El precio actual está acotado por los clamps del producto. Recalculada
+        periódicamente por el Economy Balancer, que publica las solicitudes de compra
+        de la ciudad por la API estándar del Contract Service.
+      parameters:
+        - name: cityId
+          in: path
+          required: true
+          schema:
+            $ref: '#/components/schemas/CityId'
+        - name: product_id
+          in: query
+          schema:
+            $ref: '#/components/schemas/ProductId'
+      responses:
+        '200':
+          description: Curvas de demanda activas de la ciudad.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/CityDemand'
+                  meta:
+                    $ref: '#/components/schemas/Meta'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/Maintenance' }
+
+  # ───────────────────────── WORLD: SUELO ─────────────────────────
+  /world/concessions:
+    get:
+      operationId: listConcessions
+      tags: [world]
+      summary: Concesiones de suelo propias
+      parameters:
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/ConcessionStatus'
+        - name: region_id
+          in: query
+          schema:
+            $ref: '#/components/schemas/RegionId'
+        - $ref: '#/components/parameters/cursor'
+        - $ref: '#/components/parameters/limit'
+      responses:
+        '200':
+          description: Concesiones de la corporación.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Concession'
+                  meta:
+                    $ref: '#/components/schemas/Meta'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/Maintenance' }
+    post:
+      operationId: createConcession
+      tags: [world]
+      summary: Obtener una concesión de suelo
+      description: |
+        Todo terreno es **concesión renovable del sistema** (plazo de referencia: 90 días
+        de juego) — no existe propiedad perpetua del suelo (GDD 11.1). El canon periódico
+        es un sink estructural; su cuantía deriva del `canon_base` regional ajustado por
+        ubicación. El primer canon se cobra al conceder.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConcessionCreate'
+      responses:
+        '201':
+          description: Concesión otorgada; primer canon asentado en el ledger.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: '#/components/schemas/Concession'
+                  meta:
+                    $ref: '#/components/schemas/Meta'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409':
+          description: La parcela solicitada se solapa con una concesión vigente.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/Maintenance' }
+
+  /world/concessions/{concessionId}:
+    get:
+      operationId: getConcession
+      tags: [world]
+      summary: Detalle de una concesión
+      parameters:
+        - name: concessionId
+          in: path
+          required: true
+          schema:
+            $ref: '#/components/schemas/ConcessionId'
+      responses:
+        '200':
+          description: Concesión.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: '#/components/schemas/Concession'
+                  meta:
+                    $ref: '#/components/schemas/Meta'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/Maintenance' }
+
+  /world/concessions/{concessionId}/renew:
+    post:
+      operationId: renewConcession
+      tags: [world]
+      summary: Renovar una concesión
+      description: Extiende la concesión otro periodo pagando el canon vigente (asiento `canon` del ledger).
+      parameters:
+        - name: concessionId
+          in: path
+          required: true
+          schema:
+            $ref: '#/components/schemas/ConcessionId'
+      responses:
+        '200':
+          description: Concesión renovada.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: '#/components/schemas/Concession'
+                  meta:
+                    $ref: '#/components/schemas/Meta'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: La concesión ya está revertida al sistema.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '422':
+          description: Saldo insuficiente para el canon (`INSUFFICIENT_FUNDS`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/Maintenance' }
+
+  /world/concession-transfers:
+    post:
+      operationId: createConcessionTransfer
+      tags: [world]
+      summary: Traspasar una concesión a otra corporación
+      description: Mercado secundario de traspasos (GDD 11.1); el sistema cobra una tasa (`system_fee`).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConcessionTransferCreate'
+      responses:
+        '201':
+          description: Traspaso ejecutado.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: '#/components/schemas/ConcessionTransfer'
+                  meta:
+                    $ref: '#/components/schemas/Meta'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/Maintenance' }
+
+  # ───────────────────────── WORLD: EDIFICIOS Y PRODUCCIÓN ─────────────────────────
+  /world/buildings:
+    get:
+      operationId: listBuildings
+      tags: [world, production]
+      summary: Edificios propios
+      parameters:
+        - name: region_id
+          in: query
+          schema:
+            $ref: '#/components/schemas/RegionId'
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/BuildingStatus'
+        - name: building_type_id
+          in: query
+          schema:
+            $ref: '#/components/schemas/BuildingTypeId'
+        - $ref: '#/components/parameters/cursor'
+        - $ref: '#/components/parameters/limit'
+      responses:
+        '200':
+          description: Edificios de la corporación.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Building'
+                  meta:
+                    $ref: '#/components/schemas/Meta'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/Maintenance' }
+    post:
+      operationId: createBuilding
+      tags: [world, production]
+      summary: Construir un edificio
+      description: |
+        Inicia la construcción sobre una concesión propia. Validación server-side de
+        emplazamiento (espacio, acceso, recursos) contra las `placement_rules` del tipo
+        y el grafo logístico — 422 `PLACEMENT_INVALID` si no se cumplen. El coste de
+        construcción se asienta en el ledger.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BuildingCreate'
+      responses:
+        '201':
+          description: Edificio en construcción (`under_construction`).
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: '#/components/schemas/Building'
+                  meta:
+                    $ref: '#/components/schemas/Meta'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422':
+          description: 'Requisitos de emplazamiento no cumplidos (`PLACEMENT_INVALID`) o fondos insuficientes (`INSUFFICIENT_FUNDS`).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/Maintenance' }
+
+  /world/buildings/{buildingId}:
+    parameters:
+      - name: buildingId
+        in: path
+        required: true
+        schema:
+          $ref: '#/components/schemas/BuildingId'
+    get:
+      operationId: getBuilding
+      tags: [world, production]
+      summary: Detalle de un edificio
+      responses:
+        '200':
+          description: Edificio.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: '#/components/schemas/Building'
+                  meta:
+                    $ref: '#/components/schemas/Meta'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/Maintenance' }
+    patch:
+      operationId: updateBuilding
+      tags: [world, production]
+      summary: Configurar un edificio
+      description: Cambia la receta activa (con `changeover_seconds` de la receta) o inicia mantenimiento.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BuildingUpdate'
+      responses:
+        '200':
+          description: Edificio actualizado.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: '#/components/schemas/Building'
+                  meta:
+                    $ref: '#/components/schemas/Meta'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422':
+          description: 'Receta no soportada por el tipo de edificio, o `min_city_level` no alcanzado por la ciudad cercana.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/Maintenance' }
+
+  /world/buildings/{buildingId}/upgrade:
+    post:
+      operationId: upgradeBuilding
+      tags: [world, production]
+      summary: Mejorar el nivel de un edificio
+      description: |
+        Progresión **por escala, no por desbloqueo** (GDD 6.3): sube el nivel (líneas
+        paralelas, velocidad, eficiencia) con coste no lineal según la `level_curve`
+        del tipo. El coste se asienta en el ledger.
+      parameters:
+        - name: buildingId
+          in: path
+          required: true
+          schema:
+            $ref: '#/components/schemas/BuildingId'
+      responses:
+        '200':
+          description: Mejora iniciada.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: '#/components/schemas/Building'
+                  meta:
+                    $ref: '#/components/schemas/Meta'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Nivel máximo ya alcanzado.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '422':
+          description: Fondos insuficientes (`INSUFFICIENT_FUNDS`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/Maintenance' }
+
+  /world/buildings/{buildingId}/inventory:
+    get:
+      operationId: getBuildingInventory
+      tags: [world, production]
+      summary: Inventario físico de un edificio
+      description: |
+        Vista **física** del stock por producto. El stock comprometible (libre/reservado)
+        se consulta en las cuentas del ledger (`/ledger/accounts`); la reconciliación
+        física↔contable es periódica (ADR-004).
+      parameters:
+        - name: buildingId
+          in: path
+          required: true
+          schema:
+            $ref: '#/components/schemas/BuildingId'
+      responses:
+        '200':
+          description: Inventario por producto.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/InventoryItem'
+                  meta:
+                    $ref: '#/components/schemas/Meta'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/Maintenance' }
+
+  /world/buildings/{buildingId}/production-batches:
+    parameters:
+      - name: buildingId
+        in: path
+        required: true
+        schema:
+          $ref: '#/components/schemas/BuildingId'
+    get:
+      operationId: listProductionBatches
+      tags: [world, production]
+      summary: Cola de producción de un edificio
+      description: El progreso del lote en curso es analítico (derivado bajo demanda), no por tick.
+      parameters:
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/BatchStatus'
+        - $ref: '#/components/parameters/cursor'
+        - $ref: '#/components/parameters/limit'
+      responses:
+        '200':
+          description: Lotes encolados/en curso.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ProductionBatch'
+                  meta:
+                    $ref: '#/components/schemas/Meta'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/Maintenance' }
+    post:
+      operationId: queueProductionBatches
+      tags: [world, production]
+      summary: Encolar lotes de producción
+      description: |
+        Encola uno o varios lotes de una receta soportada por el edificio. La producción
+        pausa sin combustible (`paused_no_fuel`) o con salarios impagados
+        (`paused_no_workers`) — cascada de insolvencia sin deuda (GDD 5.9).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProductionBatchCreate'
+      responses:
+        '201':
+          description: Lotes encolados.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: '#/components/schemas/ProductionBatch'
+                  meta:
+                    $ref: '#/components/schemas/Meta'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422':
+          description: 'Insumos insuficientes, receta no soportada, o edificio no operativo.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/Maintenance' }
+
+  /world/production-batches/{batchId}:
+    delete:
+      operationId: cancelProductionBatch
+      tags: [world, production]
+      summary: Cancelar un lote encolado
+      description: Cancela los lotes aún no producidos de la orden. Lo ya producido queda asentado.
+      parameters:
+        - name: batchId
+          in: path
+          required: true
+          schema:
+            $ref: '#/components/schemas/BatchId'
+      responses:
+        '200':
+          description: Orden cancelada.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: '#/components/schemas/ProductionBatch'
+                  meta:
+                    $ref: '#/components/schemas/Meta'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: La orden ya está completada o cancelada.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/Maintenance' }
+
+  # ───────────────────────── WORLD: FLOTA Y CARGAMENTOS ─────────────────────────
+  /world/vehicle-types:
+    get:
+      operationId: listVehicleTypes
+      tags: [world, fleet]
+      summary: Catálogo de tipos de vehículo
+      parameters:
+        - name: mode
+          in: query
+          schema:
+            $ref: '#/components/schemas/LinkMode'
+        - $ref: '#/components/parameters/cursor'
+        - $ref: '#/components/parameters/limit'
+      responses:
+        '200':
+          description: Tipos de vehículo (camión/tren/barco; el aéreo es expansión futura).
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/VehicleType'
+                  meta:
+                    $ref: '#/components/schemas/Meta'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/Maintenance' }
+
+  /world/vehicles:
+    get:
+      operationId: listVehicles
+      tags: [world, fleet]
+      summary: Flota propia
+      description: Paneles agregados de flota; la posición de vehículos en tránsito se deriva analíticamente al observarla.
+      parameters:
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/VehicleStatus'
+        - name: route_id
+          in: query
+          schema:
+            $ref: '#/components/schemas/RouteId'
+        - $ref: '#/components/parameters/cursor'
+        - $ref: '#/components/parameters/limit'
+      responses:
+        '200':
+          description: Vehículos de la corporación.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Vehicle'
+                  meta:
+                    $ref: '#/components/schemas/Meta'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/Maintenance' }
+    post:
+      operationId: purchaseVehicle
+      tags: [world, fleet]
+      summary: Comprar un vehículo
+      description: Compra a precio de catálogo con entrega en un nodo propio o terminal accesible. El mercado secundario entre jugadores usa el CCRI estándar.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VehiclePurchase'
+      responses:
+        '201':
+          description: Vehículo adquirido (`idle` en el nodo indicado).
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: '#/components/schemas/Vehicle'
+                  meta:
+                    $ref: '#/components/schemas/Meta'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422':
+          description: Fondos insuficientes (`INSUFFICIENT_FUNDS`) o nodo de entrega incompatible con el modo del vehículo.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/Maintenance' }
+
+  /world/vehicles/{vehicleId}:
+    parameters:
+      - name: vehicleId
+        in: path
+        required: true
+        schema:
+          $ref: '#/components/schemas/VehicleId'
+    get:
+      operationId: getVehicle
+      tags: [world, fleet]
+      summary: Detalle de un vehículo
+      description: Incluye la posición derivada analíticamente en el momento de la consulta.
+      responses:
+        '200':
+          description: Vehículo.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: '#/components/schemas/Vehicle'
+                  meta:
+                    $ref: '#/components/schemas/Meta'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/Maintenance' }
+    patch:
+      operationId: updateVehicle
+      tags: [world, fleet]
+      summary: Comandar un vehículo
+      description: |
+        Asigna/retira una ruta o programa mantenimiento. Un vehículo `sealed`
+        (SELLADO durante un handoff entre shards) es visible pero **no comandable**:
+        responde 403 `VEHICLE_SEALED` (solo aplica tras la extracción multi-proceso).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VehicleUpdate'
+      responses:
+        '200':
+          description: Vehículo actualizado.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: '#/components/schemas/Vehicle'
+                  meta:
+                    $ref: '#/components/schemas/Meta'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: 'El vehículo pertenece a otra corporación, o está SELLADO durante un handoff (`VEHICLE_SEALED`).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/Maintenance' }
+
+  /world/shipments:
+    get:
+      operationId: listShipments
+      tags: [world, fleet]
+      summary: Cargamentos propios
+      description: |
+        Cargamentos etiquetados por contrato: el stock reservado viaja sin dejar de estar
+        reservado. **Nada se teletransporta, tampoco en los fallos** — el stock de un
+        contrato fallido se libera en su ubicación física actual (`released_in_situ`).
+      parameters:
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/ShipmentStatus'
+        - name: contract_id
+          in: query
+          schema:
+            $ref: '#/components/schemas/ContractId'
+        - name: vehicle_id
+          in: query
+          schema:
+            $ref: '#/components/schemas/VehicleId'
+        - $ref: '#/components/parameters/cursor'
+        - $ref: '#/components/parameters/limit'
+      responses:
+        '200':
+          description: Cargamentos.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Shipment'
+                  meta:
+                    $ref: '#/components/schemas/Meta'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/Maintenance' }
+
+  /world/shipments/{shipmentId}:
+    get:
+      operationId: getShipment
+      tags: [world, fleet]
+      summary: Detalle de un cargamento
+      parameters:
+        - name: shipmentId
+          in: path
+          required: true
+          schema:
+            $ref: '#/components/schemas/ShipmentId'
+      responses:
+        '200':
+          description: Cargamento.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: '#/components/schemas/Shipment'
+                  meta:
+                    $ref: '#/components/schemas/Meta'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/Maintenance' }
+
+  # ───────────────────────── WORLD: TERMINALES (Fase 2) ─────────────────────────
+  /world/terminals/{terminalId}:
+    get:
+      operationId: getTerminal
+      tags: [world]
+      summary: Detalle de una terminal
+      description: Las terminales tienen dueño y cola de transbordo; el gameplay de "infraestructura como servicio" vive en los nodos.
+      parameters:
+        - name: terminalId
+          in: path
+          required: true
+          schema:
+            $ref: '#/components/schemas/TerminalId'
+      responses:
+        '200':
+          description: Terminal.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: '#/components/schemas/Terminal'
+                  meta:
+                    $ref: '#/components/schemas/Meta'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/Maintenance' }
+
+  /world/terminals/{terminalId}/slots:
+    get:
+      operationId: listTerminalSlots
+      tags: [world]
+      summary: Slots de prioridad de una terminal (Fase 2)
+      parameters:
+        - name: terminalId
+          in: path
+          required: true
+          schema:
+            $ref: '#/components/schemas/TerminalId'
+        - name: only_available
+          in: query
+          description: Solo slots sin titular vigente.
+          schema:
+            type: boolean
+            default: false
+      responses:
+        '200':
+          description: Slots de prioridad de atraque/transbordo en venta o vigentes.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/TerminalSlot'
+                  meta:
+                    $ref: '#/components/schemas/Meta'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/Maintenance' }
+
+  /world/terminal-slots/{slotId}/purchase:
+    post:
+      operationId: purchaseTerminalSlot
+      tags: [world]
+      summary: Comprar un slot de prioridad (Fase 2)
+      description: Adquiere el slot al precio fijado por el dueño de la terminal; el pago se asienta en el ledger.
+      parameters:
+        - name: slotId
+          in: path
+          required: true
+          schema:
+            $ref: '#/components/schemas/SlotId'
+      responses:
+        '200':
+          description: Slot adquirido.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: '#/components/schemas/TerminalSlot'
+                  meta:
+                    $ref: '#/components/schemas/Meta'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: El slot ya tiene titular vigente.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '422':
+          description: Fondos insuficientes (`INSUFFICIENT_FUNDS`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/Maintenance' }
+
+  # ───────────────────────── LOGISTICS ─────────────────────────
+  /logistics/network/nodes:
+    get:
+      operationId: listNetworkNodes
+      tags: [logistics]
+      summary: Nodos del grafo logístico
+      parameters:
+        - name: region_id
+          in: query
+          schema:
+            $ref: '#/components/schemas/RegionId'
+        - name: kind
+          in: query
+          schema:
+            $ref: '#/components/schemas/NodeKind'
+        - $ref: '#/components/parameters/cursor'
+        - $ref: '#/components/parameters/limit'
+      responses:
+        '200':
+          description: Nodos.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/NetworkNode'
+                  meta:
+                    $ref: '#/components/schemas/Meta'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/Maintenance' }
+
+  /logistics/network/links:
+    get:
+      operationId: listNetworkLinks
+      tags: [logistics]
+      summary: Enlaces del grafo logístico
+      description: |
+        Enlaces de **uso común** (FIFO + congestión física; sin reservas exclusivas de
+        vía). Incluyen la congestión suavizada (EMA) por segmento que publican los shards
+        — la señal que consume el pathfinding.
+      parameters:
+        - name: region_id
+          in: query
+          description: Región de alguno de los segmentos del enlace.
+          schema:
+            $ref: '#/components/schemas/RegionId'
+        - name: mode
+          in: query
+          schema:
+            $ref: '#/components/schemas/LinkMode'
+        - name: from_node_id
+          in: query
+          schema:
+            $ref: '#/components/schemas/NodeId'
+        - $ref: '#/components/parameters/cursor'
+        - $ref: '#/components/parameters/limit'
+      responses:
+        '200':
+          description: Enlaces con sus segmentos y congestión EMA.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/NetworkLink'
+                  meta:
+                    $ref: '#/components/schemas/Meta'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/Maintenance' }
+
+  /logistics/route-plans:
+    post:
+      operationId: createRoutePlan
+      tags: [logistics]
+      summary: Calcular una ruta óptima (asistente)
+      description: |
+        Pathfinding **jerárquico** (HPA*-style) sobre la congestión suavizada (EMA)
+        publicada por los shards. Las ETAs devueltas son **estimaciones informativas,
+        no garantías**: el riesgo de que la congestión real supere la prevista lo asume
+        quien pacta el plazo. Operación de solo cálculo — no persiste nada.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RoutePlanRequest'
+      responses:
+        '200':
+          description: Plan de ruta sugerido con ETA en sim-time.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: '#/components/schemas/RoutePlan'
+                  meta:
+                    $ref: '#/components/schemas/Meta'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422':
+          description: No existe ruta ejecutable entre los nodos con los modos indicados (`NO_ROUTE_FOUND`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/Maintenance' }
+
+  /logistics/routes:
+    get:
+      operationId: listRoutes
+      tags: [logistics]
+      summary: Rutas propias
+      parameters:
+        - name: kind
+          in: query
+          schema:
+            $ref: '#/components/schemas/RouteKind'
+        - name: active
+          in: query
+          schema:
+            type: boolean
+        - $ref: '#/components/parameters/cursor'
+        - $ref: '#/components/parameters/limit'
+      responses:
+        '200':
+          description: Rutas definidas por la corporación.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Route'
+                  meta:
+                    $ref: '#/components/schemas/Meta'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/Maintenance' }
+    post:
+      operationId: createRoute
+      tags: [logistics]
+      summary: Crear una ruta
+      description: Define una línea regular fija o un servicio bajo demanda como secuencia de enlaces (potencialmente multimodal, con transbordos en terminales).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RouteCreate'
+      responses:
+        '201':
+          description: Ruta creada.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: '#/components/schemas/Route'
+                  meta:
+                    $ref: '#/components/schemas/Meta'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422':
+          description: La secuencia de enlaces no es contigua o mezcla modos sin terminal intermodal.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/Maintenance' }
+
+  /logistics/routes/{routeId}:
+    parameters:
+      - name: routeId
+        in: path
+        required: true
+        schema:
+          $ref: '#/components/schemas/RouteId'
+    get:
+      operationId: getRoute
+      tags: [logistics]
+      summary: Detalle de una ruta
+      responses:
+        '200':
+          description: Ruta con sus tramos.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: '#/components/schemas/Route'
+                  meta:
+                    $ref: '#/components/schemas/Meta'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/Maintenance' }
+    patch:
+      operationId: updateRoute
+      tags: [logistics]
+      summary: Modificar una ruta
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RouteUpdate'
+      responses:
+        '200':
+          description: Ruta actualizada.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: '#/components/schemas/Route'
+                  meta:
+                    $ref: '#/components/schemas/Meta'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/Maintenance' }
+    delete:
+      operationId: deleteRoute
+      tags: [logistics]
+      summary: Eliminar una ruta
+      description: Los vehículos asignados quedan sin ruta (`idle` al completar su tramo actual).
+      responses:
+        '204':
+          description: Ruta eliminada.
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/Maintenance' }
+
+# ═════════════════════════════ COMPONENTS ═════════════════════════════
+components:
+  securitySchemes:
+    sessionToken:
+      type: http
+      scheme: bearer
+      description: |
+        Token de sesión emitido por `POST /auth/sessions`. El servidor solo almacena su
+        hash. Humanos y bots usan el mismo esquema (credenciales por cuenta); los bots
+        acceden por un camino de red interno multiplexado con la misma superficie de API.
+
+  parameters:
+    cursor:
+      name: cursor
+      in: query
+      description: Cursor opaco de paginación devuelto en `meta.next_cursor`.
+      schema:
+        type: string
+    limit:
+      name: limit
+      in: query
+      description: Tamaño máximo de página.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 200
+        default: 50
+
+  responses:
+    BadRequest:
+      description: Comando malformado o unidades inválidas.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    Unauthorized:
+      description: Sesión ausente o expirada.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    Forbidden:
+      description: Comandar recursos de otra corporación (autorización por propiedad), o vehículo SELLADO durante handoff.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    NotFound:
+      description: Entidad inexistente (ULID no resuelto).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    Conflict:
+      description: Conflicto de estado (aceptación sobre publicación agotada, cooldown, stock ya reservado).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    ValidationError:
+      description: Error de validación de dominio (422).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    TooManyRequests:
+      description: Rate limit excedido — **idéntico para humanos y bots** (decisión de balance, no solo de protección).
+      headers:
+        Retry-After:
+          description: Segundos hasta poder reintentar.
+          schema:
+            type: integer
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    InternalError:
+      description: Error inesperado. Nunca deja garantías a medio bloquear — toda operación sobre dinero/stock es atómica en el ledger (todo-o-nada).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    Maintenance:
+      description: Ventana de mantenimiento diaria (sim-time congelado de forma coordinada).
+      headers:
+        Retry-After:
+          description: Segundos estimados hasta el fin de la ventana.
+          schema:
+            type: integer
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          examples:
+            maintenance:
+              value:
+                error:
+                  code: MAINTENANCE_WINDOW
+                  message: El mundo está en su ventana de mantenimiento diaria; el sim-time está congelado
+                  details: { retry_after_seconds: 900 }
+
+  schemas:
+    # ── Tipos primitivos del dominio ──
+    MoneyAmount:
+      type: string
+      pattern: '^[0-9]+$'
+      description: Importe monetario en unidades menores (entero/punto fijo serializado como string — nunca floats; invariante del ledger).
+      examples: ["125000"]
+    StockQty:
+      type: string
+      pattern: '^[0-9]+$'
+      description: Cantidad de stock en la unidad mínima del producto (entero serializado como string — nunca floats).
+      examples: ["500"]
+    SimTime:
+      type: integer
+      format: int64
+      minimum: 0
+      description: Segundos de sim-time desde el génesis del mundo (ratio 24× — 1 día de juego = 1 hora real). Todo plazo de dominio se expresa en sim-time.
+      examples: [31104000]
+    BasisPoints:
+      type: integer
+      minimum: 0
+      maximum: 10000
+      description: Puntos básicos (0–10000 = 0%–100%).
+
+    # ── Identificadores ULID prefijados ──
+    AccountId:
+      type: string
+      pattern: '^acc_[0-9A-HJKMNP-TV-Z]{26}$'
+      description: ULID de corporación (`acc_`).
+      examples: [acc_01J9ZKQ8W2N4R7VZC3E5G6H8XY]
+    SessionId:
+      type: string
+      pattern: '^ses_[0-9A-HJKMNP-TV-Z]{26}$'
+      description: ULID de sesión (`ses_`).
+    RegionId:
+      type: string
+      pattern: '^reg_[0-9A-HJKMNP-TV-Z]{26}$'
+      description: ULID de región (`reg_`).
+    ProductId:
+      type: string
+      pattern: '^prd_[0-9A-HJKMNP-TV-Z]{26}$'
+      description: ULID de producto (`prd_`).
+    BuildingTypeId:
+      type: string
+      pattern: '^btp_[0-9A-HJKMNP-TV-Z]{26}$'
+      description: ULID de tipo de edificio (`btp_`).
+    RecipeId:
+      type: string
+      pattern: '^rcp_[0-9A-HJKMNP-TV-Z]{26}$'
+      description: ULID de receta (`rcp_`).
+    DepositId:
+      type: string
+      pattern: '^dep_[0-9A-HJKMNP-TV-Z]{26}$'
+      description: ULID de yacimiento (`dep_`).
+    CityId:
+      type: string
+      pattern: '^cty_[0-9A-HJKMNP-TV-Z]{26}$'
+      description: ULID de ciudad (`cty_`).
+    ConcessionId:
+      type: string
+      pattern: '^cnc_[0-9A-HJKMNP-TV-Z]{26}$'
+      description: ULID de concesión de suelo (`cnc_`).
+    ConcessionTransferId:
+      type: string
+      pattern: '^ctf_[0-9A-HJKMNP-TV-Z]{26}$'
+      description: ULID de traspaso de concesión (`ctf_`).
+    BuildingId:
+      type: string
+      pattern: '^bld_[0-9A-HJKMNP-TV-Z]{26}$'
+      description: ULID de edificio (`bld_`).
+    BatchId:
+      type: string
+      pattern: '^bch_[0-9A-HJKMNP-TV-Z]{26}$'
+      description: ULID de orden de producción (`bch_`).
+    NodeId:
+      type: string
+      pattern: '^nod_[0-9A-HJKMNP-TV-Z]{26}$'
+      description: ULID de nodo del grafo logístico (`nod_`).
+    LinkId:
+      type: string
+      pattern: '^lnk_[0-9A-HJKMNP-TV-Z]{26}$'
+      description: ULID de enlace (`lnk_`).
+    SegmentId:
+      type: string
+      pattern: '^seg_[0-9A-HJKMNP-TV-Z]{26}$'
+      description: ULID de segmento de enlace (`seg_`).
+    TerminalId:
+      type: string
+      pattern: '^trm_[0-9A-HJKMNP-TV-Z]{26}$'
+      description: ULID de terminal (`trm_`).
+    SlotId:
+      type: string
+      pattern: '^slt_[0-9A-HJKMNP-TV-Z]{26}$'
+      description: ULID de slot de prioridad (`slt_`).
+    VehicleTypeId:
+      type: string
+      pattern: '^vtp_[0-9A-HJKMNP-TV-Z]{26}$'
+      description: ULID de tipo de vehículo (`vtp_`).
+    RouteId:
+      type: string
+      pattern: '^rte_[0-9A-HJKMNP-TV-Z]{26}$'
+      description: ULID de ruta (`rte_`).
+    VehicleId:
+      type: string
+      pattern: '^veh_[0-9A-HJKMNP-TV-Z]{26}$'
+      description: ULID de vehículo (`veh_`).
+    ShipmentId:
+      type: string
+      pattern: '^crg_[0-9A-HJKMNP-TV-Z]{26}$'
+      description: ULID de cargamento (`crg_`).
+    LedgerAccountId:
+      type: string
+      pattern: '^lac_[0-9A-HJKMNP-TV-Z]{26}$'
+      description: ULID de cuenta del ledger (`lac_`).
+    LedgerEntryId:
+      type: string
+      pattern: '^len_[0-9A-HJKMNP-TV-Z]{26}$'
+      description: ULID de partida del ledger (`len_`).
+    LedgerTransactionId:
+      type: string
+      pattern: '^ltx_[0-9A-HJKMNP-TV-Z]{26}$'
+      description: ULID de asiento del ledger (`ltx_`).
+    PublicationId:
+      type: string
+      pattern: '^pub_[0-9A-HJKMNP-TV-Z]{26}$'
+      description: ULID de publicación del tablón (`pub_`).
+    AcceptanceId:
+      type: string
+      pattern: '^apt_[0-9A-HJKMNP-TV-Z]{26}$'
+      description: ULID de aceptación (`apt_`).
+    ContractId:
+      type: string
+      pattern: '^ctr_[0-9A-HJKMNP-TV-Z]{26}$'
+      description: ULID de contrato CCRI (`ctr_`).
+    DeliveryId:
+      type: string
+      pattern: '^dlv_[0-9A-HJKMNP-TV-Z]{26}$'
+      description: ULID de entrega confirmada (`dlv_`).
+    FreightContractId:
+      type: string
+      pattern: '^fct_[0-9A-HJKMNP-TV-Z]{26}$'
+      description: ULID de contrato de flete (`fct_`).
+
+    # ── Enums de dominio ──
+    AccountKind:
+      type: string
+      enum: [human, bot, city, system]
+      description: Tipo de actor. El motor no distingue el origen de un comando.
+    AccountStatus:
+      type: string
+      enum: [active, suspended, retired]
+    BotArchetype:
+      type: string
+      enum: [primary_producer, industrial_transformer, arbitrageur, freighter]
+    Biome:
+      type: string
+      enum: [plains, forest, desert, mountain, ocean, coast]
+    ProductClass:
+      type: string
+      enum: [basic, luxury]
+      description: '`basic`: demanda urbana inelástica; `luxury`: elástica y sensible a saturación (dos clases, no un parámetro por producto).'
+    ConcessionStatus:
+      type: string
+      enum: [active, delinquent, grace, reverted]
+    BuildingStatus:
+      type: string
+      enum: [under_construction, operational, damaged, in_maintenance, abandoned, seized]
+    BatchStatus:
+      type: string
+      enum: [queued, running, paused_no_fuel, paused_no_workers, completed, cancelled]
+    NodeKind:
+      type: string
+      enum: [mine, factory, warehouse, port, station, distribution_center, junction, city_gate]
+    LinkMode:
+      type: string
+      enum: [road, rail, sea]
+      description: Modo de transporte (el aéreo es expansión futura).
+    RouteKind:
+      type: string
+      enum: [fixed_line, on_demand]
+    VehicleStatus:
+      type: string
+      enum: [idle, loading, in_transit, unloading, broken, in_maintenance, sealed]
+      description: '`broken`: avería = espera + reparación, la carga espera a bordo. `sealed`: SELLADO durante handoff entre shards — visible pero no comandable.'
+    ShipmentStatus:
+      type: string
+      enum: [in_warehouse, in_transit, at_terminal, delivered, released_in_situ]
+    LedgerAccountKind:
+      type: string
+      enum: [cash, escrow, guarantee, stock_free, stock_reserved, custody, sink, emission]
+    PublicationKind:
+      type: string
+      enum: [sell, buy, freight]
+    PublicationStatus:
+      type: string
+      enum: [draw_window, open, micro_window, exhausted, cancelled, expired]
+    AcceptanceStatus:
+      type: string
+      enum: [pending_draw, served, released]
+    ContractStatus:
+      type: string
+      enum: [active, settled, failed]
+    ContractChannel:
+      type: string
+      enum: [board, private]
+      description: Mismo mecanismo de garantías y liquidación; solo cambia el canal de descubrimiento.
+
+    # ── Geometrías (GeoJSON, RFC 7946; SRID 4326) ──
+    GeoPoint:
+      type: object
+      description: Punto GeoJSON (lon, lat).
+      required: [type, coordinates]
+      properties:
+        type:
+          type: string
+          const: Point
+        coordinates:
+          type: array
+          items:
+            type: number
+          minItems: 2
+          maxItems: 2
+      examples:
+        - { type: Point, coordinates: [-3.7038, 40.4168] }
+    GeoLineString:
+      type: object
+      description: Línea GeoJSON.
+      required: [type, coordinates]
+      properties:
+        type:
+          type: string
+          const: LineString
+        coordinates:
+          type: array
+          minItems: 2
+          items:
+            type: array
+            items:
+              type: number
+            minItems: 2
+            maxItems: 2
+    GeoPolygon:
+      type: object
+      description: Polígono GeoJSON (anillo exterior cerrado).
+      required: [type, coordinates]
+      properties:
+        type:
+          type: string
+          const: Polygon
+        coordinates:
+          type: array
+          items:
+            type: array
+            minItems: 4
+            items:
+              type: array
+              items:
+                type: number
+              minItems: 2
+              maxItems: 2
+
+    # ── Envoltorios ──
+    Meta:
+      type: object
+      description: Metadatos comunes a toda respuesta exitosa.
+      required: [sim_time, server_time]
+      properties:
+        sim_time:
+          type: string
+          pattern: '^[0-9]{1,4}-[0-9]{3}-[0-9]{2}:[0-9]{2}$'
+          description: 'Sim-time actual del mundo en formato legible `AÑO-DÍA-HH:MM` (p. ej. año 360 de juego, día 45).'
+          examples: ["360-045-12:30"]
+        sim_time_seconds:
+          $ref: '#/components/schemas/SimTime'
+          description: Sim-time actual en segundos desde el génesis (forma canónica para clientes).
+        server_time:
+          type: string
+          format: date-time
+          description: Wall-clock del servidor (solo informativo — ninguna regla de juego depende de él).
+        next_cursor:
+          type: string
+          description: Cursor de la página siguiente en respuestas paginadas; ausente si no hay más resultados.
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          description: |
+            Código estable de error de dominio. Valores documentados:
+            `INSUFFICIENT_COLLATERAL`, `INSUFFICIENT_FUNDS`, `PUBLICATION_EXHAUSTED`,
+            `CANCEL_COOLDOWN_ACTIVE`, `BELOW_MIN_LOT`, `STOCK_ALREADY_RESERVED`,
+            `PLACEMENT_INVALID`, `NOT_RESOURCE_OWNER`, `VEHICLE_SEALED`,
+            `NO_ROUTE_FOUND`, `MAINTENANCE_WINDOW`, `RATE_LIMITED`,
+            `VALIDATION_ERROR`, `NOT_FOUND`, `UNAUTHORIZED`, `INTERNAL`.
+          examples: [INSUFFICIENT_COLLATERAL]
+        message:
+          type: string
+          description: Descripción legible del error.
+        details:
+          type: object
+          additionalProperties: true
+          description: Contexto estructurado del error (importes como strings de punto fijo).
+    ErrorEnvelope:
+      type: object
+      required: [error]
+      properties:
+        error:
+          $ref: '#/components/schemas/Error'
+      examples:
+        - error:
+            code: INSUFFICIENT_COLLATERAL
+            message: La garantía disponible no cubre la publicación solicitada
+            details: { required: "1000", available: "740" }
+
+    # ── Auth ──
+    SessionCreateRequest:
+      type: object
+      required: [account_name, secret]
+      properties:
+        account_name:
+          type: string
+          description: Nombre público de la corporación (único, sin distinguir mayúsculas).
+        secret:
+          type: string
+          format: password
+          description: Credencial de la cuenta (humano o bot).
+        client_info:
+          type: object
+          additionalProperties: true
+          description: Información opcional del cliente (versión, plataforma).
+    SessionCreated:
+      type: object
+      required: [session_id, token, expires_at, account]
+      properties:
+        session_id:
+          $ref: '#/components/schemas/SessionId'
+        token:
+          type: string
+          description: Token bearer. Se devuelve una única vez; el servidor solo conserva su hash.
+        expires_at:
+          type: string
+          format: date-time
+        account:
+          $ref: '#/components/schemas/Account'
+    Account:
+      type: object
+      description: Corporación del mundo (jugador humano, bot, ciudad o cuenta de sistema). El saldo no vive aquí — es la cuenta `cash` del ledger.
+      required: [id, kind, name, status, created_at]
+      properties:
+        id:
+          $ref: '#/components/schemas/AccountId'
+        kind:
+          $ref: '#/components/schemas/AccountKind'
+        name:
+          type: string
+        status:
+          $ref: '#/components/schemas/AccountStatus'
+        bot_archetype:
+          $ref: '#/components/schemas/BotArchetype'
+          description: Solo presente cuando `kind = bot`.
+        created_at:
+          type: string
+          format: date-time
+
+    # ── Ledger ──
+    LedgerAccount:
+      type: object
+      description: Cuenta del ledger de doble entrada. Cada cuenta contiene un activo — dinero (`product_id` ausente) o stock de un producto.
+      required: [id, kind, balance, created_at]
+      properties:
+        id:
+          $ref: '#/components/schemas/LedgerAccountId'
+        kind:
+          $ref: '#/components/schemas/LedgerAccountKind'
+        owner_account_id:
+          $ref: '#/components/schemas/AccountId'
+        product_id:
+          $ref: '#/components/schemas/ProductId'
+          description: Presente en cuentas de stock (`stock_free`, `stock_reserved`, `custody`).
+        warehouse_building_id:
+          $ref: '#/components/schemas/BuildingId'
+          description: Almacén de la partida de stock (presente en `stock_free`).
+        reference_id:
+          type: string
+          description: ULID de la publicación/contrato al que sirve de cuenta espejo (auditoría cruzada).
+        balance:
+          type: string
+          pattern: '^-?[0-9]+$'
+          description: Saldo (dinero en unidades menores o stock en unidad mínima). Solo la cuenta `emission` del banco central puede ser negativa.
+        updated_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+    LedgerEntry:
+      type: object
+      description: Partida append-only del ledger — nunca se edita ni borra; toda corrección es un asiento nuevo.
+      required: [id, transaction_id, account_id, amount, transaction_kind, sim_time_at, created_at]
+      properties:
+        id:
+          $ref: '#/components/schemas/LedgerEntryId'
+        transaction_id:
+          $ref: '#/components/schemas/LedgerTransactionId'
+        account_id:
+          $ref: '#/components/schemas/LedgerAccountId'
+        amount:
+          type: string
+          pattern: '^-?[0-9]+$'
+          description: Importe de la partida (positivo o negativo, nunca cero).
+        transaction_kind:
+          type: string
+          enum:
+            - seed_capital
+            - bot_capitalization
+            - bot_retirement
+            - publication_lock
+            - publication_release
+            - acceptance_lock
+            - contract_confirmation
+            - delivery_settlement
+            - custody_load
+            - custody_release
+            - production_output
+            - consumption
+            - wage
+            - maintenance
+            - tax
+            - canon
+            - transfer
+            - auction
+            - reconciliation
+        reference_id:
+          type: string
+          description: ULID de la entidad de dominio que originó el asiento.
+        description:
+          type: string
+        sim_time_at:
+          $ref: '#/components/schemas/SimTime'
+        created_at:
+          type: string
+          format: date-time
+
+    # ── Contratos ──
+    Publication:
+      type: object
+      description: Publicación del tablón. Toda publicación visible es ejecutable al 100% — su garantía íntegra quedó bloqueada al publicar.
+      required:
+        - id
+        - kind
+        - publisher_account_id
+        - channel
+        - quantity_total
+        - quantity_remaining
+        - unit_price
+        - min_lot
+        - delivery_sim_seconds
+        - status
+        - published_at_sim
+      properties:
+        id:
+          $ref: '#/components/schemas/PublicationId'
+        kind:
+          $ref: '#/components/schemas/PublicationKind'
+        publisher_account_id:
+          $ref: '#/components/schemas/AccountId'
+        channel:
+          $ref: '#/components/schemas/ContractChannel'
+        counterparty_account_id:
+          $ref: '#/components/schemas/AccountId'
+          description: Contraparte fija en negociación privada.
+        product_id:
+          $ref: '#/components/schemas/ProductId'
+          description: Requerido en `sell` y `buy`; ausente en `freight`.
+        quantity_total:
+          $ref: '#/components/schemas/StockQty'
+        quantity_remaining:
+          $ref: '#/components/schemas/StockQty'
+        unit_price:
+          $ref: '#/components/schemas/MoneyAmount'
+        min_lot:
+          $ref: '#/components/schemas/StockQty'
+          description: Lote mínimo de aceptación (anti micro-fragmentación de envíos).
+        origin_node_id:
+          $ref: '#/components/schemas/NodeId'
+          description: Requerido en `sell` (almacén con el stock congelado) y en `freight`.
+        destination_node_id:
+          $ref: '#/components/schemas/NodeId'
+          description: Requerido en `buy` y en `freight`.
+        delivery_sim_seconds:
+          $ref: '#/components/schemas/SimTime'
+          description: Plazo de entrega pactado desde la confirmación, siempre en sim-time.
+        status:
+          $ref: '#/components/schemas/PublicationStatus'
+        window_closes_at:
+          type: string
+          format: date-time
+          description: Cierre de la ventana de sorteo o micro-ventana (una de las dos únicas mecánicas en tiempo real).
+        cancel_cooldown_until:
+          type: string
+          format: date-time
+          description: Fin del cooldown anti-parpadeo (la otra mecánica en tiempo real).
+        declared_value:
+          $ref: '#/components/schemas/MoneyAmount'
+          description: Solo `freight` — valor declarado de la carga (base de la garantía del transportista).
+        published_at_sim:
+          $ref: '#/components/schemas/SimTime'
+        created_at:
+          type: string
+          format: date-time
+    PublicationCreate:
+      type: object
+      required: [kind, quantity_total, unit_price, delivery_sim_seconds]
+      properties:
+        kind:
+          $ref: '#/components/schemas/PublicationKind'
+        channel:
+          $ref: '#/components/schemas/ContractChannel'
+          default: board
+        counterparty_account_id:
+          $ref: '#/components/schemas/AccountId'
+          description: Requerido si `channel = private`.
+        product_id:
+          $ref: '#/components/schemas/ProductId'
+          description: Requerido en `sell` y `buy`.
+        quantity_total:
+          $ref: '#/components/schemas/StockQty'
+        unit_price:
+          $ref: '#/components/schemas/MoneyAmount'
+        min_lot:
+          $ref: '#/components/schemas/StockQty'
+          default: "1"
+        origin_node_id:
+          $ref: '#/components/schemas/NodeId'
+          description: Requerido en `sell` (el stock debe existir físicamente en ese almacén) y en `freight`.
+        destination_node_id:
+          $ref: '#/components/schemas/NodeId'
+          description: Requerido en `buy` y en `freight`.
+        delivery_sim_seconds:
+          $ref: '#/components/schemas/SimTime'
+        declared_value:
+          $ref: '#/components/schemas/MoneyAmount'
+          description: Solo `freight`.
+      examples:
+        - kind: sell
+          product_id: prd_01J9ZKQ8W2N4R7VZC3E5G6H8XY
+          quantity_total: "500"
+          unit_price: "120"
+          min_lot: "50"
+          origin_node_id: nod_01J9ZKQ8W2N4R7VZC3E5G6H8XY
+          delivery_sim_seconds: 172800
+    AcceptanceCreate:
+      type: object
+      required: [quantity]
+      properties:
+        quantity:
+          $ref: '#/components/schemas/StockQty'
+          description: Cantidad aceptada (K de N; ≥ `min_lot` de la publicación).
+    Acceptance:
+      type: object
+      required: [id, publication_id, acceptor_account_id, quantity, quantity_served, status, accepted_at]
+      properties:
+        id:
+          $ref: '#/components/schemas/AcceptanceId'
+        publication_id:
+          $ref: '#/components/schemas/PublicationId'
+        acceptor_account_id:
+          $ref: '#/components/schemas/AccountId'
+        quantity:
+          $ref: '#/components/schemas/StockQty'
+        quantity_served:
+          $ref: '#/components/schemas/StockQty'
+          description: Cantidad servida tras el sorteo (0 si no resultó servido).
+        status:
+          $ref: '#/components/schemas/AcceptanceStatus'
+        draw_order:
+          type: integer
+          minimum: 1
+          description: Orden aleatorio asignado en el sorteo (presente tras resolverse).
+        contract_id:
+          $ref: '#/components/schemas/ContractId'
+          description: Contrato resultante si la aceptación fue servida.
+        freight_contract_id:
+          $ref: '#/components/schemas/FreightContractId'
+          description: Contrato de flete resultante si la publicación era `freight`.
+        accepted_at:
+          type: string
+          format: date-time
+        resolved_at:
+          type: string
+          format: date-time
+    Contract:
+      type: object
+      description: CCRI de bienes — la unidad económica atómica del juego. Nace con el bloqueo triple ya asentado (una única transacción ACID).
+      required:
+        - id
+        - channel
+        - buyer_account_id
+        - seller_account_id
+        - product_id
+        - quantity_agreed
+        - quantity_delivered
+        - unit_price
+        - origin_node_id
+        - destination_node_id
+        - deadline_sim
+        - status
+        - confirmed_at_sim
+      properties:
+        id:
+          $ref: '#/components/schemas/ContractId'
+        publication_id:
+          $ref: '#/components/schemas/PublicationId'
+        channel:
+          $ref: '#/components/schemas/ContractChannel'
+        buyer_account_id:
+          $ref: '#/components/schemas/AccountId'
+        seller_account_id:
+          $ref: '#/components/schemas/AccountId'
+        product_id:
+          $ref: '#/components/schemas/ProductId'
+        quantity_agreed:
+          $ref: '#/components/schemas/StockQty'
+        quantity_delivered:
+          $ref: '#/components/schemas/StockQty'
+          description: Acumulado de entregas parciales confirmadas dentro del plazo.
+        unit_price:
+          $ref: '#/components/schemas/MoneyAmount'
+        origin_node_id:
+          $ref: '#/components/schemas/NodeId'
+        destination_node_id:
+          $ref: '#/components/schemas/NodeId'
+        deadline_sim:
+          $ref: '#/components/schemas/SimTime'
+          description: Vencimiento del plazo de entrega, en sim-time.
+        status:
+          $ref: '#/components/schemas/ContractStatus'
+        fill_bp:
+          $ref: '#/components/schemas/BasisPoints'
+          description: Porcentaje entregado a tiempo, en puntos básicos (presente al liquidar; 10000 = fill 100%).
+        stock_reserve_account_id:
+          $ref: '#/components/schemas/LedgerAccountId'
+          description: Cuenta espejo del stock reservado (bloqueo triple, 1/3).
+        seller_guarantee_account_id:
+          $ref: '#/components/schemas/LedgerAccountId'
+          description: Cuenta espejo de la garantía monetaria del vendedor — 10% fijo, sin reputación (2/3).
+        escrow_account_id:
+          $ref: '#/components/schemas/LedgerAccountId'
+          description: Cuenta espejo del escrow del comprador — 100% del pago (3/3).
+        confirmed_at_sim:
+          $ref: '#/components/schemas/SimTime'
+        settled_at_sim:
+          $ref: '#/components/schemas/SimTime'
+        created_at:
+          type: string
+          format: date-time
+    ContractDelivery:
+      type: object
+      required: [id, contract_id, shipment_id, quantity, delivered_at_sim, on_time]
+      properties:
+        id:
+          $ref: '#/components/schemas/DeliveryId'
+        contract_id:
+          $ref: '#/components/schemas/ContractId'
+        shipment_id:
+          $ref: '#/components/schemas/ShipmentId'
+        quantity:
+          $ref: '#/components/schemas/StockQty'
+        delivered_at_sim:
+          $ref: '#/components/schemas/SimTime'
+        on_time:
+          type: boolean
+          description: Si la llegada ocurrió dentro del plazo pactado (solo lo entregado a tiempo se paga en la liquidación pro-rata).
+    FreightContract:
+      type: object
+      description: CCRI-Flete (Fase 2). La mercancía cargada pasa a la cuenta `custody` — el transportista la lleva físicamente pero no puede venderla.
+      required:
+        - id
+        - channel
+        - shipper_account_id
+        - carrier_account_id
+        - origin_node_id
+        - destination_node_id
+        - freight_price
+        - declared_value
+        - deadline_sim
+        - status
+        - confirmed_at_sim
+      properties:
+        id:
+          $ref: '#/components/schemas/FreightContractId'
+        publication_id:
+          $ref: '#/components/schemas/PublicationId'
+        channel:
+          $ref: '#/components/schemas/ContractChannel'
+        shipper_account_id:
+          $ref: '#/components/schemas/AccountId'
+          description: Cargador (dueño de la mercancía; paga el flete a escrow).
+        carrier_account_id:
+          $ref: '#/components/schemas/AccountId'
+          description: Transportista (deposita garantía proporcional al valor declarado).
+        origin_node_id:
+          $ref: '#/components/schemas/NodeId'
+        destination_node_id:
+          $ref: '#/components/schemas/NodeId'
+        freight_price:
+          $ref: '#/components/schemas/MoneyAmount'
+        declared_value:
+          $ref: '#/components/schemas/MoneyAmount'
+        deadline_sim:
+          $ref: '#/components/schemas/SimTime'
+        status:
+          $ref: '#/components/schemas/ContractStatus'
+        fill_bp:
+          $ref: '#/components/schemas/BasisPoints'
+        escrow_account_id:
+          $ref: '#/components/schemas/LedgerAccountId'
+        carrier_guarantee_account_id:
+          $ref: '#/components/schemas/LedgerAccountId'
+        custody_account_id:
+          $ref: '#/components/schemas/LedgerAccountId'
+        confirmed_at_sim:
+          $ref: '#/components/schemas/SimTime'
+        settled_at_sim:
+          $ref: '#/components/schemas/SimTime'
+        created_at:
+          type: string
+          format: date-time
+
+    # ── Market ──
+    OhlcCandle:
+      type: object
+      required: [product_id, region_id, bucket_start_sim, bucket_sim_secs, open_price, high_price, low_price, close_price, volume, contract_count]
+      properties:
+        product_id:
+          $ref: '#/components/schemas/ProductId'
+        region_id:
+          $ref: '#/components/schemas/RegionId'
+        bucket_start_sim:
+          $ref: '#/components/schemas/SimTime'
+        bucket_sim_secs:
+          type: integer
+          format: int64
+          minimum: 1
+        open_price:
+          $ref: '#/components/schemas/MoneyAmount'
+        high_price:
+          $ref: '#/components/schemas/MoneyAmount'
+        low_price:
+          $ref: '#/components/schemas/MoneyAmount'
+        close_price:
+          $ref: '#/components/schemas/MoneyAmount'
+        volume:
+          $ref: '#/components/schemas/StockQty'
+        contract_count:
+          type: integer
+          minimum: 0
+
+    # ── World: estático y catálogos ──
+    Region:
+      type: object
+      description: Macro-región — jurisdicción de juego (impuestos, aduanas, canon) y unidad indivisible de sharding.
+      required: [id, name, grid_x, grid_y, biome, tax_rate_bp, customs_rate_bp, canon_base, opened_at_sim]
+      properties:
+        id:
+          $ref: '#/components/schemas/RegionId'
+        name:
+          type: string
+        grid_x:
+          type: integer
+        grid_y:
+          type: integer
+        bounds:
+          $ref: '#/components/schemas/GeoPolygon'
+        biome:
+          $ref: '#/components/schemas/Biome'
+        tax_rate_bp:
+          $ref: '#/components/schemas/BasisPoints'
+          description: Impuestos regionales (palanca del Economy Balancer dentro de rangos).
+        customs_rate_bp:
+          $ref: '#/components/schemas/BasisPoints'
+          description: Tarifas aduaneras entre regiones.
+        canon_base:
+          $ref: '#/components/schemas/MoneyAmount'
+          description: Base del canon de concesión de suelo (sink estructural).
+        opened_at_sim:
+          $ref: '#/components/schemas/SimTime'
+          description: Momento de apertura de la región (expansiones territoriales).
+    Product:
+      type: object
+      required: [id, code, name, class, unit_volume, base_price, price_floor, price_ceiling, is_fuel]
+      properties:
+        id:
+          $ref: '#/components/schemas/ProductId'
+        code:
+          type: string
+        name:
+          type: string
+        class:
+          $ref: '#/components/schemas/ProductClass'
+        unit_volume:
+          type: integer
+          minimum: 1
+          description: Volumen por unidad (para capacidad de carga).
+        base_price:
+          $ref: '#/components/schemas/MoneyAmount'
+          description: Ancla de precio administrada de las ciudades — la principal palanca de balance del juego, declarada como tal.
+        price_floor:
+          $ref: '#/components/schemas/MoneyAmount'
+          description: Clamp inferior obligatorio de la curva de demanda urbana.
+        price_ceiling:
+          $ref: '#/components/schemas/MoneyAmount'
+          description: Clamp superior obligatorio (sin cotas, una ciudad sin suministro produciría precios infinitos).
+        is_fuel:
+          type: boolean
+          description: Si el producto sirve como combustible (la energía es combustible físico entregado por logística en v1).
+    BuildingType:
+      type: object
+      required: [id, code, name, footprint_cells, max_level, base_storage, build_cost, maintenance_cost]
+      properties:
+        id:
+          $ref: '#/components/schemas/BuildingTypeId'
+        code:
+          type: string
+        name:
+          type: string
+        footprint_cells:
+          type: integer
+          minimum: 1
+        max_level:
+          type: integer
+          minimum: 1
+          maximum: 8
+        base_storage:
+          $ref: '#/components/schemas/StockQty'
+        placement_rules:
+          type: object
+          additionalProperties: true
+          description: Requisitos de emplazamiento (cercanía a recursos, agua, acceso vial) validados server-side.
+        level_curve:
+          type: object
+          additionalProperties: true
+          description: Líneas paralelas / velocidad / eficiencia / coste por nivel (progresión por escala, no por desbloqueo).
+        build_cost:
+          $ref: '#/components/schemas/MoneyAmount'
+        maintenance_cost:
+          $ref: '#/components/schemas/MoneyAmount'
+          description: Sink por día de sim-time; su impago inicia el ciclo de degradación.
+    RecipeIngredient:
+      type: object
+      required: [product_id, role, quantity]
+      properties:
+        product_id:
+          $ref: '#/components/schemas/ProductId'
+        role:
+          type: string
+          enum: [input, output]
+        quantity:
+          $ref: '#/components/schemas/StockQty'
+    Recipe:
+      type: object
+      required: [id, building_type_id, code, name, batch_sim_seconds, fuel_per_batch, workers_required, min_city_level, changeover_seconds, ingredients]
+      properties:
+        id:
+          $ref: '#/components/schemas/RecipeId'
+        building_type_id:
+          $ref: '#/components/schemas/BuildingTypeId'
+        code:
+          type: string
+        name:
+          type: string
+        batch_sim_seconds:
+          $ref: '#/components/schemas/SimTime'
+          description: Duración de un lote, en sim-time.
+        fuel_product_id:
+          $ref: '#/components/schemas/ProductId'
+          description: Combustible consumido por lote (bien de mercado que llega por logística).
+        fuel_per_batch:
+          $ref: '#/components/schemas/StockQty'
+        workers_required:
+          type: integer
+          minimum: 0
+        min_city_level:
+          type: integer
+          minimum: 1
+          description: Nivel mínimo de la ciudad cercana (cualificación laboral de recetas avanzadas).
+        changeover_seconds:
+          $ref: '#/components/schemas/SimTime'
+        ingredients:
+          type: array
+          items:
+            $ref: '#/components/schemas/RecipeIngredient'
+    ResourceDeposit:
+      type: object
+      required: [id, region_id, product_id, location, initial_amount, remaining_amount, renewable, regen_per_sim_day]
+      properties:
+        id:
+          $ref: '#/components/schemas/DepositId'
+        region_id:
+          $ref: '#/components/schemas/RegionId'
+        product_id:
+          $ref: '#/components/schemas/ProductId'
+        location:
+          $ref: '#/components/schemas/GeoPoint'
+        initial_amount:
+          $ref: '#/components/schemas/StockQty'
+        remaining_amount:
+          $ref: '#/components/schemas/StockQty'
+          description: Los minerales son estrictamente finitos y se agotan a cero.
+        renewable:
+          type: boolean
+        regen_per_sim_day:
+          $ref: '#/components/schemas/StockQty'
+
+    # ── World: ciudades ──
+    City:
+      type: object
+      description: Único consumidor final de la economía; compra por el mecanismo CCRI estándar con pago pre-fondeado por el banco central.
+      required: [id, region_id, account_id, name, location, level, population, supply_index, influence_radius_m, base_salary]
+      properties:
+        id:
+          $ref: '#/components/schemas/CityId'
+        region_id:
+          $ref: '#/components/schemas/RegionId'
+        account_id:
+          $ref: '#/components/schemas/AccountId'
+          description: La ciudad como cuenta de mercado (su agente decisor es el Economy Balancer, sin canal privilegiado).
+        name:
+          type: string
+        location:
+          $ref: '#/components/schemas/GeoPoint'
+        level:
+          type: integer
+          minimum: 1
+          description: Sube al superar umbrales del índice de suministro; puede bajar por abandono logístico.
+        population:
+          type: integer
+          format: int64
+          minimum: 0
+        supply_index:
+          type: number
+          minimum: 0
+          description: Índice de suministro histórico (cantidad y variedad sostenidas); decae con el tiempo.
+        influence_radius_m:
+          type: integer
+          minimum: 1
+          description: Radio de influencia logística y laboral; vender a la ciudad exige infraestructura conectada dentro de él.
+        base_salary:
+          $ref: '#/components/schemas/MoneyAmount'
+          description: '`salario_base(nivel_ciudad)` de la fórmula laboral regional.'
+    CityDemand:
+      type: object
+      required: [city_id, product_id, d0_per_sim_day, saturation_factor, current_price, unlocked_at_level, updated_at_sim]
+      properties:
+        city_id:
+          $ref: '#/components/schemas/CityId'
+        product_id:
+          $ref: '#/components/schemas/ProductId'
+        d0_per_sim_day:
+          $ref: '#/components/schemas/StockQty'
+          description: Demanda base diaria `D0(producto, nivel_ciudad)`.
+        saturation_factor:
+          type: number
+          minimum: 0
+          maximum: 10
+          description: Factor de saturación por oferta reciente (EMA con suelo — nunca cero).
+        current_price:
+          $ref: '#/components/schemas/MoneyAmount'
+          description: Precio que la ciudad paga actualmente, acotado por los clamps del producto.
+        unlocked_at_level:
+          type: integer
+          minimum: 1
+          description: Nivel de ciudad que desbloquea esta categoría de consumo.
+        updated_at_sim:
+          $ref: '#/components/schemas/SimTime'
+
+    # ── World: suelo ──
+    Concession:
+      type: object
+      required: [id, region_id, holder_account_id, parcel, canon_amount, period_sim_days, expires_at_sim, status, granted_at_sim]
+      properties:
+        id:
+          $ref: '#/components/schemas/ConcessionId'
+        region_id:
+          $ref: '#/components/schemas/RegionId'
+        holder_account_id:
+          $ref: '#/components/schemas/AccountId'
+        parcel:
+          $ref: '#/components/schemas/GeoPolygon'
+        canon_amount:
+          $ref: '#/components/schemas/MoneyAmount'
+          description: Canon del periodo (sink estructural; ajustable por el Balancer dentro de rangos).
+        period_sim_days:
+          type: integer
+          minimum: 1
+          default: 90
+        expires_at_sim:
+          $ref: '#/components/schemas/SimTime'
+        status:
+          $ref: '#/components/schemas/ConcessionStatus'
+        granted_at_sim:
+          $ref: '#/components/schemas/SimTime'
+    ConcessionCreate:
+      type: object
+      required: [region_id, parcel]
+      properties:
+        region_id:
+          $ref: '#/components/schemas/RegionId'
+        parcel:
+          $ref: '#/components/schemas/GeoPolygon'
+    ConcessionTransferCreate:
+      type: object
+      required: [concession_id, to_account_id, price]
+      properties:
+        concession_id:
+          $ref: '#/components/schemas/ConcessionId'
+        to_account_id:
+          $ref: '#/components/schemas/AccountId'
+        price:
+          $ref: '#/components/schemas/MoneyAmount'
+    ConcessionTransfer:
+      type: object
+      required: [id, concession_id, from_account_id, to_account_id, price, system_fee, occurred_at_sim]
+      properties:
+        id:
+          $ref: '#/components/schemas/ConcessionTransferId'
+        concession_id:
+          $ref: '#/components/schemas/ConcessionId'
+        from_account_id:
+          $ref: '#/components/schemas/AccountId'
+        to_account_id:
+          $ref: '#/components/schemas/AccountId'
+        price:
+          $ref: '#/components/schemas/MoneyAmount'
+        system_fee:
+          $ref: '#/components/schemas/MoneyAmount'
+        occurred_at_sim:
+          $ref: '#/components/schemas/SimTime'
+
+    # ── World: edificios y producción ──
+    Building:
+      type: object
+      required: [id, owner_account_id, region_id, concession_id, building_type_id, footprint, level, status, condition_pct, fuel_stock]
+      properties:
+        id:
+          $ref: '#/components/schemas/BuildingId'
+        owner_account_id:
+          $ref: '#/components/schemas/AccountId'
+        region_id:
+          $ref: '#/components/schemas/RegionId'
+        concession_id:
+          $ref: '#/components/schemas/ConcessionId'
+          description: El edificio pertenece a la corporación; el suelo es siempre concesión del sistema.
+        building_type_id:
+          $ref: '#/components/schemas/BuildingTypeId'
+        footprint:
+          $ref: '#/components/schemas/GeoPolygon'
+        level:
+          type: integer
+          minimum: 1
+        status:
+          $ref: '#/components/schemas/BuildingStatus'
+        active_recipe_id:
+          $ref: '#/components/schemas/RecipeId'
+        condition_pct:
+          type: integer
+          minimum: 0
+          maximum: 100
+          description: Estado de conservación (degrada con el impago de mantenimiento).
+        fuel_stock:
+          $ref: '#/components/schemas/StockQty'
+          description: Almacén de combustible local — sin combustible, la producción pausa.
+        updated_at_sim:
+          $ref: '#/components/schemas/SimTime'
+        created_at:
+          type: string
+          format: date-time
+    BuildingCreate:
+      type: object
+      required: [building_type_id, concession_id, footprint]
+      properties:
+        building_type_id:
+          $ref: '#/components/schemas/BuildingTypeId'
+        concession_id:
+          $ref: '#/components/schemas/ConcessionId'
+          description: Concesión propia sobre la que se asienta.
+        footprint:
+          $ref: '#/components/schemas/GeoPolygon'
+          description: Huella dentro de la parcela; validada contra las `placement_rules` del tipo y el grafo logístico.
+    BuildingUpdate:
+      type: object
+      minProperties: 1
+      properties:
+        active_recipe_id:
+          oneOf:
+            - $ref: '#/components/schemas/RecipeId'
+            - type: 'null'
+          description: Receta activa (aplica el `changeover_seconds` de la receta); `null` para detener la línea.
+        start_maintenance:
+          type: boolean
+          description: Inicia mantenimiento programado (`in_maintenance`).
+    InventoryItem:
+      type: object
+      required: [building_id, product_id, quantity, updated_at_sim]
+      properties:
+        building_id:
+          $ref: '#/components/schemas/BuildingId'
+        product_id:
+          $ref: '#/components/schemas/ProductId'
+        quantity:
+          $ref: '#/components/schemas/StockQty'
+          description: Stock físico total en el edificio (la partición libre/reservado vive en el ledger).
+        updated_at_sim:
+          $ref: '#/components/schemas/SimTime'
+    ProductionBatchCreate:
+      type: object
+      required: [recipe_id, batches_queued]
+      properties:
+        recipe_id:
+          $ref: '#/components/schemas/RecipeId'
+        batches_queued:
+          type: integer
+          minimum: 1
+        queue_position:
+          type: integer
+          minimum: 0
+          description: Posición deseada en la cola (por defecto, al final).
+    ProductionBatch:
+      type: object
+      required: [id, building_id, recipe_id, batches_queued, batches_done, status, queue_position]
+      properties:
+        id:
+          $ref: '#/components/schemas/BatchId'
+        building_id:
+          $ref: '#/components/schemas/BuildingId'
+        recipe_id:
+          $ref: '#/components/schemas/RecipeId'
+        batches_queued:
+          type: integer
+          minimum: 1
+        batches_done:
+          type: integer
+          minimum: 0
+        status:
+          $ref: '#/components/schemas/BatchStatus'
+        queue_position:
+          type: integer
+          minimum: 0
+        started_at_sim:
+          $ref: '#/components/schemas/SimTime'
+        progress_pct:
+          type: number
+          minimum: 0
+          maximum: 100
+          description: Progreso del lote en curso, **derivado analíticamente** en el momento de la consulta (no persiste).
+        eta_sim:
+          $ref: '#/components/schemas/SimTime'
+          description: Sim-time estimado de finalización del lote en curso.
+
+    # ── World: flota y cargamentos ──
+    VehicleType:
+      type: object
+      required: [id, code, name, mode, cargo_capacity, speed_kmh, fuel_product_id, fuel_per_100km, autonomy_km, purchase_price, operating_cost_per_day]
+      properties:
+        id:
+          $ref: '#/components/schemas/VehicleTypeId'
+        code:
+          type: string
+        name:
+          type: string
+        mode:
+          $ref: '#/components/schemas/LinkMode'
+        cargo_capacity:
+          $ref: '#/components/schemas/StockQty'
+        speed_kmh:
+          type: integer
+          minimum: 1
+        fuel_product_id:
+          $ref: '#/components/schemas/ProductId'
+        fuel_per_100km:
+          $ref: '#/components/schemas/StockQty'
+        autonomy_km:
+          type: integer
+          minimum: 1
+        purchase_price:
+          $ref: '#/components/schemas/MoneyAmount'
+        operating_cost_per_day:
+          $ref: '#/components/schemas/MoneyAmount'
+    VehiclePurchase:
+      type: object
+      required: [vehicle_type_id, delivery_node_id]
+      properties:
+        vehicle_type_id:
+          $ref: '#/components/schemas/VehicleTypeId'
+        delivery_node_id:
+          $ref: '#/components/schemas/NodeId'
+          description: Nodo de entrega (compatible con el modo del vehículo).
+    VehicleUpdate:
+      type: object
+      minProperties: 1
+      properties:
+        route_id:
+          oneOf:
+            - $ref: '#/components/schemas/RouteId'
+            - type: 'null'
+          description: Asigna una ruta propia; `null` para retirarla.
+        schedule_maintenance:
+          type: boolean
+          description: Programa mantenimiento (reduce `wear_pct` y la probabilidad de avería).
+    VehiclePosition:
+      type: object
+      description: Posición física derivada analíticamente al observarla — solo los hitos generan escrituras.
+      properties:
+        at_node_id:
+          $ref: '#/components/schemas/NodeId'
+          description: Presente si el vehículo está detenido en un nodo (XOR con `on_segment_id`).
+        on_segment_id:
+          $ref: '#/components/schemas/SegmentId'
+          description: Presente si el vehículo circula por un segmento.
+        segment_progress_pct:
+          type: number
+          minimum: 0
+          maximum: 100
+          description: Avance derivado dentro del segmento en el momento de la consulta.
+        location:
+          $ref: '#/components/schemas/GeoPoint'
+          description: Coordenadas derivadas para renderizado.
+    Vehicle:
+      type: object
+      required: [id, vehicle_type_id, owner_account_id, status, wear_pct, fuel, position]
+      properties:
+        id:
+          $ref: '#/components/schemas/VehicleId'
+        vehicle_type_id:
+          $ref: '#/components/schemas/VehicleTypeId'
+        owner_account_id:
+          $ref: '#/components/schemas/AccountId'
+        status:
+          $ref: '#/components/schemas/VehicleStatus'
+        wear_pct:
+          type: integer
+          minimum: 0
+          maximum: 100
+        fuel:
+          $ref: '#/components/schemas/StockQty'
+        route_id:
+          $ref: '#/components/schemas/RouteId'
+        route_leg_index:
+          type: integer
+          minimum: 0
+        position:
+          $ref: '#/components/schemas/VehiclePosition'
+        repair_until_sim:
+          $ref: '#/components/schemas/SimTime'
+          description: Fin de la reparación si está `broken` (avería = tiempo perdido, no carga perdida).
+        updated_at_sim:
+          $ref: '#/components/schemas/SimTime'
+    Shipment:
+      type: object
+      required: [id, owner_account_id, product_id, quantity, status]
+      properties:
+        id:
+          $ref: '#/components/schemas/ShipmentId'
+        owner_account_id:
+          $ref: '#/components/schemas/AccountId'
+        product_id:
+          $ref: '#/components/schemas/ProductId'
+        quantity:
+          $ref: '#/components/schemas/StockQty'
+        contract_id:
+          $ref: '#/components/schemas/ContractId'
+          description: CCRI cuyo stock reservado transporta (etiquetado; sigue reservado en tránsito).
+        freight_contract_id:
+          $ref: '#/components/schemas/FreightContractId'
+          description: CCRI-Flete bajo cuya custodia viaja (Fase 2).
+        vehicle_id:
+          $ref: '#/components/schemas/VehicleId'
+          description: Vehículo a bordo del cual viaja (XOR con `at_node_id`).
+        at_node_id:
+          $ref: '#/components/schemas/NodeId'
+          description: Nodo donde reposa (almacén o terminal).
+        status:
+          $ref: '#/components/schemas/ShipmentStatus'
+        updated_at_sim:
+          $ref: '#/components/schemas/SimTime'
+    Terminal:
+      type: object
+      required: [id, node_id, owner_account_id, transshipment_per_hour, queue_length]
+      properties:
+        id:
+          $ref: '#/components/schemas/TerminalId'
+        node_id:
+          $ref: '#/components/schemas/NodeId'
+        owner_account_id:
+          $ref: '#/components/schemas/AccountId'
+        transshipment_per_hour:
+          type: integer
+          minimum: 1
+          description: Capacidad de transbordo por hora de sim-time.
+        queue_length:
+          type: integer
+          minimum: 0
+          description: Cola actual de atraque/transbordo.
+        updated_at_sim:
+          $ref: '#/components/schemas/SimTime'
+    TerminalSlot:
+      type: object
+      required: [id, terminal_id, priority_tier, price]
+      properties:
+        id:
+          $ref: '#/components/schemas/SlotId'
+        terminal_id:
+          $ref: '#/components/schemas/TerminalId'
+        priority_tier:
+          type: integer
+          minimum: 1
+          description: Nivel de prioridad de atraque/transbordo (menor = más prioritario).
+        price:
+          $ref: '#/components/schemas/MoneyAmount'
+        holder_account_id:
+          $ref: '#/components/schemas/AccountId'
+          description: Titular vigente; ausente si el slot está en venta.
+        valid_until_sim:
+          $ref: '#/components/schemas/SimTime'
+
+    # ── Logistics ──
+    NetworkNode:
+      type: object
+      required: [id, kind, region_id, location]
+      properties:
+        id:
+          $ref: '#/components/schemas/NodeId'
+        kind:
+          $ref: '#/components/schemas/NodeKind'
+        region_id:
+          $ref: '#/components/schemas/RegionId'
+        building_id:
+          $ref: '#/components/schemas/BuildingId'
+        city_id:
+          $ref: '#/components/schemas/CityId'
+        location:
+          $ref: '#/components/schemas/GeoPoint'
+    LinkSegment:
+      type: object
+      required: [id, region_id, seq, length_m, congestion_ema, updated_at_sim]
+      properties:
+        id:
+          $ref: '#/components/schemas/SegmentId'
+        region_id:
+          $ref: '#/components/schemas/RegionId'
+          description: Shard que simula la congestión de este segmento (los enlaces fronterizos se dividen en el punto de cruce).
+        seq:
+          type: integer
+          minimum: 0
+        length_m:
+          type: integer
+          minimum: 1
+        congestion_ema:
+          type: number
+          exclusiveMinimum: 0
+          description: Congestión suavizada con media móvil exponencial (1 = fluido; mayor = más lento). Es el peso que consume el pathfinding.
+        updated_at_sim:
+          $ref: '#/components/schemas/SimTime'
+    NetworkLink:
+      type: object
+      required: [id, mode, from_node_id, to_node_id, length_m, capacity_per_hour, base_speed_kmh, segments]
+      properties:
+        id:
+          $ref: '#/components/schemas/LinkId'
+        mode:
+          $ref: '#/components/schemas/LinkMode'
+        from_node_id:
+          $ref: '#/components/schemas/NodeId'
+        to_node_id:
+          $ref: '#/components/schemas/NodeId'
+        path:
+          $ref: '#/components/schemas/GeoLineString'
+        length_m:
+          type: integer
+          minimum: 1
+        capacity_per_hour:
+          type: integer
+          minimum: 1
+          description: Capacidad de uso común (FIFO + congestión física; sin reservas exclusivas de vía).
+        base_speed_kmh:
+          type: integer
+          minimum: 1
+        segments:
+          type: array
+          items:
+            $ref: '#/components/schemas/LinkSegment'
+    RoutePlanRequest:
+      type: object
+      required: [origin_node_id, destination_node_id]
+      properties:
+        origin_node_id:
+          $ref: '#/components/schemas/NodeId'
+        destination_node_id:
+          $ref: '#/components/schemas/NodeId'
+        modes:
+          type: array
+          items:
+            $ref: '#/components/schemas/LinkMode'
+          uniqueItems: true
+          description: Modos permitidos (por defecto, todos; rutas multimodales con transbordo en terminales).
+        optimize:
+          type: string
+          enum: [time, cost]
+          default: time
+        cargo_volume:
+          $ref: '#/components/schemas/StockQty'
+          description: Volumen a transportar (informa el coste estimado y la viabilidad por capacidad).
+    RoutePlanLeg:
+      type: object
+      required: [seq, link_id, mode, eta_sim_seconds]
+      properties:
+        seq:
+          type: integer
+          minimum: 0
+        link_id:
+          $ref: '#/components/schemas/LinkId'
+        mode:
+          $ref: '#/components/schemas/LinkMode'
+        eta_sim_seconds:
+          $ref: '#/components/schemas/SimTime'
+          description: Duración estimada del tramo con la congestión EMA vigente.
+        transshipment_terminal_id:
+          $ref: '#/components/schemas/TerminalId'
+          description: Terminal de transbordo al final del tramo, si hay cambio de modo.
+    RoutePlan:
+      type: object
+      description: Plan sugerido por el asistente de ruta óptima. Las ETAs son estimaciones informativas, no garantías.
+      required: [origin_node_id, destination_node_id, legs, total_eta_sim_seconds]
+      properties:
+        origin_node_id:
+          $ref: '#/components/schemas/NodeId'
+        destination_node_id:
+          $ref: '#/components/schemas/NodeId'
+        legs:
+          type: array
+          items:
+            $ref: '#/components/schemas/RoutePlanLeg'
+        total_eta_sim_seconds:
+          $ref: '#/components/schemas/SimTime'
+        estimated_cost:
+          $ref: '#/components/schemas/MoneyAmount'
+          description: Coste logístico estimado (combustible + peajes/aduanas) para el volumen indicado.
+    RouteCreate:
+      type: object
+      required: [name, kind, legs]
+      properties:
+        name:
+          type: string
+        kind:
+          $ref: '#/components/schemas/RouteKind'
+        legs:
+          type: array
+          minItems: 1
+          description: Secuencia contigua de enlaces (multimodal solo con terminal intermodal en el cambio de modo).
+          items:
+            $ref: '#/components/schemas/LinkId'
+    RouteUpdate:
+      type: object
+      minProperties: 1
+      properties:
+        name:
+          type: string
+        active:
+          type: boolean
+        legs:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/LinkId'
+    Route:
+      type: object
+      required: [id, owner_account_id, name, kind, active, legs]
+      properties:
+        id:
+          $ref: '#/components/schemas/RouteId'
+        owner_account_id:
+          $ref: '#/components/schemas/AccountId'
+        name:
+          type: string
+        kind:
+          $ref: '#/components/schemas/RouteKind'
+        active:
+          type: boolean
+        legs:
+          type: array
+          items:
+            type: object
+            required: [leg_index, link_id]
+            properties:
+              leg_index:
+                type: integer
+                minimum: 0
+              link_id:
+                $ref: '#/components/schemas/LinkId'
+        created_at:
+          type: string
+          format: date-time
