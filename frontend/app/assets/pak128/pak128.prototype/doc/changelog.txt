@@ -1,0 +1,251 @@
+---------------------------------------------------------------------------------------------------
+Version: 2.11
+Date: 0000-00-00
+  Changed:
+    - Changed retirement dates of 120b/160/180kph bridges, tunnels, and elevated tracks to match
+      their normal way counterparts
+---------------------------------------------------------------------------------------------------
+Version: 2.10.1
+Date: 2026-04-04
+  Added:
+    - Added horses for early passenger and mail transport
+    - Added Italian early steam engines (by SusieN)
+    - Added Italian battery-electric engines (by SusieN)
+    - Added Italian waggons (by SusieN)
+    - Added new construction sites
+    - Added maintenance for signs and signals
+  Changed:
+    - Roadsigns and signals now cost monthly maintenance (1% of build cost at bits_per_month=18)
+    - Quadrupled level (and therefore capacity/maintenance) of suspension railway stations
+    - Traffic lights now have a yellow phase
+    - Lady Of The Forum building is now a monument
+    - Enabled PMNV Post Trailer (Mack_Truck_Post_Trailer) for Scania R620 Topline.
+    - Updated New York scenario
+  Fixed:
+    - Fixed offsets of small pillars of 40 and 50 kmh elevated road
+    - Fixed swapped increase/decrease water height tools
+    - Fixed the direction of the traffic lights (E, W, NE, SW, SE, NW)
+    - Fixed stray pixels in subway station graphics
+---------------------------------------------------------------------------------------------------
+Version: 2.10
+Date: 2025-01-11
+  Added:
+    - Added new Pioneer style buildings
+    - Added early 30 km/h dirt city road
+    - Added pipette tool with 'q' hotkey
+  Balancing:
+    - Mail now provides a bigger boost to oil rig production
+  Changed:
+    - Various improvements and fixes to the tutorial
+    - New non-pixelated smoke images
+    - Road/rail crossings now have winter images
+    - New winter images for fields
+    - Added climates for industry and residential buildings
+    - Updated tool icons
+  Fixed:
+    - Fixed alignment of early steam engines and cars
+    - Removed stray pixels from subway stations
+---------------------------------------------------------------------------------------------------
+Version: 2.9.1
+Date: 2024-02-07
+  Added:
+    - Added tool to open player ranking window
+    - Added tool to open chat window
+  Changed:
+    - Various improvements to the tutorial
+---------------------------------------------------------------------------------------------------
+Version: 2.9
+Date: 2024-05-04
+  Added:
+    - Added new underground pasenger stations
+    - Added environment sounds from pak64
+    - Added multiple modern high-speed electric trains
+  Balancing:
+    - More consistent running costs for airplanes
+    - More consistent running costs for pax and mail ships
+    - Slightly decreased base price of waste and food
+  Changed:
+    - Reduced appearance chances for buildings without winter images
+    - Added clusters for residential buildings
+    - Improve visibility of monorail signals
+  Fixed:
+    - Fixed inverted choose sign
+    - Fixed introduction year for grain mill
+---------------------------------------------------------------------------------------------------
+Version: 2.8.2
+Date: 2022-01-29
+  Added:
+    - Added tutorial
+    - Added symbol graphics for happy, unhappy, no route, and station type
+  Changed:
+    - Increased road speed of default road/water crossing from 50 to 100
+    - New climates for attraction buildings
+    - Added introduction years for factories
+    - Added more cities for Dutch, UK, and Italian citylists
+    - Added Dutch streetlist
+    - Replaced pause button with pak64 one
+    - Adjusted intro dates of early (before 1900) vehicles to allow for glass/milk to be
+      transported from 1870
+  Fixed:
+    - Fixed Haru 373 carriages not appearing in electrics tab
+    - Fixed smoke offset of factories
+---------------------------------------------------------------------------------------------------
+Version: 2.8.1
+Date: 2018-10-03
+  Fixed:
+    - Fixed missing Citadis 302 Reims back (by gauthier)
+---------------------------------------------------------------------------------------------------
+Version: 2.8
+Date: 2018-09-19
+  Added:
+    - Added priority signals for trains and monorails (by gauthier)
+  Changed:
+    - Changed color of terrain grid to be visible underground (thanks to Uci)
+    - Mapped "$" key to dialog tool 27 (open settings during a game) (by Gauthier)
+---------------------------------------------------------------------------------------------------
+Version: 2.7
+Date: 2017-10-28
+  Added:
+    - Added missing types of signals to monorails (end of choose, one way, long block),
+      reworked presignal and choose signal to match track's signals' style.
+  Balancing:
+    - Reduced power tunnel's maintenance cost to the same as power bridge.
+    - Small car dealers now demand three times less cars than big ones on average.
+  Changed:
+    - Made some trams (EM400, T101, T102, T103, T104, T105, Mhz T-113, T107, T108, T109, T110)
+      capable of coupling in multiple units. Had to remove the third section of T110 for the whole
+      unit to fit in one tile.
+    - Made some monorail vehicles (GTW69, TGW85, TC-7, TC-44, TC-119, TC-1, TC-5p, TC-112) capable
+      of coupling in multiple units. Adapted length and graphics when necessary.
+    - Increased road max speed of level crossings.
+    - Removed fake signals from track-river crossings as they might be confusing.
+    - Removed max heights of bridges (annoying and confusing).
+    - Changed introduction year of rising bollards so they are always available
+      (not very realistic in early era but a private road sign was necessary).
+    - Added smoke to boats.
+  Fixed:
+    - Fixed glitches with river-track/road crossings due to river graphics going out of their
+      tile's area and being compiled as pak160.
+    - Fixed northern and western end of 120b elevated tracks'diagonal views missing an upper beam.
+    - Fixed SE diagonal view of the grass covered 90 kmph tram track not being covered with grass.
+    - Fixed southern and eastern end of metal bridges glitch in some cases.
+    - Fixed some road semis misaligned on SE view (mja-man19332, mja-volvof88, mja-zil130,
+      pmnv-pb1970, pmnv_50_mack, pmnv_mhz_truck_0).
+    - Fixed length of NW and SE views of some road bulk trailers
+      (mja-bulk_trailer_l, mja-bulk_trailer_m, ts_mack_bulk_trailer_0).
+    - Fixed length of diagonal views of Tatra T3 (tram)
+      (only partly fixed, could not shorten more without messing up the graphics)
+    - Fixed length of diagonal views of Mhz T-113 (tram)
+    - Fixed length of diagonal views of Mhz T-235 (tram)
+    - Fixed length of vertical diagonal views of EM400 (tram)
+    - Fixed monorail ways icons with wrong speed limit.
+    - Fixed inconsistent player color on some icons (map, monorail toolbar, list of markers).
+    - Fixed glitch on COM_01_17 (car park building).
+    - Fixed glitch on COM_07_02 (advertising sign).
+    - Fixed night color glitch on townhalls.
+    - Fixed glitch when building on non elevated monorail by removing the stairs under the
+      monorail station
+    - Fixed inconsistent icon and cursor of 120(b) kmph elevated track.
+    - Fixed RU citylist's cities' names not displaying correctly.
+    - Fixed monorail bridge not able to start with steep ramp.
+    - Fixed grid not visible on double slopes (thanks to Vladki).
+    - Fixed airport one way signs looking bad on curves.
+    - Fixed 280, 320 and 400 kmph tracks curve (not diagonal) views having unnecessary
+      ground preparation that looks bad in some cases.
+    - Fixed ABB Eurotram T211 inconsistent diagonal views.
+    - Fixed grey lone pixels on "vertical" diagonal views of many monorail vehicles.
+    - Fixed lone pixels under "horizontal" diagonal views of elevated monorail way.
+---------------------------------------------------------------------------------------------------
+Version: 2.6
+Date: 2016-01-30
+  Added:
+    - Added 60 kmph rail tunnel.
+    - Added 60 kmph elevated track.
+    - Added 80 kmph elevated tracks.
+    - Added 100 kmph elevated track.
+    - Added 120 kmph (modern) elevated track.
+  Fixed:
+    - Fixed unwanted night color pixels on 400 tracks.
+    - Fixed innumerable small glitches in 100 kmph and 120 kmph metal rail bridges.
+    - Fixed glitches on COM 21 (car park building)
+---------------------------------------------------------------------------------------------------
+Version: 2.5.3
+Date: 2015-08-17
+  Added:
+    - Added an end-of-choose-sign for road (quick work-around of existing sign), changed the
+      road block's icon to avoid confusion
+  Balancing:
+    - Suspended monorail topspeeds increased to 150, to match the fastest monorail. This is a
+      temporary fix, new monorail ways will appear in later releases.
+    - Changes on some curiosities (wrong levels, far too high in some cases)
+      * Ski Resort: 600 -> 140
+      * Maya Temple: 288 -> 216
+      * Big French garden: 240 -> 100
+      * Radiant House: 243 -> 180
+      * Roundabout: 2 -> 30
+    - Changes on some curiosities (too high chances, used to spawn everywhere)
+      * Small and big French gardens: 100 -> 40
+      * Saint Geneviève library: 60 -> 30
+      * Central Park: 100 -> 30
+    - Canonball Btx car: overpowered compared to other cars of the pak of the same era: increased
+      weight (31 -> 34) and decreased topspeed (160 -> 140)
+  Changed:
+    - Changes on trains:
+      * Rvg tender (blue one): length 8 -> 7 (to match graphics)
+      * BR-135: graphics were left in a pityful condition (grey thing with inconsistent patches of
+        player color) for a long time, I tried to restore them in player color as well as I could.
+      * BR-238: added missing smoke
+      * EMD FT: added missing smoke
+      * Renfe 310, 319, 333, 340, 301, 311, 314, 316, 318, 319, 334, 10200: added missing smoke
+      * Silver city comet: added missing smoke
+      * VT 105: added missing smoke, capacity increased (+10 passengers on car and rear)
+      * RT 100, 350, 600, 900: adedd missing smoke
+      * RT 120: added missing smoke, capacity increased (+10 passengers per vehicle)
+      * CPH Motorcar: added missing smoke
+      * Class 620, 2000: added missing smoke
+      * Pioneer zephyr: added missing smoke, max speed 180 (unreachable) -> 110
+      * Rvg Tigress: multiple units enabled
+      * Rvg Tigress and Thunder: images moved up of two pixels
+    - Increased speed of some early citycars which used to ruin up bus networks
+    - All station extensions moved to special construction toolbar, less confusing for beginners,
+      lighter toolbar for tracks
+    - Third rails: 80b third rail became 120 third rail, 80 third rail retire date removed
+  Removed:
+    - Removed wrong pillar graphics under north-south and east-west views of 80b track bridge
+      (https://forum.simutrans.com/index.php?topic=14700)
+  Fixed:
+    - Fixed 60kph metal rail bridge error in player color
+    - Fixed graphical error between green and red positions of early train choose signal
+    - Fixed wrong cost of early highway entry sign
+---------------------------------------------------------------------------------------------------
+Version: 2.5.2
+Date: 2014-11-11
+  Added:
+    - Added new headquarters from ny911
+  Changed:
+    - Updated scenarios "produce cars" (was "cars") and "trammadness"
+  Fixed:
+    - Added missing graphics on 70 and 90 kmph road bridges
+    - Added missing graphics on canal bridge
+---------------------------------------------------------------------------------------------------
+Version: 2.5.1
+Date: 2014-10-06
+  Fixed:
+    - (In)Complete upgrade to half heights (there was still some missing graphics)
+    - Fixed some glitches in road/rail bridge/tunnel graphics
+    - Fixed tennis court appearing outside of towns (missed build_time parameter)
+---------------------------------------------------------------------------------------------------
+Version: 2.5.0
+Date: 2014-09-19
+  Added:
+    - (In)Complete upgrade to half heights
+    - Added rail stations by Gauthier
+    - Complete update of catenaries/third rails by Gwalch and Gauthier
+    - Added some of Areus'traffic lights
+  Changed:
+    - Rails and trains lowered of four pixels (ground level)
+  Fixed:
+    - Many bugfixes
+  Notice:
+    - For a changelog for older versions, see devdocs/changelog_old.txt in the pak128 repository.
+      (https://github.com/simutrans/pak128/blob/master/devdocs/changelog_old.txt)

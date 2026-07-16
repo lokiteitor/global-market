@@ -1,0 +1,80 @@
+#-------------------------------------------------------------------------------
+#                  Dat file for Simutrans autobahn signals
+#                   Created by: Fabio Gonella (Fagonella)
+#                                10. Feb 2006
+--------------------------------------------------------------------------------
+
+obj=roadsign
+name=autobahn_classic_entrance
+copyright=Fabio Gonella
+
+intro_year=1930
+retire_year=1980
+
+waytype=road
+min_speed=80
+single_way=1
+#cost in credits, not in cents
+cost=1500
+maintenance=1500
+
+Image[n,e,s,w][0]=p128_sign_road_autobahn.1.<$0>
+cursor=p128_sign_road_autobahn.1.4
+icon=> p128_sign_road_autobahn.1.5
+
+--------------------------------------------------------------------------------
+
+obj=roadsign
+name=autobahn_classic_exit
+copyright=Fabio Gonella
+
+waytype=road
+min_speed=0
+single_way=1
+cost=1500
+maintenance=1500
+
+intro_year=1930
+retire_year=1980
+
+Image[n,e,s,w][0]=p128_sign_road_autobahn.2.<$0>
+cursor=p128_sign_road_autobahn.2.4
+icon=> p128_sign_road_autobahn.2.5
+
+--------------------------------------------------------------------------------
+
+obj=roadsign
+name=autobahn_modern_entrance
+copyright=Fabio Gonella
+
+waytype=road
+min_speed=110
+single_way=1
+cost=2000
+maintenance=2000
+
+intro_year=1980
+
+Image[n,e,s,w][0]=p128_sign_road_autobahn.3.<$0>
+cursor=p128_sign_road_autobahn.3.4
+icon=> p128_sign_road_autobahn.3.5
+
+--------------------------------------------------------------------------------
+
+obj=roadsign
+name=autobahn_modern_exit
+copyright=Fabio Gonella
+
+waytype=road
+min_speed=0
+single_way=1
+cost=2000
+maintenance=2000
+
+intro_year=1980
+
+Image[n,e,s,w][0]=p128_sign_road_autobahn.4.<$0>
+cursor=p128_sign_road_autobahn.4.4
+icon=> p128_sign_road_autobahn.4.5
+
+--------------------------------------------------------------------------------

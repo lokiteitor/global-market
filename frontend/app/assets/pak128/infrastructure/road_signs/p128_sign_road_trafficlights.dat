@@ -1,0 +1,24 @@
+
+#
+# Traffic Lights
+#
+
+--------------------------------------------------------------------------------
+
+obj=roadsign
+name=traffic_light
+copyright=Napik, Umoxfo
+
+waytype=road
+min_speed=0
+single_way=0
+cost=500
+maintenance=500
+
+retire_year=2000
+
+Image[N,S,W,E,NW,SE,SW,NE][0-3]=p128_sign_road_trafficlights.<$1>.<$0>
+Icon=> p128_sign_road_trafficlights.0.8
+Cursor=p128_sign_road_trafficlights.0.9
+
+--------------------------------------------------------------------------------

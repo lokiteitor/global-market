@@ -1,0 +1,9 @@
+obj=building
+name=IND_05_04
+copyright=Raven
+type=ind
+climates=tropic,desert,mediterran,temperate,tundra,rocky
+level=4
+intro_year=1939
+retire_year=1989
+backimage[0][0][0][0][0]=ind_05_04.1.0

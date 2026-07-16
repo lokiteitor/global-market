@@ -1,0 +1,52 @@
+Obj=factory
+name=bakery
+copyright=Patrick
+
+Location=City
+DistributionWeight=1
+
+# needed productivity in tones  : 700 (5 trains / month)
+# size                          : 3x3 = 9
+# average productivity per tile : 39
+
+Productivity=640
+Range=200
+
+Electricity_amount=10
+Electricity_boost=1000
+Mail_demand=20
+Mail_boost=500
+Passenger_demand=20
+Passenger_boost=800
+
+SmokeTile[0]=0,2
+SmokeOffset[0]=4,-57
+#SmokeUplift=0
+
+# total flour input 500
+InputGood[0]=flour
+InputFactor[0]=70
+InputCapacity[0]=5000
+InputSupplier[0]=0
+
+#OutputGood[0]=food
+#OutputCapacity[0]=400
+
+MapColor=194
+Dims=3,3
+
+#Invention of sliced bread. Simutrans is best thing since.
+intro_year=1928
+intro_month=7
+
+BackImage[0][0][0][0][0]=bakery.0.2
+BackImage[0][1][0][0][0]=bakery.0.1
+BackImage[0][2][0][0][0]=bakery.0.0
+BackImage[0][0][1][0][0]=bakery.1.2
+BackImage[0][1][1][0][0]=bakery.1.1
+BackImage[0][2][1][0][0]=bakery.1.0
+BackImage[0][0][2][0][0]=bakery.2.2
+BackImage[0][1][2][0][0]=bakery.2.1
+BackImage[0][2][2][0][0]=bakery.2.0
+
+# EOF

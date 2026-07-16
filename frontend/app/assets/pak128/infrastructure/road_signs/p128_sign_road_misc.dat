@@ -1,0 +1,125 @@
+
+#
+# Road Signs
+#
+
+--------------------------------------------------------------------------------
+
+# no entry sign
+obj=roadsign
+name=NoEntry
+copyright=Napik & Fabio
+
+waytype=road
+min_speed=0
+single_way=1
+cost=500
+maintenance=500
+
+intro_year = 1887
+
+Image[0-3]=p128_sign_road_misc.0.<$0>
+Icon=> p128_sign_road_misc.0.4
+Cursor=p128_sign_road_misc.0.5
+
+--------------------------------------------------------------------------------
+
+# minimum speed 80
+
+obj=roadsign
+copyright=Patrick & Fabio Gonella
+name=Minimum80
+
+waytype=road
+min_speed=80
+single_way=0
+cost=500
+maintenance=500
+
+intro_year = 1930
+
+Image[0-3]=p128_sign_road_misc.1.<$0>
+Icon=> p128_sign_road_misc.1.4
+Cursor=p128_sign_road_misc.1.5
+
+--------------------------------------------------------------------------------
+
+# minimum speed 100
+obj=roadsign
+name=Minimum100
+copyright=Patrick & Fabio Gonella
+
+waytype=road
+min_speed=100
+single_way=0
+cost=500
+maintenance=500
+
+intro_year = 1970
+
+image[0-3]=p128_sign_road_misc.2.<$0>
+Icon=> p128_sign_road_misc.2.4
+Cursor=p128_sign_road_misc.2.5
+
+--------------------------------------------------------------------------------
+
+# road block
+obj=roadsign
+name=RoadClosed
+copyright=Isaac & Fabio Gonella
+
+waytype=road
+min_speed=400
+single_way=0
+cost=1000
+maintenance=1000
+
+intro_year = 1887
+
+image[0-3]=p128_sign_road_misc.3.<$0>
+Icon=> p128_sign_road_misc.3.4
+Cursor=p128_sign_road_misc.3.5
+
+--------------------------------------------------------------------------------
+
+# choose loading bay
+
+obj=roadsign
+name=choose_point
+copyright=Napik
+
+waytype=road
+min_speed=0
+single_way=0
+free_route=1
+cost=1500
+maintenance=1500
+
+intro_year = 1887
+
+Image[N,S,W,E][0]=p128_sign_road_misc.4.<$0>
+Icon=> p128_sign_road_misc.4.4
+Cursor=p128_sign_road_misc.4.5
+
+--------------------------------------------------------------------------------
+
+# end of choose
+
+obj=roadsign
+name=end_of_choose_point
+copyright=Isaac & Gauthier
+
+waytype=road
+min_speed=0
+single_way=0
+end_of_choose=1
+cost=1500
+maintenance=1500
+
+intro_year = 1887
+
+Image[0-3]=p128_sign_road_misc.5.<$0>
+Icon=> p128_sign_road_misc.5.4
+Cursor=p128_sign_road_misc.5.5
+
+--------------------------------------------------------------------------------

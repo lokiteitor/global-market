@@ -1,0 +1,22 @@
+#
+# private sign
+#
+
+--------------------------------------------------------------------------------
+
+obj=roadsign
+name=RisingBollards
+copyright=Fabio Gonella
+
+waytype=road
+is_private=1
+cost=8000
+maintenance=8000
+
+intro_year=1800
+
+image[0-3]=p128_sign_road_bollards.1.<$0>
+Icon=> p128_sign_road_bollards.1.4
+Cursor=p128_sign_road_bollards.1.5
+
+--------------------------------------------------------------------------------
