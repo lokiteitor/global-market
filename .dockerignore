@@ -1,0 +1,18 @@
+# Defensivo: ningún build usa la raíz como contexto hoy (cada componente tiene
+# el suyo), pero si alguien lo hace, que nunca se cuelen el historial ni los
+# artefactos.
+.git
+.claude
+node_modules
+**/node_modules
+**/dist
+**/.nuxt
+**/.output
+**/.nitro
+**/.data
+**/coverage
+backend/engine/engine
+*.log
+.env
+.env.*
+docs

@@ -1,0 +1,34 @@
+# === Node (gateway, bots, frontend) ===
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+
+# === Nuxt (frontend) ===
+.nuxt/
+.output/
+.nitro/
+.data/
+.cache/
+
+# === Go (engine) ===
+# binarios compilados (go build -o); los tests/builds normales no dejan artefactos
+backend/engine/engine
+backend/engine/cmd/engine/engine
+
+# === Entornos y secretos ===
+.env
+.env.*
+!.env.example
+
+# === Runtime local ===
+*.log
+nohup.out
+*.pid
+.claude/*.lock
+.claude/settings.local.json
+
+# === Editores / SO ===
+.vscode/
+.idea/
+.DS_Store

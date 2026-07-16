@@ -3,6 +3,7 @@
 -- Extensiones, esquemas por dominio y dominios de tipos comunes.
 -- Referencia: GDD/SAD v1.2 §17 y Arquitectura §4.1 (una sola instancia de
 -- PostgreSQL, esquemas separados por dominio).
+-- Fuente ejecutable: backend/migrations/0001_init.sql (aplicación manual vía make db-migrate).
 -- =============================================================================
 
 -- Extensiones (misma instalación de PostgreSQL)
@@ -20,11 +21,11 @@ CREATE SCHEMA IF NOT EXISTS outbox;     -- mensajería entre módulos (outbox + 
 -- Dominios de tipos comunes
 -- -----------------------------------------------------------------------------
 
--- Identificador ULID con espacio de nombres por tipo: 'veh_', 'ctr_', 'crg_', ...
--- Únicos globalmente e independientes del esquema donde residan (GDD 17.2).
--- Alfabeto Crockford base32 (sin I, L, O, U).
-CREATE DOMAIN ulid_id AS TEXT
-    CHECK (VALUE ~ '^[a-z]{2,4}_[0-9A-HJKMNP-TV-Z]{26}$');
+-- Identificadores: no se define ningún dominio de identidad. Todas las claves
+-- primarias de entidad son columnas uuid con DEFAULT uuidv7() (función nativa
+-- de PostgreSQL 18): únicas globalmente, ordenables por tiempo e
+-- independientes del esquema donde residan (GDD 17.2). El antiguo dominio
+-- ulid_id (texto con prefijos por tipo) queda eliminado de la especificación.
 
 -- Sim-time: único reloj lógico del dominio (GDD 1.1). Segundos de sim-time
 -- desde el génesis del mundo. Todo plazo de juego se almacena en sim-time;

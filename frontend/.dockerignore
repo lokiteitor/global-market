@@ -1,0 +1,22 @@
+# Artefactos locales (la imagen los reconstruye)
+node_modules
+.nuxt
+.output
+.nitro
+.data
+.cache
+dist
+coverage
+
+# Tests (no forman parte de la imagen)
+tests
+vitest.config.ts
+
+# Runtime local
+*.log
+.env
+.env.*
+
+# Docker
+Dockerfile
+.dockerignore

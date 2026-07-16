@@ -3,7 +3,7 @@ $self: https://play.imperio-industrial.example/api/v1/openapi.yaml
 
 info:
   title: Imperio Industrial — API pública
-  version: 1.0.0
+  version: 1.1.0
   summary: API REST del MMO de simulación económica, industrial y logística "Imperio Industrial".
   description: |
     API pública del servidor autoritativo de **Imperio Industrial** (GDD/SAD v1.2).
@@ -25,8 +25,8 @@ info:
       mecánicas en tiempo real son la ventana de sorteo y el cooldown anti-parpadeo.
     - **Dinero y stock como enteros/punto fijo serializados en strings** — nunca floats
       (invariante del ledger).
-    - **Identificadores ULID con espacio de nombres por tipo** (`veh_...`, `ctr_...`,
-      `crg_...`), únicos globalmente e independientes del esquema donde residan.
+    - **Identificadores UUIDv7 nativos**: únicos globalmente y ordenables temporalmente,
+      generados por PostgreSQL 18 con `uuidv7()`, e independientes del esquema donde residan.
     - **Autorización por propiedad de recursos**: una corporación solo comanda sus
       edificios, vehículos y contratos (403 en caso contrario). Las cuentas de sistema
       (ciudades, banco central) operan por esta misma API sin canal privilegiado.
@@ -355,6 +355,8 @@ paths:
         no hay contratos sobre producción futura). Con `channel = private` la publicación
         solo es visible para `counterparty_account_id`, con las mismas garantías y liquidación.
         Al publicarse abre su ventana de sorteo (30–60 s reales).
+      parameters:
+        - $ref: '#/components/parameters/idempotencyKey'
       requestBody:
         required: true
         content:
@@ -434,6 +436,9 @@ paths:
         Cancela la cantidad restante y libera su garantía, respetando el **cooldown
         anti-parpadeo** (409 `CANCEL_COOLDOWN_ACTIVE` durante los primeros segundos tras
         publicar). La parte ya convertida en contrato aceptado no es cancelable.
+        Las aceptaciones aún `pending_draw` se resuelven como `released`: su colateral
+        (escrow o stock+garantía) vuelve íntegro al aceptante y se emite
+        `acceptance.resolved`.
       responses:
         '200':
           description: Publicación cancelada; garantía restante liberada.
@@ -485,6 +490,7 @@ paths:
           required: true
           schema:
             $ref: '#/components/schemas/PublicationId'
+        - $ref: '#/components/parameters/idempotencyKey'
       requestBody:
         required: true
         content:
@@ -1169,6 +1175,8 @@ paths:
         de juego) — no existe propiedad perpetua del suelo (GDD 11.1). El canon periódico
         es un sink estructural; su cuantía deriva del `canon_base` regional ajustado por
         ubicación. El primer canon se cobra al conceder.
+      parameters:
+        - $ref: '#/components/parameters/idempotencyKey'
       requestBody:
         required: true
         content:
@@ -1244,6 +1252,7 @@ paths:
           required: true
           schema:
             $ref: '#/components/schemas/ConcessionId'
+        - $ref: '#/components/parameters/idempotencyKey'
       responses:
         '200':
           description: Concesión renovada.
@@ -1282,6 +1291,8 @@ paths:
       tags: [world]
       summary: Traspasar una concesión a otra corporación
       description: Mercado secundario de traspasos (GDD 11.1); el sistema cobra una tasa (`system_fee`).
+      parameters:
+        - $ref: '#/components/parameters/idempotencyKey'
       requestBody:
         required: true
         content:
@@ -1360,6 +1371,8 @@ paths:
         emplazamiento (espacio, acceso, recursos) contra las `placement_rules` del tipo
         y el grafo logístico — 422 `PLACEMENT_INVALID` si no se cumplen. El coste de
         construcción se asienta en el ledger.
+      parameters:
+        - $ref: '#/components/parameters/idempotencyKey'
       requestBody:
         required: true
         content:
@@ -1476,6 +1489,7 @@ paths:
           required: true
           schema:
             $ref: '#/components/schemas/BuildingId'
+        - $ref: '#/components/parameters/idempotencyKey'
       responses:
         '200':
           description: Mejora iniciada.
@@ -1593,6 +1607,8 @@ paths:
         Encola uno o varios lotes de una receta soportada por el edificio. La producción
         pausa sin combustible (`paused_no_fuel`) o con salarios impagados
         (`paused_no_workers`) — cascada de insolvencia sin deuda (GDD 5.9).
+      parameters:
+        - $ref: '#/components/parameters/idempotencyKey'
       requestBody:
         required: true
         content:
@@ -1738,6 +1754,8 @@ paths:
       tags: [world, fleet]
       summary: Comprar un vehículo
       description: Compra a precio de catálogo con entrega en un nodo propio o terminal accesible. El mercado secundario entre jugadores usa el CCRI estándar.
+      parameters:
+        - $ref: '#/components/parameters/idempotencyKey'
       requestBody:
         required: true
         content:
@@ -2000,6 +2018,7 @@ paths:
           required: true
           schema:
             $ref: '#/components/schemas/SlotId'
+        - $ref: '#/components/parameters/idempotencyKey'
       responses:
         '200':
           description: Slot adquirido.
@@ -2195,6 +2214,8 @@ paths:
       tags: [logistics]
       summary: Crear una ruta
       description: Define una línea regular fija o un servicio bajo demanda como secuencia de enlaces (potencialmente multimodal, con transbordos en terminales).
+      parameters:
+        - $ref: '#/components/parameters/idempotencyKey'
       requestBody:
         required: true
         content:
@@ -2329,6 +2350,14 @@ components:
         minimum: 1
         maximum: 200
         default: 50
+    idempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: Clave de idempotencia generada por el cliente (UUID). Reintentar un comando con la misma clave no produce doble ejecución.
+      schema:
+        type: string
+        format: uuid
 
   responses:
     BadRequest:
@@ -2350,7 +2379,7 @@ components:
           schema:
             $ref: '#/components/schemas/ErrorEnvelope'
     NotFound:
-      description: Entidad inexistente (ULID no resuelto).
+      description: Entidad inexistente (UUID no resuelto).
       content:
         application/json:
           schema:
@@ -2427,124 +2456,124 @@ components:
       maximum: 10000
       description: Puntos básicos (0–10000 = 0%–100%).
 
-    # ── Identificadores ULID prefijados ──
+    # ── Identificadores UUIDv7 ──
     AccountId:
       type: string
-      pattern: '^acc_[0-9A-HJKMNP-TV-Z]{26}$'
-      description: ULID de corporación (`acc_`).
-      examples: [acc_01J9ZKQ8W2N4R7VZC3E5G6H8XY]
+      format: uuid
+      description: UUIDv7 de corporación.
+      examples: [01920c8f-6a3e-7d4b-9c2a-5e8f1b3d7a90]
     SessionId:
       type: string
-      pattern: '^ses_[0-9A-HJKMNP-TV-Z]{26}$'
-      description: ULID de sesión (`ses_`).
+      format: uuid
+      description: UUIDv7 de sesión.
     RegionId:
       type: string
-      pattern: '^reg_[0-9A-HJKMNP-TV-Z]{26}$'
-      description: ULID de región (`reg_`).
+      format: uuid
+      description: UUIDv7 de región.
     ProductId:
       type: string
-      pattern: '^prd_[0-9A-HJKMNP-TV-Z]{26}$'
-      description: ULID de producto (`prd_`).
+      format: uuid
+      description: UUIDv7 de producto.
     BuildingTypeId:
       type: string
-      pattern: '^btp_[0-9A-HJKMNP-TV-Z]{26}$'
-      description: ULID de tipo de edificio (`btp_`).
+      format: uuid
+      description: UUIDv7 de tipo de edificio.
     RecipeId:
       type: string
-      pattern: '^rcp_[0-9A-HJKMNP-TV-Z]{26}$'
-      description: ULID de receta (`rcp_`).
+      format: uuid
+      description: UUIDv7 de receta.
     DepositId:
       type: string
-      pattern: '^dep_[0-9A-HJKMNP-TV-Z]{26}$'
-      description: ULID de yacimiento (`dep_`).
+      format: uuid
+      description: UUIDv7 de yacimiento.
     CityId:
       type: string
-      pattern: '^cty_[0-9A-HJKMNP-TV-Z]{26}$'
-      description: ULID de ciudad (`cty_`).
+      format: uuid
+      description: UUIDv7 de ciudad.
     ConcessionId:
       type: string
-      pattern: '^cnc_[0-9A-HJKMNP-TV-Z]{26}$'
-      description: ULID de concesión de suelo (`cnc_`).
+      format: uuid
+      description: UUIDv7 de concesión de suelo.
     ConcessionTransferId:
       type: string
-      pattern: '^ctf_[0-9A-HJKMNP-TV-Z]{26}$'
-      description: ULID de traspaso de concesión (`ctf_`).
+      format: uuid
+      description: UUIDv7 de traspaso de concesión.
     BuildingId:
       type: string
-      pattern: '^bld_[0-9A-HJKMNP-TV-Z]{26}$'
-      description: ULID de edificio (`bld_`).
+      format: uuid
+      description: UUIDv7 de edificio.
     BatchId:
       type: string
-      pattern: '^bch_[0-9A-HJKMNP-TV-Z]{26}$'
-      description: ULID de orden de producción (`bch_`).
+      format: uuid
+      description: UUIDv7 de orden de producción.
     NodeId:
       type: string
-      pattern: '^nod_[0-9A-HJKMNP-TV-Z]{26}$'
-      description: ULID de nodo del grafo logístico (`nod_`).
+      format: uuid
+      description: UUIDv7 de nodo del grafo logístico.
     LinkId:
       type: string
-      pattern: '^lnk_[0-9A-HJKMNP-TV-Z]{26}$'
-      description: ULID de enlace (`lnk_`).
+      format: uuid
+      description: UUIDv7 de enlace.
     SegmentId:
       type: string
-      pattern: '^seg_[0-9A-HJKMNP-TV-Z]{26}$'
-      description: ULID de segmento de enlace (`seg_`).
+      format: uuid
+      description: UUIDv7 de segmento de enlace.
     TerminalId:
       type: string
-      pattern: '^trm_[0-9A-HJKMNP-TV-Z]{26}$'
-      description: ULID de terminal (`trm_`).
+      format: uuid
+      description: UUIDv7 de terminal.
     SlotId:
       type: string
-      pattern: '^slt_[0-9A-HJKMNP-TV-Z]{26}$'
-      description: ULID de slot de prioridad (`slt_`).
+      format: uuid
+      description: UUIDv7 de slot de prioridad.
     VehicleTypeId:
       type: string
-      pattern: '^vtp_[0-9A-HJKMNP-TV-Z]{26}$'
-      description: ULID de tipo de vehículo (`vtp_`).
+      format: uuid
+      description: UUIDv7 de tipo de vehículo.
     RouteId:
       type: string
-      pattern: '^rte_[0-9A-HJKMNP-TV-Z]{26}$'
-      description: ULID de ruta (`rte_`).
+      format: uuid
+      description: UUIDv7 de ruta.
     VehicleId:
       type: string
-      pattern: '^veh_[0-9A-HJKMNP-TV-Z]{26}$'
-      description: ULID de vehículo (`veh_`).
+      format: uuid
+      description: UUIDv7 de vehículo.
     ShipmentId:
       type: string
-      pattern: '^crg_[0-9A-HJKMNP-TV-Z]{26}$'
-      description: ULID de cargamento (`crg_`).
+      format: uuid
+      description: UUIDv7 de cargamento.
     LedgerAccountId:
       type: string
-      pattern: '^lac_[0-9A-HJKMNP-TV-Z]{26}$'
-      description: ULID de cuenta del ledger (`lac_`).
+      format: uuid
+      description: UUIDv7 de cuenta del ledger.
     LedgerEntryId:
       type: string
-      pattern: '^len_[0-9A-HJKMNP-TV-Z]{26}$'
-      description: ULID de partida del ledger (`len_`).
+      format: uuid
+      description: UUIDv7 de partida del ledger.
     LedgerTransactionId:
       type: string
-      pattern: '^ltx_[0-9A-HJKMNP-TV-Z]{26}$'
-      description: ULID de asiento del ledger (`ltx_`).
+      format: uuid
+      description: UUIDv7 de asiento del ledger.
     PublicationId:
       type: string
-      pattern: '^pub_[0-9A-HJKMNP-TV-Z]{26}$'
-      description: ULID de publicación del tablón (`pub_`).
+      format: uuid
+      description: UUIDv7 de publicación del tablón.
     AcceptanceId:
       type: string
-      pattern: '^apt_[0-9A-HJKMNP-TV-Z]{26}$'
-      description: ULID de aceptación (`apt_`).
+      format: uuid
+      description: UUIDv7 de aceptación.
     ContractId:
       type: string
-      pattern: '^ctr_[0-9A-HJKMNP-TV-Z]{26}$'
-      description: ULID de contrato CCRI (`ctr_`).
+      format: uuid
+      description: UUIDv7 de contrato CCRI.
     DeliveryId:
       type: string
-      pattern: '^dlv_[0-9A-HJKMNP-TV-Z]{26}$'
-      description: ULID de entrega confirmada (`dlv_`).
+      format: uuid
+      description: UUIDv7 de entrega confirmada.
     FreightContractId:
       type: string
-      pattern: '^fct_[0-9A-HJKMNP-TV-Z]{26}$'
-      description: ULID de contrato de flete (`fct_`).
+      format: uuid
+      description: UUIDv7 de contrato de flete.
 
     # ── Enums de dominio ──
     AccountKind:
@@ -2788,7 +2817,8 @@ components:
           description: Almacén de la partida de stock (presente en `stock_free`).
         reference_id:
           type: string
-          description: ULID de la publicación/contrato al que sirve de cuenta espejo (auditoría cruzada).
+          format: uuid
+          description: UUIDv7 de la publicación/contrato al que sirve de cuenta espejo (auditoría cruzada).
         balance:
           type: string
           pattern: '^-?[0-9]+$'
@@ -2838,7 +2868,8 @@ components:
             - reconciliation
         reference_id:
           type: string
-          description: ULID de la entidad de dominio que originó el asiento.
+          format: uuid
+          description: UUIDv7 de la entidad de dominio que originó el asiento.
         description:
           type: string
         sim_time_at:
@@ -2949,11 +2980,11 @@ components:
           description: Solo `freight`.
       examples:
         - kind: sell
-          product_id: prd_01J9ZKQ8W2N4R7VZC3E5G6H8XY
+          product_id: 01920c8f-7b1d-7e2a-8d3c-4f6a9b0c1d2e
           quantity_total: "500"
           unit_price: "120"
           min_lot: "50"
-          origin_node_id: nod_01J9ZKQ8W2N4R7VZC3E5G6H8XY
+          origin_node_id: 01920c8f-8c2e-7f3b-9e4d-5a7b0c1d2e3f
           delivery_sim_seconds: 172800
     AcceptanceCreate:
       type: object

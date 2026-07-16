@@ -1,0 +1,19 @@
+# Edge de desarrollo: un único origen en :8000 que enruta al gateway (API/WS)
+# y al dev server del frontend, ambos corriendo en el host.
+{
+	auto_https off
+}
+
+:8000 {
+	handle /api/* {
+		reverse_proxy localhost:8080
+	}
+
+	handle /ws {
+		reverse_proxy localhost:8080
+	}
+
+	handle {
+		reverse_proxy localhost:3000
+	}
+}

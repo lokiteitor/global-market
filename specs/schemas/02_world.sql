@@ -6,6 +6,8 @@
 -- ocupación); el valor económico vive en el esquema ledger (Arquitectura 11.1).
 -- Durabilidad del estado físico: snapshots periódicos (RPO de minutos
 -- aceptado, GDD 1.1); este esquema persiste el estado base y los snapshots.
+-- Identificadores: uuid con DEFAULT uuidv7(), UUIDv7 nativo de PostgreSQL 18.
+-- Fuente ejecutable: backend/migrations/0003_world.sql (aplicación manual vía make db-migrate).
 -- =============================================================================
 
 -- -----------------------------------------------------------------------------
@@ -79,7 +81,7 @@ CREATE TYPE world.shipment_status AS ENUM (
 
 -- 1. regions — macro-región: jurisdicción de juego Y unidad de sharding (ADR-007)
 CREATE TABLE world.regions (
-    id               ulid_id PRIMARY KEY CHECK (id LIKE 'reg_%'),
+    id               uuid PRIMARY KEY DEFAULT uuidv7(),
     name             TEXT NOT NULL UNIQUE,
     grid_x           INT NOT NULL,
     grid_y           INT NOT NULL,
@@ -99,7 +101,7 @@ CREATE INDEX ix_regions_bounds ON world.regions USING GIST (bounds);
 
 -- 2. products — catálogo de bienes (materias primas, intermedios, finales, combustible)
 CREATE TABLE world.products (
-    id               ulid_id PRIMARY KEY CHECK (id LIKE 'prd_%'),
+    id               uuid PRIMARY KEY DEFAULT uuidv7(),
     code             TEXT NOT NULL UNIQUE,        -- 'iron_ore', 'steel_ingot', 'coal', ...
     name             TEXT NOT NULL,
     class            world.product_class NOT NULL,
@@ -114,7 +116,7 @@ CREATE TABLE world.products (
 
 -- 3. building_types — catálogo de instalaciones construibles (GDD 11)
 CREATE TABLE world.building_types (
-    id                 ulid_id PRIMARY KEY CHECK (id LIKE 'btp_%'),
+    id                 uuid PRIMARY KEY DEFAULT uuidv7(),
     code               TEXT NOT NULL UNIQUE,      -- 'iron_mine', 'blast_furnace', ...
     name               TEXT NOT NULL,
     footprint_cells    INT NOT NULL CHECK (footprint_cells > 0),
@@ -129,12 +131,12 @@ CREATE TABLE world.building_types (
 
 -- 4. recipes — recetas de producción (estructura fija, GDD 6.1/6.2)
 CREATE TABLE world.recipes (
-    id                 ulid_id PRIMARY KEY CHECK (id LIKE 'rcp_%'),
-    building_type_id   ulid_id NOT NULL REFERENCES world.building_types(id),
+    id                 uuid PRIMARY KEY DEFAULT uuidv7(),
+    building_type_id   uuid NOT NULL REFERENCES world.building_types(id),
     code               TEXT NOT NULL UNIQUE,
     name               TEXT NOT NULL,
     batch_sim_seconds  sim_time NOT NULL CHECK (batch_sim_seconds > 0),
-    fuel_product_id    ulid_id REFERENCES world.products(id),
+    fuel_product_id    uuid REFERENCES world.products(id),
     fuel_per_batch     stock_qty NOT NULL DEFAULT 0 CHECK (fuel_per_batch >= 0),
     workers_required   INT NOT NULL DEFAULT 0 CHECK (workers_required >= 0),
     min_city_level     INT NOT NULL DEFAULT 1,       -- cualificación ligada al nivel urbano (GDD 5.7)
@@ -146,8 +148,8 @@ CREATE INDEX ix_recipes_building_type ON world.recipes (building_type_id);
 
 -- 5. recipe_ingredients — insumos y productos de cada receta
 CREATE TABLE world.recipe_ingredients (
-    recipe_id    ulid_id NOT NULL REFERENCES world.recipes(id) ON DELETE CASCADE,
-    product_id   ulid_id NOT NULL REFERENCES world.products(id),
+    recipe_id    uuid NOT NULL REFERENCES world.recipes(id) ON DELETE CASCADE,
+    product_id   uuid NOT NULL REFERENCES world.products(id),
     role         world.ingredient_role NOT NULL,
     quantity     stock_qty NOT NULL CHECK (quantity > 0),
     PRIMARY KEY (recipe_id, product_id, role)
@@ -156,9 +158,9 @@ CREATE TABLE world.recipe_ingredients (
 -- 6. resource_deposits — yacimientos: minerales finitos estrictos, renovables
 --    con tasa de regeneración (GDD 10)
 CREATE TABLE world.resource_deposits (
-    id                  ulid_id PRIMARY KEY CHECK (id LIKE 'dep_%'),
-    region_id           ulid_id NOT NULL REFERENCES world.regions(id),
-    product_id          ulid_id NOT NULL REFERENCES world.products(id),
+    id                  uuid PRIMARY KEY DEFAULT uuidv7(),
+    region_id           uuid NOT NULL REFERENCES world.regions(id),
+    product_id          uuid NOT NULL REFERENCES world.products(id),
     location            geometry(Point, 4326) NOT NULL,
     initial_amount      stock_qty NOT NULL CHECK (initial_amount > 0),
     remaining_amount    stock_qty NOT NULL CHECK (remaining_amount >= 0),
@@ -181,9 +183,9 @@ CREATE INDEX ix_deposits_product ON world.resource_deposits (product_id)
 
 -- 7. cities — consumidor final único de la economía (GDD 5.6, decisión #34)
 CREATE TABLE world.cities (
-    id                   ulid_id PRIMARY KEY CHECK (id LIKE 'cty_%'),
-    region_id            ulid_id NOT NULL REFERENCES world.regions(id),
-    account_id           ulid_id NOT NULL UNIQUE REFERENCES auth.accounts(id), -- la ciudad es una cuenta más
+    id                   uuid PRIMARY KEY DEFAULT uuidv7(),
+    region_id            uuid NOT NULL REFERENCES world.regions(id),
+    account_id           uuid NOT NULL UNIQUE REFERENCES auth.accounts(id), -- la ciudad es una cuenta más
     name                 TEXT NOT NULL UNIQUE,
     location             geometry(Point, 4326) NOT NULL,
     level                INT NOT NULL DEFAULT 1 CHECK (level >= 1),
@@ -202,8 +204,8 @@ CREATE INDEX ix_cities_location ON world.cities USING GIST (location);
 --    Escrita por el Economy Balancer; leída por él mismo para publicar
 --    solicitudes de compra vía la API estándar del Contract Service.
 CREATE TABLE world.city_demand (
-    city_id             ulid_id NOT NULL REFERENCES world.cities(id),
-    product_id          ulid_id NOT NULL REFERENCES world.products(id),
+    city_id             uuid NOT NULL REFERENCES world.cities(id),
+    product_id          uuid NOT NULL REFERENCES world.products(id),
     d0_per_sim_day      stock_qty NOT NULL CHECK (d0_per_sim_day >= 0), -- demanda base D0(producto, nivel)
     supply_ema          NUMERIC NOT NULL CHECK (supply_ema > 0),        -- oferta reciente (EMA con suelo > 0)
     saturation_factor   NUMERIC NOT NULL DEFAULT 1
@@ -220,9 +222,9 @@ CREATE TABLE world.city_demand (
 
 -- 9. land_concessions — todo el suelo es arrendamiento renovable del sistema
 CREATE TABLE world.land_concessions (
-    id                ulid_id PRIMARY KEY CHECK (id LIKE 'cnc_%'),
-    region_id         ulid_id NOT NULL REFERENCES world.regions(id),
-    holder_account_id ulid_id NOT NULL REFERENCES auth.accounts(id),
+    id                uuid PRIMARY KEY DEFAULT uuidv7(),
+    region_id         uuid NOT NULL REFERENCES world.regions(id),
+    holder_account_id uuid NOT NULL REFERENCES auth.accounts(id),
     parcel            geometry(Polygon, 4326) NOT NULL,
     canon_amount      money_amount NOT NULL CHECK (canon_amount > 0), -- por periodo; sink estructural
     period_sim_days   INT NOT NULL DEFAULT 90,       -- plazo de referencia: 90 días de juego
@@ -241,10 +243,10 @@ CREATE INDEX ix_concessions_expiry ON world.land_concessions (expires_at_sim)
 
 -- 10. concession_transfers — mercado secundario de traspasos (con tasa del sistema)
 CREATE TABLE world.concession_transfers (
-    id               ulid_id PRIMARY KEY CHECK (id LIKE 'ctf_%'),
-    concession_id    ulid_id NOT NULL REFERENCES world.land_concessions(id),
-    from_account_id  ulid_id NOT NULL REFERENCES auth.accounts(id),
-    to_account_id    ulid_id NOT NULL REFERENCES auth.accounts(id),
+    id               uuid PRIMARY KEY DEFAULT uuidv7(),
+    concession_id    uuid NOT NULL REFERENCES world.land_concessions(id),
+    from_account_id  uuid NOT NULL REFERENCES auth.accounts(id),
+    to_account_id    uuid NOT NULL REFERENCES auth.accounts(id),
     price            money_amount NOT NULL CHECK (price >= 0),
     system_fee       money_amount NOT NULL CHECK (system_fee >= 0),
     occurred_at_sim  sim_time NOT NULL,
@@ -259,15 +261,15 @@ CREATE INDEX ix_concession_transfers_concession ON world.concession_transfers (c
 
 -- 11. buildings — instalaciones de los jugadores (GDD 11)
 CREATE TABLE world.buildings (
-    id                ulid_id PRIMARY KEY CHECK (id LIKE 'bld_%'),
-    owner_account_id  ulid_id NOT NULL REFERENCES auth.accounts(id),
-    region_id         ulid_id NOT NULL REFERENCES world.regions(id),
-    concession_id     ulid_id NOT NULL REFERENCES world.land_concessions(id),
-    building_type_id  ulid_id NOT NULL REFERENCES world.building_types(id),
+    id                uuid PRIMARY KEY DEFAULT uuidv7(),
+    owner_account_id  uuid NOT NULL REFERENCES auth.accounts(id),
+    region_id         uuid NOT NULL REFERENCES world.regions(id),
+    concession_id     uuid NOT NULL REFERENCES world.land_concessions(id),
+    building_type_id  uuid NOT NULL REFERENCES world.building_types(id),
     footprint         geometry(Polygon, 4326) NOT NULL,
     level             INT NOT NULL DEFAULT 1 CHECK (level >= 1),
     status            world.building_status NOT NULL DEFAULT 'under_construction',
-    active_recipe_id  ulid_id REFERENCES world.recipes(id),
+    active_recipe_id  uuid REFERENCES world.recipes(id),
     condition_pct     INT NOT NULL DEFAULT 100 CHECK (condition_pct BETWEEN 0 AND 100), -- degradación (GDD 11.2)
     fuel_stock        stock_qty NOT NULL DEFAULT 0 CHECK (fuel_stock >= 0),  -- combustible in situ (GDD 5.8)
     created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -283,8 +285,8 @@ CREATE INDEX ix_buildings_footprint ON world.buildings USING GIST (footprint);
 --     cuentas del ledger, con reconciliación periódica física↔contable
 --     (GDD 15.3, ADR-004).
 CREATE TABLE world.building_inventories (
-    building_id     ulid_id NOT NULL REFERENCES world.buildings(id),
-    product_id      ulid_id NOT NULL REFERENCES world.products(id),
+    building_id     uuid NOT NULL REFERENCES world.buildings(id),
+    product_id      uuid NOT NULL REFERENCES world.products(id),
     quantity        stock_qty NOT NULL DEFAULT 0 CHECK (quantity >= 0),
     updated_at_sim  sim_time NOT NULL DEFAULT 0,
     PRIMARY KEY (building_id, product_id)
@@ -297,9 +299,9 @@ CREATE INDEX ix_building_inventories_product ON world.building_inventories (prod
 --     se persiste (estado_inicial, t_inicio) y el avance se deriva bajo demanda
 --     (GDD 1.1). Solo el hito de fin de lote genera evento y escritura.
 CREATE TABLE world.production_batches (
-    id               ulid_id PRIMARY KEY CHECK (id LIKE 'bch_%'),
-    building_id      ulid_id NOT NULL REFERENCES world.buildings(id),
-    recipe_id        ulid_id NOT NULL REFERENCES world.recipes(id),
+    id               uuid PRIMARY KEY DEFAULT uuidv7(),
+    building_id      uuid NOT NULL REFERENCES world.buildings(id),
+    recipe_id        uuid NOT NULL REFERENCES world.recipes(id),
     batches_queued   INT NOT NULL CHECK (batches_queued > 0),
     batches_done     INT NOT NULL DEFAULT 0 CHECK (batches_done >= 0),
     status           world.batch_status NOT NULL DEFAULT 'queued',
@@ -320,11 +322,11 @@ CREATE INDEX ix_batches_building ON world.production_batches (building_id, queue
 
 -- 14. network_nodes — nodos del grafo logístico
 CREATE TABLE world.network_nodes (
-    id           ulid_id PRIMARY KEY CHECK (id LIKE 'nod_%'),
+    id           uuid PRIMARY KEY DEFAULT uuidv7(),
     kind         world.node_kind NOT NULL,
-    region_id    ulid_id NOT NULL REFERENCES world.regions(id),
-    building_id  ulid_id REFERENCES world.buildings(id),  -- si el nodo es una instalación
-    city_id      ulid_id REFERENCES world.cities(id),     -- si es puerta urbana
+    region_id    uuid NOT NULL REFERENCES world.regions(id),
+    building_id  uuid REFERENCES world.buildings(id),  -- si el nodo es una instalación
+    city_id      uuid REFERENCES world.cities(id),     -- si es puerta urbana
     location     geometry(Point, 4326) NOT NULL,
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -336,10 +338,10 @@ CREATE INDEX ix_nodes_building ON world.network_nodes (building_id) WHERE buildi
 -- 15. network_links — enlaces de USO COMÚN (sin reservas exclusivas de vía,
 --     decisión #12); capacidad y velocidad base por enlace
 CREATE TABLE world.network_links (
-    id                 ulid_id PRIMARY KEY CHECK (id LIKE 'lnk_%'),
+    id                 uuid PRIMARY KEY DEFAULT uuidv7(),
     mode               world.link_mode NOT NULL,
-    from_node_id       ulid_id NOT NULL REFERENCES world.network_nodes(id),
-    to_node_id         ulid_id NOT NULL REFERENCES world.network_nodes(id),
+    from_node_id       uuid NOT NULL REFERENCES world.network_nodes(id),
+    to_node_id         uuid NOT NULL REFERENCES world.network_nodes(id),
     path               geometry(LineString, 4326) NOT NULL,
     length_m           INT NOT NULL CHECK (length_m > 0),
     capacity_per_hour  INT NOT NULL CHECK (capacity_per_hour > 0),
@@ -356,9 +358,9 @@ CREATE INDEX ix_links_path ON world.network_links USING GIST (path);
 --     cada shard simula la congestión de SU segmento (GDD 7.3 / 15.1).
 --     congestion_ema: media móvil exponencial publicada al Logistics Service.
 CREATE TABLE world.link_segments (
-    id              ulid_id PRIMARY KEY CHECK (id LIKE 'seg_%'),
-    link_id         ulid_id NOT NULL REFERENCES world.network_links(id),
-    region_id       ulid_id NOT NULL REFERENCES world.regions(id),
+    id              uuid PRIMARY KEY DEFAULT uuidv7(),
+    link_id         uuid NOT NULL REFERENCES world.network_links(id),
+    region_id       uuid NOT NULL REFERENCES world.regions(id),
     seq             INT NOT NULL,                 -- orden del segmento dentro del enlace
     portion         geometry(LineString, 4326) NOT NULL,
     length_m        INT NOT NULL CHECK (length_m > 0),
@@ -372,9 +374,9 @@ CREATE INDEX ix_segments_region ON world.link_segments (region_id);
 -- 17. terminals — las terminales TIENEN dueño y venden slots de prioridad
 --     (el gameplay de "infraestructura como servicio" vive en los nodos, GDD 7.3)
 CREATE TABLE world.terminals (
-    id                       ulid_id PRIMARY KEY CHECK (id LIKE 'trm_%'),
-    node_id                  ulid_id NOT NULL UNIQUE REFERENCES world.network_nodes(id),
-    owner_account_id         ulid_id NOT NULL REFERENCES auth.accounts(id),
+    id                       uuid PRIMARY KEY DEFAULT uuidv7(),
+    node_id                  uuid NOT NULL UNIQUE REFERENCES world.network_nodes(id),
+    owner_account_id         uuid NOT NULL REFERENCES auth.accounts(id),
     transshipment_per_hour   INT NOT NULL CHECK (transshipment_per_hour > 0),
     queue_length             INT NOT NULL DEFAULT 0 CHECK (queue_length >= 0),
     created_at               TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -385,11 +387,11 @@ CREATE INDEX ix_terminals_owner ON world.terminals (owner_account_id);
 
 -- 18. terminal_slots — slots de prioridad vendibles (Fase 2, junto al CCRI-Flete)
 CREATE TABLE world.terminal_slots (
-    id                 ulid_id PRIMARY KEY CHECK (id LIKE 'slt_%'),
-    terminal_id        ulid_id NOT NULL REFERENCES world.terminals(id),
+    id                 uuid PRIMARY KEY DEFAULT uuidv7(),
+    terminal_id        uuid NOT NULL REFERENCES world.terminals(id),
     priority_tier      INT NOT NULL CHECK (priority_tier > 0),
     price              money_amount NOT NULL CHECK (price >= 0),
-    holder_account_id  ulid_id REFERENCES auth.accounts(id),   -- NULL = a la venta
+    holder_account_id  uuid REFERENCES auth.accounts(id),   -- NULL = a la venta
     valid_until_sim    sim_time,
     created_at         TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -398,13 +400,13 @@ CREATE INDEX ix_terminal_slots_terminal ON world.terminal_slots (terminal_id);
 
 -- 19. vehicle_types — catálogo de vehículos (GDD 7.2 / 8)
 CREATE TABLE world.vehicle_types (
-    id                    ulid_id PRIMARY KEY CHECK (id LIKE 'vtp_%'),
+    id                    uuid PRIMARY KEY DEFAULT uuidv7(),
     code                  TEXT NOT NULL UNIQUE,   -- 'truck_s', 'freight_train', 'cargo_ship'
     name                  TEXT NOT NULL,
     mode                  world.link_mode NOT NULL,
     cargo_capacity        stock_qty NOT NULL CHECK (cargo_capacity > 0),  -- en unidades de volumen
     speed_kmh             INT NOT NULL CHECK (speed_kmh > 0),
-    fuel_product_id       ulid_id NOT NULL REFERENCES world.products(id),
+    fuel_product_id       uuid NOT NULL REFERENCES world.products(id),
     fuel_per_100km        stock_qty NOT NULL CHECK (fuel_per_100km >= 0),
     autonomy_km           INT NOT NULL CHECK (autonomy_km > 0),
     purchase_price        money_amount NOT NULL,
@@ -414,8 +416,8 @@ CREATE TABLE world.vehicle_types (
 
 -- 20. routes — rutas definidas por el jugador (líneas fijas u órdenes bajo demanda)
 CREATE TABLE world.routes (
-    id                ulid_id PRIMARY KEY CHECK (id LIKE 'rte_%'),
-    owner_account_id  ulid_id NOT NULL REFERENCES auth.accounts(id),
+    id                uuid PRIMARY KEY DEFAULT uuidv7(),
+    owner_account_id  uuid NOT NULL REFERENCES auth.accounts(id),
     name              TEXT NOT NULL,
     kind              world.route_kind NOT NULL,
     active            BOOLEAN NOT NULL DEFAULT true,
@@ -427,26 +429,26 @@ CREATE INDEX ix_routes_owner ON world.routes (owner_account_id) WHERE active;
 
 -- 21. route_legs — secuencia de enlaces de una ruta (potencialmente multimodal)
 CREATE TABLE world.route_legs (
-    route_id   ulid_id NOT NULL REFERENCES world.routes(id) ON DELETE CASCADE,
+    route_id   uuid NOT NULL REFERENCES world.routes(id) ON DELETE CASCADE,
     leg_index  INT NOT NULL,
-    link_id    ulid_id NOT NULL REFERENCES world.network_links(id),
+    link_id    uuid NOT NULL REFERENCES world.network_links(id),
     PRIMARY KEY (route_id, leg_index)
 );
 
 -- 22. vehicles — posición ANALÍTICA: (segmento, t_entrada, función de avance);
 --     la posición exacta se deriva bajo demanda; solo los hitos escriben (GDD 1.1/7.3)
 CREATE TABLE world.vehicles (
-    id                    ulid_id PRIMARY KEY CHECK (id LIKE 'veh_%'),
-    vehicle_type_id       ulid_id NOT NULL REFERENCES world.vehicle_types(id),
-    owner_account_id      ulid_id NOT NULL REFERENCES auth.accounts(id),
+    id                    uuid PRIMARY KEY DEFAULT uuidv7(),
+    vehicle_type_id       uuid NOT NULL REFERENCES world.vehicle_types(id),
+    owner_account_id      uuid NOT NULL REFERENCES auth.accounts(id),
     status                world.vehicle_status NOT NULL DEFAULT 'idle',
     wear_pct              INT NOT NULL DEFAULT 0 CHECK (wear_pct BETWEEN 0 AND 100),
     fuel                  stock_qty NOT NULL DEFAULT 0 CHECK (fuel >= 0),
-    route_id              ulid_id REFERENCES world.routes(id),
+    route_id              uuid REFERENCES world.routes(id),
     route_leg_index       INT,
-    at_node_id            ulid_id REFERENCES world.network_nodes(id),   -- si está detenido en un nodo
-    on_segment_id         ulid_id REFERENCES world.link_segments(id),   -- si está en tránsito
-    segment_entered_sim   sim_time,                                     -- t_entrada al segmento
+    at_node_id            uuid REFERENCES world.network_nodes(id),   -- si está detenido en un nodo
+    on_segment_id         uuid REFERENCES world.link_segments(id),   -- si está en tránsito
+    segment_entered_sim   sim_time,                                  -- t_entrada al segmento
     advance_fn            JSONB,                     -- parámetros de la función de avance
     repair_until_sim      sim_time,                  -- fin de reparación si status = 'broken'
     created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -463,14 +465,14 @@ CREATE INDEX ix_vehicles_node ON world.vehicles (at_node_id) WHERE at_node_id IS
 -- 23. shipments — cargamentos: el stock reservado viaja etiquetado con su
 --     contrato; nada se teletransporta, tampoco en los fallos (GDD 5.3, decisión #9)
 CREATE TABLE world.shipments (
-    id                   ulid_id PRIMARY KEY CHECK (id LIKE 'crg_%'),
-    owner_account_id     ulid_id NOT NULL REFERENCES auth.accounts(id),
-    product_id           ulid_id NOT NULL REFERENCES world.products(id),
+    id                   uuid PRIMARY KEY DEFAULT uuidv7(),
+    owner_account_id     uuid NOT NULL REFERENCES auth.accounts(id),
+    product_id           uuid NOT NULL REFERENCES world.products(id),
     quantity             stock_qty NOT NULL CHECK (quantity > 0),
-    contract_id          ulid_id,   -- FK diferida a ledger.contracts (ver 03_ledger.sql)
-    freight_contract_id  ulid_id,   -- FK diferida a ledger.freight_contracts
-    vehicle_id           ulid_id REFERENCES world.vehicles(id),
-    at_node_id           ulid_id REFERENCES world.network_nodes(id),
+    contract_id          uuid,   -- FK cross-schema a ledger.contracts: se añade en 03_ledger.sql (migración 0004)
+    freight_contract_id  uuid,   -- FK cross-schema a ledger.freight_contracts: se añade en 03_ledger.sql (migración 0004)
+    vehicle_id           uuid REFERENCES world.vehicles(id),
+    at_node_id           uuid REFERENCES world.network_nodes(id),
     status               world.shipment_status NOT NULL DEFAULT 'in_warehouse',
     created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at_sim       sim_time NOT NULL DEFAULT 0,
@@ -486,7 +488,7 @@ CREATE INDEX ix_shipments_node ON world.shipments (at_node_id) WHERE at_node_id 
 -- 24. shard_snapshots — metadatos de snapshots periódicos por shard
 --     (Job World Persistence; RPO de minutos para estado físico, GDD 1.1)
 CREATE TABLE world.shard_snapshots (
-    id             ulid_id PRIMARY KEY CHECK (id LIKE 'snp_%'),
+    id             uuid PRIMARY KEY DEFAULT uuidv7(),
     shard_key      TEXT NOT NULL,
     sim_time_at    sim_time NOT NULL,
     storage_ref    TEXT NOT NULL,       -- ubicación del blob del snapshot
@@ -495,3 +497,14 @@ CREATE TABLE world.shard_snapshots (
 );
 
 CREATE INDEX ix_snapshots_shard ON world.shard_snapshots (shard_key, created_at DESC);
+
+-- 25. sim_clock — reloj sim-time persistido del mundo.
+CREATE TABLE world.sim_clock (
+    id           smallint PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+    sim_seconds  sim_time NOT NULL DEFAULT 0,
+    frozen       boolean  NOT NULL DEFAULT false,
+    updated_at   timestamptz NOT NULL DEFAULT now()
+);
+-- fila única: reloj sim-time persistido del mundo (ratio 24x); lo avanza el motor Go;
+-- el gateway lo lee para meta.sim_time. frozen = ventana de mantenimiento.
+INSERT INTO world.sim_clock (id, sim_seconds) VALUES (1, 0) ON CONFLICT DO NOTHING;

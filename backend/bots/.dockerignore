@@ -1,0 +1,17 @@
+# Artefactos locales (la imagen los reconstruye)
+node_modules
+dist
+coverage
+*.tsbuildinfo
+
+# Tests
+test
+
+# Runtime local
+*.log
+.env
+.env.*
+
+# Docker
+Dockerfile
+.dockerignore

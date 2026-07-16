@@ -1,0 +1,25 @@
+{
+  "name": "imperio-gateway",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Imperio Industrial — gateway de API pública (REST specs/openapi.yaml + WS specs/ws-protocol.md)",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "test": "node --import tsx --test test/*.test.ts"
+  },
+  "dependencies": {
+    "@fastify/websocket": "^11.0.2",
+    "fastify": "^5.2.1",
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/pg": "^8.11.10",
+    "@types/ws": "^8.5.13",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

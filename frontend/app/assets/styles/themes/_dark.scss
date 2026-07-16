@@ -1,0 +1,28 @@
+// ============================================================================
+// themes/_dark.scss — tema oscuro industrial (único tema en v1).
+// Expone los tokens como custom properties; los componentes consumen SOLO
+// var(--ii-*) para que el theming sea centralizado (ADR-FE-006).
+// ============================================================================
+@use '../settings/tokens' as t;
+
+:root,
+[data-theme='dark'] {
+  --ii-bg-deep: #{t.$color-bg-deep};
+  --ii-bg-raised: #{t.$color-bg-raised};
+  --ii-bg-overlay: #{t.$color-bg-overlay};
+  --ii-border: #{t.$color-border};
+  --ii-border-subtle: #{t.$color-border-subtle};
+
+  --ii-text: #{t.$color-text};
+  --ii-text-muted: #{t.$color-text-muted};
+  --ii-text-faint: #{t.$color-text-faint};
+
+  --ii-accent: #{t.$color-accent};
+  --ii-accent-strong: #{t.$color-accent-strong};
+  --ii-success: #{t.$color-success};
+  --ii-error: #{t.$color-error};
+  --ii-info: #{t.$color-info};
+  --ii-warning: #{t.$color-warning};
+
+  color-scheme: dark;
+}

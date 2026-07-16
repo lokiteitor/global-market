@@ -1,0 +1,58 @@
+// ============================================================================
+// settings/_tokens.scss — design tokens del sistema visual propio (ADR-FE-006).
+// Paleta oscura industrial. Sin frameworks CSS (C5/C6): todo nace aquí.
+// ============================================================================
+
+// ── Color: fondos y superficies ─────────────────────────────────────────────
+$color-bg-deep: #0d1117; // fondo base de la aplicación
+$color-bg-raised: #161b22; // paneles, barras, superficies elevadas
+$color-bg-overlay: #1c2129; // popovers, tooltips, modales
+$color-border: #30363d;
+$color-border-subtle: #21262d;
+
+// ── Color: texto ────────────────────────────────────────────────────────────
+$color-text: #e6edf3;
+$color-text-muted: #8b949e;
+$color-text-faint: #6e7681;
+
+// ── Color: acento y semánticos ──────────────────────────────────────────────
+$color-accent: #d29922; // ámbar industrial — acción primaria, foco
+$color-accent-strong: #e3b341;
+$color-success: #3fb950;
+$color-error: #f85149;
+$color-info: #58a6ff;
+$color-warning: #d29922;
+
+// ── Tipografía ──────────────────────────────────────────────────────────────
+// UI en system-ui; cifras (dinero, stock, sim-time) SIEMPRE en monospace para
+// alineación tabular en paneles densos de datos.
+$font-ui: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
+$font-mono: ui-monospace, 'SFMono-Regular', 'Cascadia Mono', Menlo, Consolas, 'Liberation Mono', monospace;
+
+$font-size-xs: 0.75rem;
+$font-size-sm: 0.875rem;
+$font-size-md: 1rem;
+$font-size-lg: 1.25rem;
+$font-size-xl: 1.75rem;
+$line-height: 1.5;
+
+// ── Espaciado (escala geométrica) ───────────────────────────────────────────
+$space-1: 0.25rem;
+$space-2: 0.5rem;
+$space-3: 0.75rem;
+$space-4: 1rem;
+$space-5: 1.5rem;
+$space-6: 2rem;
+$space-7: 3rem;
+
+// ── Radios y bordes ─────────────────────────────────────────────────────────
+$radius-sm: 3px;
+$radius-md: 6px;
+
+// ── Z-index (capas de la aplicación) ────────────────────────────────────────
+$z-canvas: 0; // lienzo Phaser
+$z-hud: 10; // barras y sidebar sobre el canvas
+$z-panel: 20; // paneles de gestión
+$z-dropdown: 50;
+$z-modal: 100;
+$z-toast: 200;

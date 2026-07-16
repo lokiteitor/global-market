@@ -1,7 +1,10 @@
 # Imperio Industrial: Simulación Económica MMO
 ### Game Design Document (GDD) + Software Architecture Document (SAD)
 
-**Versión:** 1.2 — revisada tras review de simplificación (ver Anexo B: registro de decisiones)
+**Versión:** 1.2.1
+**Changelog:**
+- **1.2.1** (2026-07-15): alineación técnica con la implementación v1 — §17.2 (ULID → UUIDv7 nativo de PostgreSQL 18, ADR-IMPL-01), §18.3 y Anexo de stack (Go+pgx sin sqlc, TS+Fastify+pg sin Drizzle, monorepo real, migraciones manuales — ADR-IMPL-02/03/04), nota final en Anexo B remitiendo a los ADR-IMPL de `docs/desarrollo.md`. El diseño de gameplay no cambia.
+- **1.2**: revisada tras review de simplificación (ver Anexo B: registro de decisiones).
 **Referencias de diseño:** Sim Companies, Simutrans, OpenTTD, Factorio
 **Tipo:** MMO de simulación económica, industrial y logística en mundo único persistente
 
@@ -680,7 +683,7 @@ Los bots no están confinados a un entorno de pruebas: son **residentes permanen
 
 ### 17.2 Identidad global y retención
 
-- **Esquema de IDs global**: toda entidad usa identificadores **ULID** con espacio de nombres por tipo (`veh_...`, `ctr_...`, `crg_...`), únicos en todo el mundo e independientes del esquema/base donde residan. Las referencias entre dominios (un contrato que apunta a un cargamento, un cargamento a un vehículo) son así auditables aunque las entidades vivan en esquemas distintos o migren entre shards en el futuro.
+- **Esquema de IDs global**: toda entidad usa un identificador único ordenable temporalmente, único en todo el mundo e independiente del esquema/base donde resida. El diseño original proponía **ULID** con espacio de nombres por tipo (`veh_...`, `ctr_...`, `crg_...`). *(v1 implementada: **UUIDv7 nativo de PostgreSQL 18** — columnas `uuid DEFAULT uuidv7()`; conserva la ordenabilidad temporal de ULID, y el namespacing por prefijo se sustituye por tipado en la capa de aplicación (branded types en el frontend) — ver ADR-IMPL-01 en `docs/desarrollo.md`. `specs/openapi.yaml` v1.1.0 usa `format: uuid`.)* Las referencias entre dominios (un contrato que apunta a un cargamento, un cargamento a un vehículo) son así auditables aunque las entidades vivan en esquemas distintos o migren entre shards en el futuro.
 - **Retención y archivado** (el mundo nunca se resetea, los datos no pueden crecer sin cota):
   - **Agregados permanentes**: velas OHLC, estadísticas regionales e índices de ciudades se conservan para siempre (crecen lentamente).
   - **Detalle archivable**: contratos liquidados y movimientos raw del ledger se mueven a almacenamiento frío tras ~1 año de juego (≈15 días reales × 24 = calibrar según volumen real), conservando en caliente los saldos, los agregados y todo contrato/garantía vivo. El archivo frío permanece consultable para auditoría.
@@ -718,10 +721,10 @@ Los bots no están confinados a un entorno de pruebas: son **residentes permanen
 
 ### 18.3 Stack tecnológico sugerido (orientativo, no vinculante)
 
-- **Go** para el motor de simulación (shards) **y para el Contract Service**: el componente que mueve dinero se decide explícitamente en el mismo stack que el motor (tipado fuerte, mismo toolchain), no por descarte en el stack web.
+- **Go** para el motor de simulación (shards) **y para el Contract Service**: el componente que mueve dinero se decide explícitamente en el mismo stack que el motor (tipado fuerte, mismo toolchain), no por descarte en el stack web. *(v1 implementada: el camino de comando del Contract Service —publicar, aceptar, construir, comprar…— corre en el gateway TypeScript como transacciones SQL `SERIALIZABLE`, con las invariantes en la base; el motor Go ejecuta todo lo dirigido por tiempo, incluidos sorteos y liquidaciones — ver ADR-IMPL-03 en `docs/desarrollo.md`.)*
 - **Regla de oro del ledger (independiente del lenguaje):** toda invariante de dinero/stock (no-negatividad, doble entrada balanceada, bloqueo triple atómico del CCRI) vive **en la base de datos** — transacciones `SERIALIZABLE`, constraints y funciones SQL que asientan todo-o-nada. El código de aplicación orquesta; la base garantiza. Un bug de aplicación no puede romper la contabilidad.
-- Framework web (Node.js/TypeScript) para gateway, autenticación y servicios de presentación menos sensibles a latencia.
-- PostgreSQL como base única (esquemas separados por dominio; PostGIS y TimescaleDB son extensiones de la misma instalación).
+- Framework web (Node.js/TypeScript) para gateway, autenticación y servicios de presentación menos sensibles a latencia. *(v1 implementada: Fastify 5.)*
+- PostgreSQL como base única (esquemas separados por dominio; PostGIS y TimescaleDB son extensiones de la misma instalación). *(v1 implementada: PostgreSQL 18, con `uuidv7()` nativo — ver 17.2. Acceso a datos con SQL explícito: `pgx/v5` en Go y `pg` en TypeScript, sin sqlc ni Drizzle — ver ADR-IMPL-04 en `docs/desarrollo.md`.)*
 - Caddy como reverse proxy.
 
 ### 18.4 Topología física por fases
@@ -826,16 +829,19 @@ Este documento combina las perspectivas de diseño de juego (GDD) y arquitectura
 
 ## Anexo: Stack tecnológico consolidado
 
-**Fases 0–1 (monolito modular, ver 18.4):**
+**Fases 0–1 (monolito modular, ver 18.4) — actualizado a la implementación v1:**
 
-- Motor de simulación + Contract Service: Go + sqlc (módulos con fronteras estrictas en un solo desplegable).
-- Gateway web / auth / presentación: TypeScript + Fastify + Drizzle ORM.
+- Motor de simulación (todo lo dirigido por tiempo: sim-clock, lotes, tránsito, sorteos, liquidaciones, balancer): **Go 1.22 + pgx/v5** con SQL explícito, **sin sqlc**. *(El diseño original asignaba también el camino de comando del Contract Service a Go + sqlc — ver ADR-IMPL-03 y ADR-IMPL-04 en `docs/desarrollo.md`.)*
+- Gateway web / auth / API pública (REST de `specs/openapi.yaml` v1.1.0 + WS de `specs/ws-protocol.md`), incluido el camino de comando vía transacciones SQL `SERIALIZABLE`: **TypeScript + Fastify 5 + pg** (node-postgres) con SQL explícito, **sin Drizzle** (ADR-IMPL-04). *(El diseño original proponía Drizzle ORM.)*
+- Estructura real del monorepo (**sin workspaces**): `Makefile` raíz + `backend/{engine, gateway, bots, migrations, seeds}` + `frontend/` (Nuxt 4 + Vue 3 + Pinia + Phaser 3 + Sass, npm) + `infra/` (docker-compose + Caddyfile) + `docs/` + `specs/`.
 - Comunicación síncrona: REST/JSON.
 - Comunicación asíncrona entre módulos: **outbox table + polling sobre PostgreSQL** (sin bus dedicado).
-- Base de datos: **una sola instancia de PostgreSQL** con esquemas separados por dominio; PostGIS (estado espacial) como extensión; TimescaleDB (series temporales/OHLC) solo si el volumen medido lo justifica (ver 17.1).
+- Base de datos: **una sola instancia de PostgreSQL 18** (imagen `postgis/postgis:18-3.6`; `uuidv7()` nativo, ver 17.2) con esquemas separados por dominio; PostGIS (estado espacial) como extensión; TimescaleDB (series temporales/OHLC) solo si el volumen medido lo justifica (ver 17.1).
+- Migraciones de esquema: ficheros SQL numerados en `backend/migrations`, aplicación **manual** vía Makefile (`make db-migrate`, tracking en `public.schema_migrations`); nada se aplica automáticamente al arrancar servicios (ADR-IMPL-02, coherente con la ventana de mantenimiento diaria de 1.1).
 - Reverse proxy: Caddy.
 - Despliegue: Docker Compose.
 - Observabilidad: Prometheus, Grafana, Loki y Tempo.
+- Verificación end-to-end reproducible: `make verify` (`infra/verify.sh`) — ciclo CCRI completo con bots y asserts contables.
 
 **Fase 2+ (extracción medida, solo si los números lo exigen):**
 
@@ -898,3 +904,5 @@ Decisiones tomadas en la design review de la v1.1, con su trade-off asumido:
 **Revisado y conservado deliberadamente en v1.2** (complejidad ratificada): mercado secundario de vehículos (§8), Economy Balancer como agente decisor de las ciudades (18.1), stack dual Go + TypeScript (#19), CCRI-Flete en Fase 2 (#23), slots de prioridad de terminales (#12), y aceptación/liquidación parciales (#6).
 
 Retirados del alcance base en la revisión v1.1 (movidos a la sección 22 como expansiones futuras): **consorcios/alianzas formales** y **bots con aprendizaje automático** (los bots de producción usan exclusivamente heurísticas auditables). El diseño detallado de la toma de decisiones de los bots (13.3) se pospone deliberadamente.
+
+**Nota (v1.2.1):** las decisiones de implementación v1 (identidad UUIDv7, reparto engine/gateway, emisión de stock por producto, auto-despacho logístico, reloj sim-time persistido, migraciones manuales, protocolo WS, etc.) se registran como **ADR-IMPL-01..14 en `docs/desarrollo.md`**, que es el documento autoritativo sobre *cómo está construido* el sistema.

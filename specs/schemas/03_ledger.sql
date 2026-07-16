@@ -13,6 +13,9 @@
 -- cuentas espejo de reserva por contrato), de modo que el bloqueo triple del
 -- CCRI (stock reservado + garantía monetaria + escrow) es UNA única
 -- transacción ACID local — sin 2PC ni sagas (GDD 15.3, ADR-004).
+--
+-- Identificadores: uuid con DEFAULT uuidv7(), UUIDv7 nativo de PostgreSQL 18.
+-- Fuente ejecutable: backend/migrations/0004_ledger.sql (aplicación manual vía make db-migrate).
 -- =============================================================================
 
 -- -----------------------------------------------------------------------------
@@ -91,22 +94,27 @@ CREATE TYPE ledger.contract_channel AS ENUM (
 -- 1. accounts — cuentas del ledger. Una cuenta contiene UN activo:
 --    dinero (product_id IS NULL) o stock de un producto (product_id NOT NULL).
 CREATE TABLE ledger.accounts (
-    id                     ulid_id PRIMARY KEY CHECK (id LIKE 'lac_%'),
+    id                     uuid PRIMARY KEY DEFAULT uuidv7(),
     kind                   ledger.account_kind NOT NULL,
-    owner_account_id       ulid_id REFERENCES auth.accounts(id), -- NULL para cuentas puras de sistema
-    product_id             ulid_id REFERENCES world.products(id),
-    warehouse_building_id  ulid_id REFERENCES world.buildings(id), -- almacén, para cuentas de stock
-    reference_id           ulid_id,   -- publicación/contrato/flete que motiva la cuenta espejo
+    owner_account_id       uuid REFERENCES auth.accounts(id), -- NULL para cuentas puras de sistema
+    product_id             uuid REFERENCES world.products(id),
+    warehouse_building_id  uuid REFERENCES world.buildings(id), -- almacén, para cuentas de stock
+    reference_id           uuid,   -- publicación/contrato/flete que motiva la cuenta espejo
     balance                BIGINT NOT NULL DEFAULT 0,
     created_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
     -- No-negatividad: solo la cuenta de emisión del banco central puede ser negativa.
     CONSTRAINT ck_accounts_non_negative CHECK (balance >= 0 OR kind = 'emission'),
     -- Cuentas monetarias no llevan producto ni almacén; las de stock exigen producto.
+    -- Las cuentas 'emission' pueden ser monetarias (product_id NULL: masa monetaria
+    -- emitida) o de génesis de stock por producto (product_id NOT NULL: contrapartida
+    -- de producción/consumo físico — sin ella la doble entrada por activo no cierra).
     CONSTRAINT ck_accounts_asset CHECK (
-        (kind IN ('cash','escrow','guarantee','sink','emission') AND product_id IS NULL AND warehouse_building_id IS NULL)
+        (kind IN ('cash','escrow','guarantee','sink') AND product_id IS NULL AND warehouse_building_id IS NULL)
         OR
         (kind IN ('stock_free','stock_reserved','custody') AND product_id IS NOT NULL)
+        OR
+        (kind = 'emission' AND warehouse_building_id IS NULL)
     )
 );
 
@@ -117,15 +125,20 @@ CREATE UNIQUE INDEX ux_accounts_cash ON ledger.accounts (owner_account_id)
 CREATE UNIQUE INDEX ux_accounts_stock_free
     ON ledger.accounts (owner_account_id, product_id, warehouse_building_id)
     WHERE kind = 'stock_free';
+-- Una sola cuenta de emisión monetaria (banco central) y una de génesis por producto
+CREATE UNIQUE INDEX ux_accounts_emission_money ON ledger.accounts ((true))
+    WHERE kind = 'emission' AND product_id IS NULL;
+CREATE UNIQUE INDEX ux_accounts_emission_stock ON ledger.accounts (product_id)
+    WHERE kind = 'emission' AND product_id IS NOT NULL;
 CREATE INDEX ix_accounts_owner ON ledger.accounts (owner_account_id);
 CREATE INDEX ix_accounts_reference ON ledger.accounts (reference_id) WHERE reference_id IS NOT NULL;
 
 -- 2. transactions — cabecera de asiento (agrupación atómica de partidas)
 CREATE TABLE ledger.transactions (
-    id            ulid_id PRIMARY KEY CHECK (id LIKE 'ltx_%'),
+    id            uuid PRIMARY KEY DEFAULT uuidv7(),
     kind          ledger.transaction_kind NOT NULL,
     sim_time_at   sim_time NOT NULL,
-    reference_id  ulid_id,          -- contrato, publicación, edificio... (auditoría cruzada)
+    reference_id  uuid,          -- contrato, publicación, edificio... (auditoría cruzada)
     description   TEXT,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -137,9 +150,9 @@ CREATE INDEX ix_transactions_kind_time ON ledger.transactions (kind, created_at)
 
 -- 3. entries — partidas de doble entrada. INMUTABLES una vez asentadas.
 CREATE TABLE ledger.entries (
-    id              ulid_id PRIMARY KEY CHECK (id LIKE 'len_%'),
-    transaction_id  ulid_id NOT NULL REFERENCES ledger.transactions(id),
-    account_id      ulid_id NOT NULL REFERENCES ledger.accounts(id),
+    id              uuid PRIMARY KEY DEFAULT uuidv7(),
+    transaction_id  uuid NOT NULL REFERENCES ledger.transactions(id),
+    account_id      uuid NOT NULL REFERENCES ledger.accounts(id),
     amount          BIGINT NOT NULL CHECK (amount <> 0),  -- signo: cargo/abono
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -170,17 +183,19 @@ CREATE TRIGGER trg_entries_apply_balance
 -- (b) Doble entrada balanceada: al confirmar la transacción SQL, la suma de
 --     partidas de cada asiento debe ser cero POR ACTIVO (dinero, o cada
 --     producto). Constraint trigger diferido: se evalúa en el COMMIT.
+--     Nota: product_id es uuid; se castea a text para agrupar junto al
+--     marcador 'MONEY' de las cuentas monetarias.
 CREATE OR REPLACE FUNCTION ledger.assert_transaction_balanced() RETURNS trigger AS $$
 DECLARE
     v_unbalanced BIGINT;
 BEGIN
     SELECT count(*) INTO v_unbalanced
     FROM (
-        SELECT COALESCE(a.product_id, 'MONEY') AS asset, SUM(e.amount) AS total
+        SELECT COALESCE(a.product_id::text, 'MONEY') AS asset, SUM(e.amount) AS total
         FROM ledger.entries e
         JOIN ledger.accounts a ON a.id = e.account_id
         WHERE e.transaction_id = NEW.transaction_id
-        GROUP BY COALESCE(a.product_id, 'MONEY')
+        GROUP BY COALESCE(a.product_id::text, 'MONEY')
     ) sums
     WHERE sums.total <> 0;
 
@@ -221,18 +236,18 @@ CREATE TRIGGER trg_transactions_immutable
 --    toda publicación visible es ejecutable al 100% — su garantía íntegra
 --    quedó bloqueada AL PUBLICAR (una garantía por publicación, ADR-014).
 CREATE TABLE ledger.publications (
-    id                        ulid_id PRIMARY KEY CHECK (id LIKE 'pub_%'),
+    id                        uuid PRIMARY KEY DEFAULT uuidv7(),
     kind                      ledger.publication_kind NOT NULL,
-    publisher_account_id      ulid_id NOT NULL REFERENCES auth.accounts(id),
+    publisher_account_id      uuid NOT NULL REFERENCES auth.accounts(id),
     channel                   ledger.contract_channel NOT NULL DEFAULT 'board',
-    counterparty_account_id   ulid_id REFERENCES auth.accounts(id), -- solo canal 'private'
-    product_id                ulid_id REFERENCES world.products(id), -- NULL en fletes
+    counterparty_account_id   uuid REFERENCES auth.accounts(id), -- solo canal 'private'
+    product_id                uuid REFERENCES world.products(id), -- NULL en fletes
     quantity_total            stock_qty NOT NULL CHECK (quantity_total > 0),
     quantity_remaining        stock_qty NOT NULL CHECK (quantity_remaining >= 0),
     unit_price                money_amount NOT NULL CHECK (unit_price > 0),
     min_lot                   stock_qty NOT NULL DEFAULT 1 CHECK (min_lot > 0), -- lote mínimo de aceptación
-    origin_node_id            ulid_id REFERENCES world.network_nodes(id),
-    destination_node_id       ulid_id REFERENCES world.network_nodes(id),
+    origin_node_id            uuid REFERENCES world.network_nodes(id),
+    destination_node_id       uuid REFERENCES world.network_nodes(id),
     delivery_sim_seconds      sim_time NOT NULL,  -- plazo de entrega pactado (sim-time)
     status                    ledger.publication_status NOT NULL DEFAULT 'draw_window',
     -- La ventana de sorteo y el cooldown anti-parpadeo son de las pocas
@@ -240,9 +255,9 @@ CREATE TABLE ledger.publications (
     window_closes_at          TIMESTAMPTZ,
     cancel_cooldown_until     TIMESTAMPTZ,
     -- Cuentas espejo de la garantía propia, bloqueada desde la publicación:
-    stock_reserve_account_id  ulid_id REFERENCES ledger.accounts(id), -- venta: stock congelado
-    guarantee_account_id      ulid_id REFERENCES ledger.accounts(id), -- venta/flete: garantía monetaria
-    escrow_account_id         ulid_id REFERENCES ledger.accounts(id), -- compra/flete: pago retenido
+    stock_reserve_account_id  uuid REFERENCES ledger.accounts(id), -- venta: stock congelado
+    guarantee_account_id      uuid REFERENCES ledger.accounts(id), -- venta/flete: garantía monetaria
+    escrow_account_id         uuid REFERENCES ledger.accounts(id), -- compra/flete: pago retenido
     published_at_sim          sim_time NOT NULL,
     created_at                TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at                TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -269,17 +284,17 @@ CREATE INDEX ix_publications_window ON ledger.publications (window_closes_at)
 --    sorteo: al cierre se sortea el orden (draw_order) y se sirven hasta
 --    agotar; la latencia no otorga ventaja (ADR-011).
 CREATE TABLE ledger.publication_acceptances (
-    id                    ulid_id PRIMARY KEY CHECK (id LIKE 'apt_%'),
-    publication_id        ulid_id NOT NULL REFERENCES ledger.publications(id),
-    acceptor_account_id   ulid_id NOT NULL REFERENCES auth.accounts(id),
+    id                    uuid PRIMARY KEY DEFAULT uuidv7(),
+    publication_id        uuid NOT NULL REFERENCES ledger.publications(id),
+    acceptor_account_id   uuid NOT NULL REFERENCES auth.accounts(id),
     quantity              stock_qty NOT NULL CHECK (quantity > 0),
     quantity_served       stock_qty NOT NULL DEFAULT 0 CHECK (quantity_served >= 0),
     status                ledger.acceptance_status NOT NULL DEFAULT 'pending_draw',
     draw_order            INT,     -- asignado por el sorteo al cerrar la ventana
     -- Garantía del aceptante, bloqueada al aceptar y liberada si no es servido:
-    stock_reserve_account_id ulid_id REFERENCES ledger.accounts(id),
-    guarantee_account_id     ulid_id REFERENCES ledger.accounts(id),
-    escrow_account_id        ulid_id REFERENCES ledger.accounts(id),
+    stock_reserve_account_id uuid REFERENCES ledger.accounts(id),
+    guarantee_account_id     uuid REFERENCES ledger.accounts(id),
+    escrow_account_id        uuid REFERENCES ledger.accounts(id),
     accepted_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
     resolved_at           TIMESTAMPTZ,
     CHECK (quantity_served <= quantity),
@@ -298,24 +313,24 @@ CREATE INDEX ix_acceptances_acceptor ON ledger.publication_acceptances (acceptor
 --    asentado (transacción 'contract_confirmation'); las cuentas espejo del
 --    contrato son la prueba contable de sus garantías.
 CREATE TABLE ledger.contracts (
-    id                        ulid_id PRIMARY KEY CHECK (id LIKE 'ctr_%'),
-    publication_id            ulid_id REFERENCES ledger.publications(id), -- NULL: negociación directa
+    id                        uuid PRIMARY KEY DEFAULT uuidv7(),
+    publication_id            uuid REFERENCES ledger.publications(id), -- NULL: negociación directa
     channel                   ledger.contract_channel NOT NULL,
-    buyer_account_id          ulid_id NOT NULL REFERENCES auth.accounts(id),
-    seller_account_id         ulid_id NOT NULL REFERENCES auth.accounts(id),
-    product_id                ulid_id NOT NULL REFERENCES world.products(id),
+    buyer_account_id          uuid NOT NULL REFERENCES auth.accounts(id),
+    seller_account_id         uuid NOT NULL REFERENCES auth.accounts(id),
+    product_id                uuid NOT NULL REFERENCES world.products(id),
     quantity_agreed           stock_qty NOT NULL CHECK (quantity_agreed > 0),
     quantity_delivered        stock_qty NOT NULL DEFAULT 0 CHECK (quantity_delivered >= 0),
     unit_price                money_amount NOT NULL CHECK (unit_price > 0),
-    origin_node_id            ulid_id NOT NULL REFERENCES world.network_nodes(id),
-    destination_node_id       ulid_id NOT NULL REFERENCES world.network_nodes(id),
+    origin_node_id            uuid NOT NULL REFERENCES world.network_nodes(id),
+    destination_node_id       uuid NOT NULL REFERENCES world.network_nodes(id),
     deadline_sim              sim_time NOT NULL,   -- vencimiento en sim-time
     status                    ledger.contract_status NOT NULL DEFAULT 'active',
     fill_bp                   INT CHECK (fill_bp BETWEEN 0 AND 10000), -- % entregado a tiempo, en puntos básicos
     -- Bloqueo triple (cuentas espejo del contrato):
-    stock_reserve_account_id  ulid_id NOT NULL REFERENCES ledger.accounts(id),
-    seller_guarantee_account_id ulid_id NOT NULL REFERENCES ledger.accounts(id),
-    escrow_account_id         ulid_id NOT NULL REFERENCES ledger.accounts(id),
+    stock_reserve_account_id  uuid NOT NULL REFERENCES ledger.accounts(id),
+    seller_guarantee_account_id uuid NOT NULL REFERENCES ledger.accounts(id),
+    escrow_account_id         uuid NOT NULL REFERENCES ledger.accounts(id),
     confirmed_at_sim          sim_time NOT NULL,
     settled_at_sim            sim_time,
     created_at                TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -334,9 +349,9 @@ CREATE INDEX ix_contracts_settled ON ledger.contracts (product_id, settled_at_si
 -- 7. contract_deliveries — verificación de entrega ACUMULATIVA: el shard
 --    confirma cada llegada física parcial (GDD 5.3 paso 5)
 CREATE TABLE ledger.contract_deliveries (
-    id                ulid_id PRIMARY KEY CHECK (id LIKE 'dlv_%'),
-    contract_id       ulid_id NOT NULL REFERENCES ledger.contracts(id),
-    shipment_id       ulid_id NOT NULL,   -- world.shipments (FK cross-schema, abajo)
+    id                uuid PRIMARY KEY DEFAULT uuidv7(),
+    contract_id       uuid NOT NULL REFERENCES ledger.contracts(id),
+    shipment_id       uuid NOT NULL,   -- world.shipments (FK cross-schema, abajo)
     quantity          stock_qty NOT NULL CHECK (quantity > 0),
     delivered_at_sim  sim_time NOT NULL,
     on_time           BOOLEAN NOT NULL,   -- dentro del plazo pactado
@@ -349,21 +364,21 @@ CREATE INDEX ix_deliveries_contract ON ledger.contract_deliveries (contract_id);
 --    en el ledger; el transportista lleva la carga físicamente pero no puede
 --    venderla (la cuenta 'custody' lo impide contablemente).
 CREATE TABLE ledger.freight_contracts (
-    id                          ulid_id PRIMARY KEY CHECK (id LIKE 'fct_%'),
-    publication_id              ulid_id REFERENCES ledger.publications(id),
+    id                          uuid PRIMARY KEY DEFAULT uuidv7(),
+    publication_id              uuid REFERENCES ledger.publications(id),
     channel                     ledger.contract_channel NOT NULL,
-    shipper_account_id          ulid_id NOT NULL REFERENCES auth.accounts(id), -- cargador (dueño de la mercancía)
-    carrier_account_id          ulid_id NOT NULL REFERENCES auth.accounts(id), -- transportista
-    origin_node_id              ulid_id NOT NULL REFERENCES world.network_nodes(id),
-    destination_node_id         ulid_id NOT NULL REFERENCES world.network_nodes(id),
+    shipper_account_id          uuid NOT NULL REFERENCES auth.accounts(id), -- cargador (dueño de la mercancía)
+    carrier_account_id          uuid NOT NULL REFERENCES auth.accounts(id), -- transportista
+    origin_node_id              uuid NOT NULL REFERENCES world.network_nodes(id),
+    destination_node_id         uuid NOT NULL REFERENCES world.network_nodes(id),
     freight_price               money_amount NOT NULL CHECK (freight_price > 0),
     declared_value              money_amount NOT NULL CHECK (declared_value > 0), -- base de la garantía del transportista
     deadline_sim                sim_time NOT NULL,
     status                      ledger.contract_status NOT NULL DEFAULT 'active',
     fill_bp                     INT CHECK (fill_bp BETWEEN 0 AND 10000),
-    escrow_account_id           ulid_id NOT NULL REFERENCES ledger.accounts(id), -- precio del flete (cargador)
-    carrier_guarantee_account_id ulid_id NOT NULL REFERENCES ledger.accounts(id),
-    custody_account_id          ulid_id NOT NULL REFERENCES ledger.accounts(id), -- mercancía en custodia
+    escrow_account_id           uuid NOT NULL REFERENCES ledger.accounts(id), -- precio del flete (cargador)
+    carrier_guarantee_account_id uuid NOT NULL REFERENCES ledger.accounts(id),
+    custody_account_id          uuid NOT NULL REFERENCES ledger.accounts(id), -- mercancía en custodia
     confirmed_at_sim            sim_time NOT NULL,
     settled_at_sim              sim_time,
     created_at                  TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -396,20 +411,21 @@ ALTER TABLE ledger.contract_deliveries
 
 -- Bloqueo triple atómico del CCRI (GDD 5.3 paso 3): mueve las garantías ya
 -- bloqueadas de la publicación/aceptación a las cuentas espejo del contrato.
--- Los IDs (ULID) los genera y pasa la capa de aplicación.
+-- Los IDs de transacción y contrato (UUIDv7) los genera y pasa la capa de
+-- aplicación; los IDs de partida se generan en la base con uuidv7()
+-- (DEFAULT de ledger.entries.id).
 CREATE OR REPLACE FUNCTION ledger.confirm_contract(
-    p_tx_id        ulid_id,
-    p_contract_id  ulid_id,
+    p_tx_id        uuid,
+    p_contract_id  uuid,
     p_sim_time     sim_time,
     p_quantity     stock_qty,
     p_unit_price   money_amount,
-    p_from_stock_account     ulid_id,  -- stock reservado de la publicación de venta
-    p_from_guarantee_account ulid_id,  -- garantía monetaria del vendedor (en publicación/aceptación)
-    p_from_escrow_account    ulid_id,  -- escrow del comprador (en publicación/aceptación)
-    p_to_stock_account       ulid_id,  -- cuenta espejo de stock del contrato
-    p_to_guarantee_account   ulid_id,  -- cuenta espejo de garantía del contrato
-    p_to_escrow_account      ulid_id,  -- cuenta espejo de escrow del contrato
-    p_entry_ids    ulid_id[]           -- 6 IDs de partida pre-generados
+    p_from_stock_account     uuid,  -- stock reservado de la publicación de venta
+    p_from_guarantee_account uuid,  -- garantía monetaria del vendedor (en publicación/aceptación)
+    p_from_escrow_account    uuid,  -- escrow del comprador (en publicación/aceptación)
+    p_to_stock_account       uuid,  -- cuenta espejo de stock del contrato
+    p_to_guarantee_account   uuid,  -- cuenta espejo de garantía del contrato
+    p_to_escrow_account      uuid   -- cuenta espejo de escrow del contrato
 ) RETURNS void AS $$
 DECLARE
     v_value     BIGINT := p_quantity * p_unit_price;
@@ -420,15 +436,20 @@ BEGIN
             'Bloqueo triple CCRI: stock + garantía + escrow');
 
     -- Stock reservado: publicación → contrato
-    INSERT INTO ledger.entries (id, transaction_id, account_id, amount) VALUES
-        (p_entry_ids[1], p_tx_id, p_from_stock_account,     -p_quantity),
-        (p_entry_ids[2], p_tx_id, p_to_stock_account,        p_quantity),
-    -- Garantía monetaria del vendedor: proporcional a la cantidad aceptada
-        (p_entry_ids[3], p_tx_id, p_from_guarantee_account, -v_guarantee),
-        (p_entry_ids[4], p_tx_id, p_to_guarantee_account,    v_guarantee),
+    INSERT INTO ledger.entries (transaction_id, account_id, amount) VALUES
+        (p_tx_id, p_from_stock_account,     -p_quantity),
+        (p_tx_id, p_to_stock_account,        p_quantity),
     -- Escrow del comprador: 100% del pago
-        (p_entry_ids[5], p_tx_id, p_from_escrow_account,    -v_value),
-        (p_entry_ids[6], p_tx_id, p_to_escrow_account,       v_value);
+        (p_tx_id, p_from_escrow_account,    -v_value),
+        (p_tx_id, p_to_escrow_account,       v_value);
+    -- Garantía monetaria del vendedor: proporcional a la cantidad aceptada.
+    -- Puede ser 0 en contratos pequeños (valor < 10): el CHECK amount <> 0
+    -- prohíbe partidas nulas, así que solo se asienta si hay importe.
+    IF v_guarantee <> 0 THEN
+        INSERT INTO ledger.entries (transaction_id, account_id, amount) VALUES
+            (p_tx_id, p_from_guarantee_account, -v_guarantee),
+            (p_tx_id, p_to_guarantee_account,    v_guarantee);
+    END IF;
     -- Los triggers (balance por cuenta, no-negatividad, doble entrada diferida)
     -- garantizan que o se asientan las tres partidas o ninguna.
 END;
@@ -440,17 +461,18 @@ $$ LANGUAGE plpgsql;
 -- reparte entre compensación al comprador y sink del banco central. La
 -- liberación FÍSICA del stock no entregado (en su ubicación actual) la asienta
 -- el shard con una transacción separada de tipo 'publication_release'.
+-- Los IDs de partida se generan en la base con uuidv7() (DEFAULT de
+-- ledger.entries.id).
 CREATE OR REPLACE FUNCTION ledger.settle_contract_prorata(
-    p_tx_id            ulid_id,
-    p_contract_id      ulid_id,
+    p_tx_id            uuid,
+    p_contract_id      uuid,
     p_sim_time         sim_time,
-    p_seller_cash      ulid_id,   -- caja del vendedor
-    p_buyer_cash       ulid_id,   -- caja del comprador
-    p_buyer_stock      ulid_id,   -- stock libre del comprador en destino
-    p_sink_account     ulid_id,   -- cuenta sink del banco central
-    p_seller_stock_release ulid_id, -- stock libre del vendedor en la ubicación física actual
-    p_compensation_bp  INT,       -- parte de la garantía que compensa al comprador (resto: sink)
-    p_entry_ids        ulid_id[]
+    p_seller_cash      uuid,   -- caja del vendedor
+    p_buyer_cash       uuid,   -- caja del comprador
+    p_buyer_stock      uuid,   -- stock libre del comprador en destino
+    p_sink_account     uuid,   -- cuenta sink del banco central
+    p_seller_stock_release uuid, -- stock libre del vendedor en la ubicación física actual
+    p_compensation_bp  INT     -- parte de la garantía que compensa al comprador (resto: sink)
 ) RETURNS void AS $$
 DECLARE
     c               ledger.contracts%ROWTYPE;
@@ -462,7 +484,6 @@ DECLARE
     v_guar_missing  BIGINT;
     v_comp          BIGINT;
     v_qty_missing   BIGINT;
-    v_i             INT := 1;
 BEGIN
     SELECT * INTO c FROM ledger.contracts WHERE id = p_contract_id FOR UPDATE;
     IF c.status <> 'active' THEN
@@ -484,27 +505,43 @@ BEGIN
 
     -- Lo entregado a tiempo: stock al comprador, pago y garantía proporcional al vendedor
     IF c.quantity_delivered > 0 THEN
-        INSERT INTO ledger.entries (id, transaction_id, account_id, amount) VALUES
-            (p_entry_ids[v_i],   p_tx_id, c.stock_reserve_account_id,   -c.quantity_delivered),
-            (p_entry_ids[v_i+1], p_tx_id, p_buyer_stock,                 c.quantity_delivered),
-            (p_entry_ids[v_i+2], p_tx_id, c.escrow_account_id,          -v_value_filled),
-            (p_entry_ids[v_i+3], p_tx_id, p_seller_cash,                 v_value_filled),
-            (p_entry_ids[v_i+4], p_tx_id, c.seller_guarantee_account_id, -v_guar_filled),
-            (p_entry_ids[v_i+5], p_tx_id, p_seller_cash,                 v_guar_filled);
-        v_i := v_i + 6;
+        INSERT INTO ledger.entries (transaction_id, account_id, amount) VALUES
+            (p_tx_id, c.stock_reserve_account_id,   -c.quantity_delivered),
+            (p_tx_id, p_buyer_stock,                 c.quantity_delivered),
+            (p_tx_id, c.escrow_account_id,          -v_value_filled),
+            (p_tx_id, p_seller_cash,                 v_value_filled);
+        -- La garantía proporcional puede redondear a 0 (contratos pequeños o
+        -- fills bajos): el CHECK amount <> 0 prohíbe partidas nulas.
+        IF v_guar_filled <> 0 THEN
+            INSERT INTO ledger.entries (transaction_id, account_id, amount) VALUES
+                (p_tx_id, c.seller_guarantee_account_id, -v_guar_filled),
+                (p_tx_id, p_seller_cash,                 v_guar_filled);
+        END IF;
     END IF;
 
     -- Lo faltante: escrow al comprador; garantía repartida compensación/sink;
     -- stock no entregado liberado como stock libre EN SU UBICACIÓN FÍSICA ACTUAL
     IF v_qty_missing > 0 THEN
-        INSERT INTO ledger.entries (id, transaction_id, account_id, amount) VALUES
-            (p_entry_ids[v_i],   p_tx_id, c.escrow_account_id,           -v_value_missing),
-            (p_entry_ids[v_i+1], p_tx_id, p_buyer_cash,                   v_value_missing),
-            (p_entry_ids[v_i+2], p_tx_id, c.seller_guarantee_account_id, -v_guar_missing),
-            (p_entry_ids[v_i+3], p_tx_id, p_buyer_cash,                   v_comp),
-            (p_entry_ids[v_i+4], p_tx_id, p_sink_account,                 v_guar_missing - v_comp),
-            (p_entry_ids[v_i+5], p_tx_id, c.stock_reserve_account_id,    -v_qty_missing),
-            (p_entry_ids[v_i+6], p_tx_id, p_seller_stock_release,         v_qty_missing);
+        INSERT INTO ledger.entries (transaction_id, account_id, amount) VALUES
+            (p_tx_id, c.escrow_account_id,           -v_value_missing),
+            (p_tx_id, p_buyer_cash,                   v_value_missing),
+            (p_tx_id, c.stock_reserve_account_id,    -v_qty_missing),
+            (p_tx_id, p_seller_stock_release,         v_qty_missing);
+        -- Reparto de la garantía incumplida. v_comp o la parte del sink pueden
+        -- ser 0 por división entera (el residuo va SIEMPRE al sink); el CHECK
+        -- amount <> 0 obliga a asentar solo las partidas con importe.
+        IF v_guar_missing <> 0 THEN
+            INSERT INTO ledger.entries (transaction_id, account_id, amount) VALUES
+                (p_tx_id, c.seller_guarantee_account_id, -v_guar_missing);
+            IF v_comp <> 0 THEN
+                INSERT INTO ledger.entries (transaction_id, account_id, amount) VALUES
+                    (p_tx_id, p_buyer_cash, v_comp);
+            END IF;
+            IF v_guar_missing - v_comp <> 0 THEN
+                INSERT INTO ledger.entries (transaction_id, account_id, amount) VALUES
+                    (p_tx_id, p_sink_account, v_guar_missing - v_comp);
+            END IF;
+        END IF;
     END IF;
 
     UPDATE ledger.contracts

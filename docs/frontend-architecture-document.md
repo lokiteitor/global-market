@@ -7,15 +7,20 @@
 |---|---|
 | **Proyecto** | Imperio Industrial — Simulación Económica MMO |
 | **Documento** | Frontend Architecture Document (FAD) |
-| **Versión** | 1.0 |
+| **Versión** | 1.1 |
 | **Fecha** | 2026-07-15 |
-| **Estado** | Propuesto — pendiente de aprobación por el Comité de Arquitectura |
-| **Alcance** | Exclusivamente el cliente web (frontend). El backend (GDD/SAD v1.2) es fijo y no se modifica. |
-| **Documentos normativos** | `docs/gdd.md` (GDD/SAD v1.2), `docs/arquitectura_imperio_industrial.md` (SAD backend v1.0), `specs/openapi.yaml` (contrato REST v1.0.0), `specs/schemas/*.sql` |
+| **Estado** | **v1 implementada** — documento vivo, alineado con el cliente real en `frontend/` (con simplificaciones v1 anotadas por sección; ver `frontend/README.md`) |
+| **Alcance** | Exclusivamente el cliente web (frontend). El backend (GDD/SAD v1.2) es fijo y no se modifica. El cliente vive en `frontend/` (directorio top-level del monorepo, **npm sin workspaces**; no existe una app anidada ni carpeta de paquetes compartidos). |
+| **Documentos normativos** | `docs/gdd.md` (GDD/SAD v1.2), `docs/arquitectura_imperio_industrial.md` (SAD backend v1.0), `specs/openapi.yaml` (contrato REST **v1.1.0**, con `format: uuid` e `Idempotency-Key`), `specs/ws-protocol.md` (protocolo WS, **normativo**), `specs/schemas/*.sql`, `docs/desarrollo.md` (ADR-IMPL) |
 | **Autoría** | Principal Frontend Software Architect |
 | **Regla de precedencia** | Ante discrepancia con el GDD/SAD o el contrato OpenAPI, **prevalece el backend** y este documento se corrige. El frontend nunca dicta el contrato. |
 
-> **Naturaleza de este documento.** El FAD es un documento de arquitectura *pre-desarrollo*. Define estructura, límites, contratos internos, patrones y decisiones — no implementación. No contiene código de producción; los pocos fragmentos ilustrativos que aparecen son *pseudo-firmas de interfaz* o *contratos de tipos*, presentes solo para fijar un límite sin ambigüedad, nunca como guía de implementación. Todo lo que aquí se decide es vinculante para el equipo de frontend salvo revisión formal vía ADR.
+**Changelog**
+
+- **v1.1** (2026-07-15) — "Implementado v1 con simplificaciones": alineado con la implementación real de `frontend/` (npm sin workspaces, árbol real en §10); protocolo WS resuelto y normativo en `specs/ws-protocol.md` (§4.4, ADR-FE-004, §27.5); IDs pasan de ULID con prefijos a **UUIDv7** y los branded types de `Ulid<T>` a `Id<T>` (C12, §20.6, ADR-IMPL-01); pipeline real (§23: npm, vitest 94 tests, vue-tsc, nuxt build); estado del roadmap FE (§26: FE-1..FE-5 cubiertas por la v1 con simplificaciones, FE-6..FE-10 pendientes).
+- **v1.0** (2026-07-15) — versión inicial propuesta (pre-desarrollo).
+
+> **Naturaleza de este documento.** El FAD nació como documento de arquitectura *pre-desarrollo*; desde la v1.1 es un **documento vivo** que refleja la implementación real de `frontend/`. Define estructura, límites, contratos internos, patrones y decisiones — no implementación. No contiene código de producción; los pocos fragmentos ilustrativos que aparecen son *pseudo-firmas de interfaz* o *contratos de tipos*, presentes solo para fijar un límite sin ambigüedad, nunca como guía de implementación. Todo lo que aquí se decide es vinculante para el equipo de frontend salvo revisión formal vía ADR. Donde la v1 implementada simplificó el diseño objetivo, la sección correspondiente lo anota como "(v1: …)" sin borrar el diseño; la lista consolidada de simplificaciones vive en `frontend/README.md`.
 
 ---
 
@@ -53,7 +58,7 @@
 
 ## 1. Resumen ejecutivo
 
-Imperio Industrial es un MMO de simulación económica, industrial y logística sobre un **mundo único, isométrico, persistente y compartido**. El servidor es la **única fuente de verdad** (authoritative server): simula la economía event-driven, mueve dinero y stock en un ledger ACID de doble entrada, y particiona el mundo en shards espaciales. El cliente **no ejecuta lógica de negocio**: envía intenciones, recibe eventos y renderiza estado.
+Imperio Industrial es un MMO de simulación económica, industrial y logística sobre un **mundo único, isométrico, persistente y compartido** *(v1: render top-down; la vista isométrica queda para FE-6 — ver `frontend/README.md`)*. El servidor es la **única fuente de verdad** (authoritative server): simula la economía event-driven, mueve dinero y stock en un ledger ACID de doble entrada, y particiona el mundo en shards espaciales. El cliente **no ejecuta lógica de negocio**: envía intenciones, recibe eventos y renderiza estado.
 
 Este documento define la arquitectura del **cliente web** que materializa ese contrato. Sus tesis centrales son:
 
@@ -65,7 +70,7 @@ Este documento define la arquitectura del **cliente web** que materializa ese co
 
 4. **Sim-time como reloj de dominio.** Todos los plazos llegan del servidor en **sim-time** (segundos desde el génesis, ratio 24×). La traducción a wall-clock es responsabilidad *exclusiva del cliente* y vive en un único servicio horario. Ninguna otra parte del código convierte tiempo.
 
-5. **El tiempo real se abstrae tras un puerto de transporte con Anti-Corruption Layer.** El backend expone un **WebSocket propio** (Notification/Event Gateway, con interest management) cuyo protocolo está fuera del OpenAPI, y un tablón **pull** por REST. El FAD adopta un **modelo de sincronización canónico** (rooms = áreas de interés, snapshots + patches, mensajes puntuales) tras un **puerto de transporte** (`NetworkTransport`) cuya implementación de referencia (`GatewayTransportAdapter`) habla el protocolo real del Gateway como ACL pura. Esta decisión se documenta en **ADR-FE-004** y es la pieza de riesgo de red más vigilada del frontend.
+5. **El tiempo real se abstrae tras un puerto de transporte con Anti-Corruption Layer.** El backend expone un **WebSocket propio** (Notification/Event Gateway, con interest management) cuyo protocolo está fuera del OpenAPI — hoy **definido y normativo en `specs/ws-protocol.md`** —, y un tablón **pull** por REST. El FAD adopta un **modelo de sincronización canónico** (rooms = áreas de interés, snapshots + patches, mensajes puntuales) tras un **puerto de transporte** (`NetworkTransport`) cuya implementación de referencia (`GatewayTransportAdapter`, `app/lib/net/gateway-transport.ts`) habla el protocolo real del Gateway como ACL pura. Esta decisión se documenta en **ADR-FE-004**; era la pieza de riesgo de red más vigilada del frontend y quedó **resuelta** con la publicación del protocolo (ADR-IMPL-08 en `docs/desarrollo.md`).
 
 El resto del documento desarrolla estas tesis hasta el nivel de límites de carpeta, contratos de puerto, políticas de reconexión, presupuestos de rendimiento y fases de entrega.
 
@@ -116,7 +121,7 @@ Los principios son las reglas que resuelven las decisiones no anticipadas por es
 
 **P1 — El servidor decide, el cliente presenta.** Toda mutación de dominio se origina en un evento o respuesta del servidor. La única excepción es la *predicción optimista*, que siempre está etiquetada, es siempre reversible y nunca se confunde con estado confirmado (§13.6). *Corolario:* si dudas de si algo va en el cliente o en el servidor, va en el servidor; si ya está en el servidor, el cliente no lo recalcula, lo pide o lo escucha.
 
-**P2 — Un dato, un dueño.** Cada pieza de estado tiene exactamente una store dueña (bounded context). El resto la lee por getter/selector, nunca la duplica. La normalización (§20.5) es obligatoria para colecciones de entidades con identidad (ULID).
+**P2 — Un dato, un dueño.** Cada pieza de estado tiene exactamente una store dueña (bounded context). El resto la lee por getter/selector, nunca la duplica. La normalización (§20.5) es obligatoria para colecciones de entidades con identidad (uuid).
 
 **P3 — Las fronteras son puertos, no imports.** Toda dependencia hacia afuera de una capa cruza por una *interfaz* (puerto) definida por la capa consumidora, no por la proveedora (Dependency Inversion). Infraestructura implementa puertos de aplicación; aplicación no conoce infraestructura concreta. Esto es lo que hace intercambiables WS-real/mock, REST/mock, Phaser/headless.
 
@@ -167,10 +172,10 @@ Las restricciones son condiciones impuestas desde fuera de la arquitectura del f
 | **C9** | **Ventana de mantenimiento diaria** (10–30 min, sim-time congelado). API responde `503 Retry-After`. | Estado de aplicación "mundo pausado" de primera clase (§12.9). |
 | **C10** | **Tablón es pull, no push.** Suscripciones push limitadas al *área de interés* y a *alertas explícitas*. | El módulo de mercado consulta REST con filtros; no espera un stream del tablón entero. |
 | **C11** | **Dinero y stock = enteros de punto fijo serializados como strings.** Nunca floats. | Tipo `Money`/`Quantity` dedicado; prohibido `parseFloat` sobre importes. |
-| **C12** | **IDs = ULID con namespace por tipo** (`veh_`, `ctr_`, `crg_`, `bld_`, …). | Claves de normalización y de branding de tipos (§20.6). |
+| **C12** | **IDs = UUID (v7, ordenable en el tiempo), sin prefijos por tipo.** *(v1 implementada: el diseño original preveía ULID con namespace por tipo; el namespacing perdido se compensa con branding de tipos en cliente — ver ADR-IMPL-01 en `docs/desarrollo.md`.)* | Claves de normalización y de branding de tipos `Id<T>` (§20.6, `app/lib/kernel/ids.ts`). |
 | **C13** | **Autorización por propiedad.** Una corporación solo comanda lo suyo (403 en caso contrario). | La UI distingue *observable* (todo el mundo visible) de *comandable* (solo lo propio); deshabilita comandos ajenos preventivamente. |
-| **C14** | **Contrato REST fijo** = `specs/openapi.yaml` v1.0.0. Envoltura `{ data, meta }` / `{ error }`. | Cliente REST generado desde OpenAPI; `meta.sim_time` alimenta el `SimClock`. |
-| **C15** | **El protocolo WebSocket del Gateway está fuera del OpenAPI** y es propio del backend. | Ver §4.4 y ADR-FE-004. |
+| **C14** | **Contrato REST fijo** = `specs/openapi.yaml` **v1.1.0** (`format: uuid`, cabecera `Idempotency-Key`). Envoltura `{ data, meta }` / `{ error }`. | Cliente REST tipado contra OpenAPI *(v1: espejo manual-fiel en `app/lib/api/types.ts`; generación automática pendiente)*; `meta.sim_time` / `meta.sim_time_seconds` alimentan el `SimClock`. |
+| **C15** | **El protocolo WebSocket del Gateway está fuera del OpenAPI** y es propio del backend. *(v1 implementada: definido y **normativo** en `specs/ws-protocol.md` — ver ADR-IMPL-08 en `docs/desarrollo.md`.)* | Ver §4.4 y ADR-FE-004. |
 
 ### 4.3 Restricciones de plataforma y despliegue
 
@@ -184,7 +189,9 @@ Las restricciones son condiciones impuestas desde fuera de la arquitectura del f
 
 La superficie de tiempo real del backend es la restricción de infraestructura más delicada del frontend y se documenta abiertamente, como haría cualquier estudio serio antes de comprometer el diseño.
 
-**El hecho.** El backend fijo describe un **Notification/Event Gateway** propio (TypeScript + Fastify) que distribuye eventos por WebSocket con *interest management*, y un tablón **pull** por REST. El OpenAPI declara explícitamente que el protocolo del WS está **fuera de ese documento**: es propio del backend, no un estándar de terceros con cliente prefabricado. **El backend no se modifica** (mandato del proyecto).
+> **Estado (v1 implementada): RESUELTO.** El protocolo del Gateway está **definido y acordado en `specs/ws-protocol.md`** (normativo; ADR-IMPL-08 en `docs/desarrollo.md`): frames JSON `hello/join/leave/ping` ↔ `snapshot/patch/message/pong/error`, rooms `corp:<account_id>` / `viewport:<bbox>` / `alerts:<account_id>`, `seq` monotónico **por conexión y room**, resync por re-`join`. El adaptador real (`app/lib/net/gateway-transport.ts`) lo implementa 1:1 tras el puerto `NetworkTransport`. El resto de esta sección conserva el razonamiento original, que sigue vigente como diseño.
+
+**El hecho.** El backend fijo describe un **Notification/Event Gateway** propio (TypeScript + Fastify) que distribuye eventos por WebSocket con *interest management*, y un tablón **pull** por REST. El OpenAPI declara explícitamente que el protocolo del WS está **fuera de ese documento**: es propio del backend, no un estándar de terceros con cliente prefabricado — hoy especificado en `specs/ws-protocol.md`. **El backend no se modifica** (mandato del proyecto).
 
 **La consecuencia.** El cliente debe hablar *exactamente* ese protocolo propio. Cualquier idiosincrasia del Gateway (formato de frame, forma de las suscripciones, envelopes `{data,meta}`) no puede filtrarse hacia la UI ni al dominio: hay que absorberla en una frontera.
 
@@ -200,7 +207,7 @@ La superficie de tiempo real del backend es la restricción de infraestructura m
 
 4. **La aplicación y la UI solo conocen el puerto.** Cambiar de transporte (real ↔ mock, o una futura reimplementación del Gateway) es configuración, no refactor. Todo lo específico del cable vive en el adaptador.
 
-**Por qué esto es lo correcto.** Es el patrón *Ports & Adapters* aplicado a una restricción de infraestructura: preserva (a) el mandato "backend no se modifica"; (b) la coherencia de ingeniería (nada finge un protocolo estándar donde hay uno propio); (c) la testabilidad (el puerto se sustituye por dobles). El riesgo residual —divergencia entre lo que el cliente asume y el protocolo real del Gateway— se concentra en un solo archivo (`GatewayTransportAdapter`) y se vigila con la suite de contract-tests de red (§22.6). **El protocolo exacto del Gateway debe acordarse con el equipo de backend antes de la Fase 4** (Networking) del roadmap; es el primer punto de sincronización inter-equipo.
+**Por qué esto es lo correcto.** Es el patrón *Ports & Adapters* aplicado a una restricción de infraestructura: preserva (a) el mandato "backend no se modifica"; (b) la coherencia de ingeniería (nada finge un protocolo estándar donde hay uno propio); (c) la testabilidad (el puerto se sustituye por dobles). El riesgo residual —divergencia entre lo que el cliente asume y el protocolo real del Gateway— se concentra en un solo archivo (`GatewayTransportAdapter`) y se vigila con la suite de contract-tests de red (§22.6). ~~El protocolo exacto del Gateway debe acordarse con el equipo de backend antes de la Fase 4 (Networking) del roadmap; es el primer punto de sincronización inter-equipo.~~ *(v1 implementada: acuerdo cumplido — el protocolo es `specs/ws-protocol.md`, normativo para gateway y cliente; ver ADR-IMPL-08 en `docs/desarrollo.md`.)*
 
 > **Nota para el lector.** En el resto del documento, "el cliente se une a una room" o "recibe un patch" se refiere a la abstracción del puerto `NetworkTransport`; el cable real es el WebSocket propio del Notification/Event Gateway.
 
@@ -310,7 +317,7 @@ El stack está fijado por mandato (C1–C6). Esta sección no *elige* —eso lo 
 
 **Rol:** lenguaje único de todo el frontend.
 
-**Por qué encaja:** un dominio económico con invariantes fuertes (punto fijo, ULID con namespace, sim-time, estados de contrato) exige **tipos como contrato** (P9). Se activan `strict`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`, `noImplicitOverride`. Los tipos de dominio se *derivan* del OpenAPI (generación) pero se *refinan* con *branded types* (`Money`, `Quantity`, `SimTime`, `Ulid<'veh'>`) que hacen imposible, por ejemplo, sumar un importe a una cantidad o pasar un `bld_` donde se espera un `veh_`.
+**Por qué encaja:** un dominio económico con invariantes fuertes (punto fijo, IDs uuid tipados, sim-time, estados de contrato) exige **tipos como contrato** (P9). Se activan `strict`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`, `noImplicitOverride`. Los tipos de dominio se *derivan* del OpenAPI *(v1: espejo manual-fiel en `app/lib/api/types.ts`; generación automática pendiente)* pero se *refinan* con *branded types* (`Money`, `Quantity`, `SimTime`, `Id<'vehicle'>`) que hacen imposible, por ejemplo, sumar un importe a una cantidad o pasar el id de un edificio donde se espera el de un vehículo — el namespacing que los prefijos ULID aportaban en el diseño original vive ahora en el sistema de tipos (ADR-IMPL-01).
 
 ### 6.4 Phaser 3
 
@@ -331,7 +338,7 @@ El stack está fijado por mandato (C1–C6). Esta sección no *elige* —eso lo 
 
 **Rol:** transporte de tiempo real, bajo el puerto `NetworkTransport` (ver §4.4 para el contrato de red y su resolución).
 
-**Por qué encaja:** el modelo *room + snapshot + patches + messages* es el modelo canónico de un cliente de mundo en vivo con *interest management*; adoptarlo da estructura probada a la sincronización. El **WebSocket nativo** es el transporte contra el Notification/Event Gateway del backend; el `GatewayTransportAdapter` traduce su protocolo propio (fuera del OpenAPI) a ese modelo como ACL pura (§12), y un adaptador mock guionizado implementa el mismo puerto para desarrollo/pruebas. El tablón y las consultas pull van por REST (C10), no por el socket.
+**Por qué encaja:** el modelo *room + snapshot + patches + messages* es el modelo canónico de un cliente de mundo en vivo con *interest management*; adoptarlo da estructura probada a la sincronización. El **WebSocket nativo** es el transporte contra el Notification/Event Gateway del backend; el `GatewayTransportAdapter` traduce su protocolo propio (fuera del OpenAPI; definido en `specs/ws-protocol.md`) a ese modelo como ACL pura (§12), y un adaptador mock guionizado implementa el mismo puerto para desarrollo/pruebas. El tablón y las consultas pull van por REST (C10), no por el socket.
 
 ### 6.6 Pinia
 
@@ -405,9 +412,9 @@ Formato: contexto → decisión → alternativas descartadas → consecuencias/t
 
 | Campo | Contenido |
 |---|---|
-| **Estado** | Aceptado — **requiere acordar el protocolo del Gateway con backend antes de Fase 4** |
-| **Contexto** | El backend fijo expone un Notification/Event Gateway WebSocket con protocolo **propio y fuera del OpenAPI** + tablón pull REST; el backend no se modifica (ver §4.4). |
-| **Decisión** | Definir un puerto `NetworkTransport` con un **modelo de sincronización canónico** (room/snapshot/patch/message), independiente del cable. Un único adaptador real, `GatewayTransportAdapter`, actúa como ACL sobre el WS propio del backend; un `MockTransportAdapter` guionizado implementa el mismo puerto para desarrollo/pruebas. |
+| **Estado** | Aceptado — **resuelto e implementado en v1**: el protocolo del Gateway está definido y acordado en `specs/ws-protocol.md` (normativo; ADR-IMPL-08 en `docs/desarrollo.md`). El acuerdo previo a Fase 4 que exigía este ADR se cumplió. |
+| **Contexto** | El backend fijo expone un Notification/Event Gateway WebSocket con protocolo **propio y fuera del OpenAPI** (especificado en `specs/ws-protocol.md`) + tablón pull REST; el backend no se modifica (ver §4.4). |
+| **Decisión** | Definir un puerto `NetworkTransport` con un **modelo de sincronización canónico** (room/snapshot/patch/message), independiente del cable. Un único adaptador real, `GatewayTransportAdapter` (v1: `app/lib/net/gateway-transport.ts`, que implementa `specs/ws-protocol.md` 1:1 con reconexión por backoff y re-join), actúa como ACL sobre el WS propio del backend; un transporte doble/guionizado implementa el mismo puerto para desarrollo/pruebas (v1: dobles del puerto en `tests/net/`). |
 | **Alternativa descartada — acoplar la UI/dominio directamente al protocolo del WS** | Filtraría la idiosincrasia del Gateway (formato de frame, envelopes) a toda la app; un cambio del protocolo obligaría a tocar N archivos en vez de uno. |
 | **Alternativa descartada — una librería de state-sync de terceros (con servidor propio)** | El backend no expone ese servidor y no se modifica; introducir una presupondría un protocolo inexistente al otro extremo. |
 | **Consecuencias** | + "Backend inmutable" respetado. + Idiosincrasia del cable aislada en un adaptador. + Transporte sustituible (real ↔ mock) por config → testable. − Hay que implementar y mantener la ACL. − Riesgo de divergencia con el protocolo real, mitigado con contract-tests (§22.6) y acuerdo inter-equipo. |
@@ -472,7 +479,7 @@ Formato: contexto → decisión → alternativas descartadas → consecuencias/t
 | FE-001 | Vue 3 vs React | C1 | — |
 | FE-002 | Nuxt 4 vs Vite pelado | C1 | Hidratación de estado en vivo (mitigado: mundo client-only) |
 | FE-003 | Phaser vs PixiJS/otros | C2 | Peso del bundle (mitigado: lazy en `/play`) |
-| FE-004 | Networking ACL del Gateway vs acoplar UI al WS | C3/C15 | **Alto**: divergencia con el protocolo real del Gateway (mitigado: contract-tests + acuerdo backend) |
+| FE-004 | Networking ACL del Gateway vs acoplar UI al WS | C3/C15 | ~~**Alto**: divergencia con el protocolo real del Gateway~~ **Resuelto**: protocolo normativo en `specs/ws-protocol.md` (ADR-IMPL-08); residual mitigado con contract-tests |
 | FE-005 | Pinia vs Redux/Vuex | C4 | Lógica de dominio filtrándose a stores (mitigado: revisión) |
 | FE-006 | Sass propio vs Tailwind/UI libs | C5/C6 | Coste de construir UI kit (planificado Fase 5) |
 | FE-007 | SimClock único | C8 | — |
@@ -531,14 +538,14 @@ El frontend se organiza en **seis capas** con una regla de dependencia estricta:
 
 #### Domain Layer
 - **Modelos de dominio** con el lenguaje ubicuo del GDD: `Building`, `Vehicle`, `Shipment`, `Contract`, `Publication`, `City`, `Concession`, `Region`, `LedgerAccount`, `Route`, `Link`, `Terminal`.
-- **Branded types**: `Money`, `Quantity`, `SimTime`, `Ulid<T>`, `RegionId`, `Coord`.
+- **Branded types**: `Money`, `Quantity`, `SimTime`, `Id<T>`, `RegionId`, `Coord`.
 - **Políticas de presentación** puras: formateo de dinero (punto fijo), cálculo de estados visuales (¿está este contrato "en riesgo" según su fill y su plazo?), *sin* reglas autoritativas.
 - **Máquinas de estado de UI** que espejan (no calculan) los estados del backend (ciclo de vida de contrato, de edificio, de vehículo).
 - **Prohibido**: cualquier dependencia hacia afuera; cualquier I/O; recalcular precios/demanda/pathfinding autoritativos.
 
 #### Infrastructure Layer
 - **REST client** generado desde `openapi.yaml`, con envoltura `{data,meta}`/`{error}`, reintentos, idempotencia, manejo de `503 Retry-After`.
-- **Mapeadores DTO ↔ dominio** (ACL REST): convierten strings de punto fijo a `Money`, ULID a `Ulid<T>`, sim-time a `SimTime`.
+- **Mapeadores DTO ↔ dominio** (ACL REST): convierten strings de punto fijo a `Money`, uuid a `Id<T>`, sim-time a `SimTime`.
 - **`SimClock`** (implementación de `Clock`).
 - **Storage** (persistencia local: preferencias, caché de assets versionada, layout de paneles) tras el puerto `Storage`.
 - **Telemetry/logging**.
@@ -648,11 +655,11 @@ Cada context espeja un dominio del backend, pero contiene **solo** la representa
 
 ### 9.2 Módulos compartidos (kernel del cliente)
 
-Transversales a todos los contexts, viven en `shared/` (§10):
+Transversales a todos los contexts, viven en el kernel compartido (v1: `app/lib/kernel/`, §10):
 
 - **Time**: `SimClock`, conversores sim↔wall, formateadores de plazo.
 - **Money/Quantity**: aritmética de punto fijo, formateo, tipo `Money`/`Quantity`.
-- **Ids**: `Ulid<T>` branded, parseo/validación de namespace.
+- **Ids**: `Id<T>` branded sobre uuid, validación de formato en la frontera (`idOf`) — v1 implementada en `app/lib/kernel/ids.ts` (el diseño original usaba `Ulid` con namespace por prefijo; ver ADR-IMPL-01).
 - **Event Bus**: bus tipado inter-subsistema (§19).
 - **Result/Error**: tipo `Result<T,E>` y taxonomía de errores del backend (mapeo de `error.code`).
 - **Geometry**: proyección isométrica, coordenadas, culling helpers.
@@ -699,179 +706,120 @@ Cada context define su propio *mapper* DTO↔dominio en su rebanada de infraestr
 
 ## 10. Organización del proyecto — estructura de carpetas completa
 
-La estructura combina **Feature-Sliced Design (FSD)** para las features de UI, un **núcleo de dominio/aplicación** independiente del framework, y las **infraestructuras pesadas** (game, network) como subsistemas de primer nivel. Se asume un **monorepo** (coherente con el monorepo del backend) con `apps/web` como la app cliente y `packages/` para código compartible.
+La estructura combina un **núcleo de dominio** independiente del framework (`app/lib/kernel/`), las **infraestructuras** de contrato y tiempo real (`app/lib/api/`, `app/lib/net/`) y las **capas de aplicación/presentación/render** sobre las convenciones de Nuxt 4. *(v1 implementada: el diseño original proponía un monorepo con workspaces — la app cliente anidada bajo `apps/` y paquetes compartibles bajo una carpeta de packages, organizados por Feature-Sliced Design. La v1 lo simplificó a `frontend/` top-level con **npm sin workspaces**, colapsando las rebanadas FSD en el árbol Nuxt que sigue; el mapeo a las seis capas de §8 se conserva íntegro. Ver `frontend/README.md`.)*
 
-### 10.1 Vista de alto nivel del monorepo
-
-```
-imperio-industrial/                 # monorepo (ya existente para el backend)
-├── engine/                         # backend Go        (existente, no se toca)
-├── gateway/                        # backend TS/Fastify (existente, no se toca)
-├── bots/  · stress/ · deploy/ · docs/ · specs/         (existentes)
-│
-├── apps/
-│   └── web/                        # ← EL CLIENTE (este documento)
-│
-└── packages/                       # código compartible (opcional, ver 10.7)
-    ├── api-types/                  # tipos generados desde specs/openapi.yaml
-    ├── domain-kernel/              # Money, SimTime, Ulid, Result (framework-agnostic)
-    └── config/                     # eslint, tsconfig, prettier compartidos
-```
-
-> **Decisión (ADR-FE-010, implícito):** los tipos del contrato REST se **generan** desde `specs/openapi.yaml` a `packages/api-types` y se versionan con el contrato. El frontend nunca escribe a mano un DTO del backend. La generación corre en CI y en un script `pnpm gen:api`. Si `specs/openapi.yaml` cambia, el build del cliente falla ruidosamente hasta reconciliar — frontera dura O5.
-
-### 10.2 Estructura interna de `apps/web`
+### 10.1 Vista de alto nivel del monorepo (real)
 
 ```
-apps/web/
-├── nuxt.config.ts                  # config Nuxt (runtimeConfig, modules, vite, sass)
-├── app.config.ts                   # config de app (tema por defecto, feature flags UI)
-├── tsconfig.json                   # strict; paths a src/*
-├── package.json
-├── vitest.config.ts · playwright.config.ts
-│
-├── public/                         # estáticos servidos tal cual (favicon, og, robots)
-│
-├── assets/                         # assets PROCESADOS por el build (no game runtime)
-│   ├── styles/                     # SISTEMA SASS (design system) — ver 10.4
-│   │   ├── settings/               # tokens: colores, escalas, tipografía, z-index, motion
-│   │   ├── tools/                  # mixins y funciones (media, punto-fijo-fmt, focus-ring)
-│   │   ├── generic/                # reset, box-sizing, normalizaciones
-│   │   ├── elements/               # estilos base de elementos HTML
-│   │   ├── objects/                # layout primitives (grid, stack, cluster, panel)
-│   │   ├── themes/                 # light / dark / high-contrast (mapas de tokens)
-│   │   └── index.scss              # @use/@forward: punto de entrada global
-│   ├── fonts/                      # fuentes propias (woff2) — ver 14.7
-│   └── icons/                      # sprite SVG de UI (no confundir con game assets)
-│
-├── src/
-│   ├── app/                        # CAPA "app" de FSD: composición raíz, providers
-│   │   ├── providers/              # inyección de puertos (network, renderer, clock…)
-│   │   ├── router-guards/          # auth guard, maintenance guard
-│   │   └── bootstrap/              # orquestación de arranque (ver 11.2 / diagrama init)
-│   │
-│   ├── pages/                      # rutas Nuxt (file-based routing)
-│   │   ├── index.vue               # portal / landing (SSG)
-│   │   ├── login.vue               # auth (SSR)
-│   │   ├── lobby.vue               # selección de corporación / estado del mundo
-│   │   ├── play.vue                # ← EL JUEGO (client-only, monta Phaser + socket)
-│   │   └── settings.vue
-│   │
-│   ├── layouts/                    # layouts Nuxt
-│   │   ├── default.vue             # portal
-│   │   ├── auth.vue
-│   │   └── game.vue                # layout del juego: canvas + HUD overlay (ver 15.3)
-│   │
-│   ├── modules/                    # ← FEATURES (FSD "features/entities" por bounded context)
-│   │   ├── session/
-│   │   ├── world-map/
-│   │   ├── buildings/
-│   │   ├── fleet/
-│   │   ├── logistics/
-│   │   ├── shipments/
-│   │   ├── market/                 # tablón, publicaciones, sorteo, OHLC
-│   │   ├── cities/
-│   │   ├── cadastre/               # concesiones
-│   │   ├── finance/                # ledger, saldos, garantías
-│   │   ├── notifications/
-│   │   └── diagnostics/
-│   │
-│   ├── components/                 # UI KIT compartido (widgets/ de FSD) — sin dominio
-│   │   ├── base/                   # Button, Modal, Tooltip, Panel, Tabs, DataTable…
-│   │   ├── charts/                 # OHLC/candlestick, sparkline, gauge (Canvas/SVG propio)
-│   │   ├── forms/                  # inputs tipados (MoneyInput, QuantityInput, SimTimeInput)
-│   │   └── feedback/               # Toast, Banner, Skeleton, EmptyState
-│   │
-│   ├── game/                       # ← RENDERING LAYER (Phaser). No importa Vue/components.
-│   │   ├── boot/                   # arranque de Phaser, config WebGL, escena Boot
-│   │   ├── scenes/                 # BootScene, PreloadScene, WorldScene, OverlayScene…
-│   │   ├── renderer/               # WorldRenderer (impl del puerto)
-│   │   ├── map/                    # tilemap por chunks, culling, LOD, streaming
-│   │   ├── entities/               # sprites: BuildingSprite, VehicleSprite, CitySprite…
-│   │   ├── pools/                  # object pooling (sprites, labels, partículas)
-│   │   ├── camera/                 # controlador de cámara (zoom/pan/follow/bounds)
-│   │   ├── input/                  # picking, drag, selección, context menu espacial
-│   │   ├── overlays/               # capas: congestión, propiedad, demanda, cobertura
-│   │   ├── view-models/            # tipos de proyección estado→render + selectores
-│   │   └── bridge/                 # puente Pinia↔Phaser (suscripción espacial) — ver 11.6
-│   │
-│   ├── network/                    # ← NETWORKING LAYER
-│   │   ├── transport/              # puerto NetworkTransport + adapters
-│   │   │   ├── gateway.adapter.ts  # ACL del Notification/Event Gateway (por defecto)
-│   │   │   └── mock.adapter.ts     # transporte mock guionizado (dev/test, ver 4.4)
-│   │   ├── rest/                   # cliente REST (OpenAPI), interceptores, idempotencia
-│   │   ├── pipeline/               # ordenación/dedup/idempotencia de patches, resync
-│   │   ├── reconnect/              # backoff, heartbeat, estado de conexión, recovery
-│   │   └── mappers/               # DTO↔dominio (ACL por context, ver 9.5)
-│   │
-│   ├── stores/                     # ← PINIA (una store por bounded context)
-│   │   ├── session.store.ts
-│   │   ├── world.store.ts
-│   │   ├── buildings.store.ts
-│   │   ├── fleet.store.ts
-│   │   ├── logistics.store.ts
-│   │   ├── shipments.store.ts
-│   │   ├── market.store.ts
-│   │   ├── cities.store.ts
-│   │   ├── cadastre.store.ts
-│   │   ├── finance.store.ts
-│   │   ├── notifications.store.ts
-│   │   └── diagnostics.store.ts
-│   │
-│   ├── application/                # ← APPLICATION LAYER (casos de uso + puertos)
-│   │   ├── ports/                  # NetworkTransport, WorldRenderer, Clock, RestApi…
-│   │   ├── use-cases/              # PublishOffer, AcceptPublication, AssignRoute, Build…
-│   │   └── policies/               # OwnershipPolicy, PredictionPolicy
-│   │
-│   ├── domain/                     # ← DOMAIN LAYER (modelos + tipos + state machines)
-│   │   ├── model/                  # Building, Vehicle, Contract, City, Concession…
-│   │   ├── value-objects/          # branded types de dominio (estados, enums del GDD)
-│   │   └── state-machines/         # ciclos de vida de contrato/edificio/vehículo (UI)
-│   │
-│   ├── composables/                # ← puente Application↔Vue (Composition API)
-│   │   ├── useMarketBoard.ts · useFleet.ts · useConstruction.ts · useSimClock.ts …
-│   │
-│   ├── shared/                     # ← KERNEL (framework-agnostic, ver 9.2)
-│   │   ├── time/ · money/ · ids/ · geometry/ · result/ · event-bus/ · logger/
-│   │
-│   ├── plugins/                    # plugins Nuxt (orden de arranque)
-│   │   ├── 01.pinia.ts
-│   │   ├── 02.network.client.ts    # crea el transporte y lo provee (client-only)
-│   │   ├── 03.sim-clock.client.ts
-│   │   ├── 04.telemetry.client.ts
-│   │   └── 05.error-handler.ts
-│   │
-│   └── config/                     # runtime config tipada, feature flags, endpoints
-│
-├── tests/
-│   ├── unit/ · integration/ · e2e/ · contract/ · perf/ · chaos/
-│   └── fixtures/                   # snapshots/patches de ejemplo, DTOs de contrato
-│
-└── env/                            # .env.example, esquema zod de variables de entorno
+global-market/                      # monorepo (sin workspaces)
+├── Makefile                        # orquestación (make frontend-install/dev/build, make verify…)
+├── backend/
+│   ├── engine/                     # motor Go           (existente, no se toca)
+│   ├── gateway/                    # TS/Fastify: REST + WS (existente, no se toca)
+│   ├── bots/ · migrations/ · seeds/
+├── frontend/                       # ← EL CLIENTE (este documento; npm, sin workspaces)
+├── infra/                          # docker-compose (PostgreSQL 18 + Caddy), verify.sh
+├── docs/ · specs/                  # documentación viva · openapi.yaml + ws-protocol.md
 ```
+
+> **Decisión (ADR-FE-010, implícito) — estado v1:** los tipos del contrato REST debían **generarse** desde `specs/openapi.yaml` a un paquete compartido de tipos versionado con el contrato. *(v1 implementada: sin workspaces no hay paquete aparte; los tipos son un **espejo manual-fiel** del contrato v1.1.0 en `app/lib/api/types.ts` — el frontend sigue sin inventar DTOs, pero la sincronía se mantiene por disciplina y revisión, no por codegen. La generación automática con gate de CI queda pendiente como frontera dura O5.)*
+
+### 10.2 Estructura interna de `frontend/` (árbol real v1)
+
+El árbol implementado colapsa la propuesta FSD original en las convenciones de Nuxt 4 (`app/`), conservando el mapeo 1:1 a las **seis capas** de §8 (anotado a la derecha):
+
+```
+frontend/
+├── nuxt.config.ts                  # config Nuxt (runtimeConfig público: apiBase=/api/v1, wsPath=/ws; proxy dev)
+├── tsconfig.json                   # strict
+├── package.json · package-lock.json  # npm, sin workspaces
+├── vitest.config.ts
+├── README.md                       # mapa al FAD + simplificaciones v1
+│
+├── app/
+│   ├── app.vue
+│   │
+│   ├── lib/kernel/                 # ← DOMAIN LAYER (kernel puro, sin framework — §9.2)
+│   │   ├── money.ts                #   punto fijo BigInt (Money/Quantity)
+│   │   ├── simtime.ts              #   ratio 24×, formato AÑO-DDD-HH:MM
+│   │   ├── ids.ts                  #   Id<T> branded sobre uuid (§20.6)
+│   │   ├── result.ts               #   Result<T,E> + taxonomía de errores
+│   │   ├── projection.ts           #   proyección lon/lat→px (v1 top-down; iso en FE-6)
+│   │   └── event-bus.ts            #   AppEventBus tipado (§19)
+│   │
+│   ├── lib/api/                    # ← INFRASTRUCTURE LAYER (contrato REST — §12.8)
+│   │   ├── types.ts                #   DTOs espejo manual-fiel de openapi.yaml v1.1.0
+│   │   ├── requests.ts             #   cuerpos de comando tipados
+│   │   └── client.ts               #   HttpClient + RestApi: {data,meta}/{error}, Idempotency-Key
+│   │
+│   ├── lib/net/                    # ← NETWORKING LAYER (§12)
+│   │   ├── transport.ts            #   puerto NetworkTransport (§4.4/§12.2)
+│   │   ├── gateway-transport.ts    #   GatewayTransportAdapter: specs/ws-protocol.md 1:1,
+│   │   │                           #   reconexión con backoff, re-join (ACL)
+│   │   ├── simclock.ts             #   SimClock — ÚNICO punto de conversión sim↔wall (P5)
+│   │   └── sync.ts                 #   pipeline snapshot/patch/message → stores, dedup por seq
+│   │
+│   ├── stores/                     # ← hub Pinia (una store por bounded context — §20)
+│   │   ├── session · sim · world · cities · buildings · fleet · shipments
+│   │   ├── market · finance · notifications · ui        (11 stores)
+│   │   └── replication.ts          #   registro de stores replicadas ante el pipeline de sync
+│   │
+│   ├── game/                       # ← RENDERING LAYER (Phaser; no importa Vue ni stores fuera del bridge)
+│   │   ├── boot.ts                 #   arranque perezoso de Phaser (client-only)
+│   │   ├── types.ts                #   puerto WorldRenderer + view-models (§11)
+│   │   ├── bridge.ts               #   puente stores→render (§11.6)
+│   │   ├── kinematics.ts           #   interpolación de vehículos (§11.7)
+│   │   ├── palette.ts              #   tema compartido con la UI (§15.15)
+│   │   └── scenes/                 #   WorldScene · OverlayScene
+│   │
+│   ├── components/                 # ← PRESENTATION LAYER (Vue)
+│   │   ├── base/                   #   UI kit propio en Sass: BaseButton, BaseModal, BaseTable,
+│   │   │                           #   BaseTabs, BaseToast, MoneyText, SimTimeText, CountdownText…
+│   │   ├── hud/                    #   TopBar · SideBar · BottomBar · InspectorPanel
+│   │   ├── panels/                 #   Market · Build · Production · Fleet · Finance · Cities
+│   │   └── game/GameCanvasHost.vue #   ÚNICO componente autorizado a tocar game/ (§11.2)
+│   │
+│   ├── composables/                # ← APPLICATION LAYER (casos de uso/puentes — §8)
+│   │   ├── useApi · useApiClient · useSession · useSimClock
+│   │   └── useConnection · useRooms · useOwnership · useWallClock
+│   │
+│   ├── pages/                      # rutas: index (portal) · login · lobby · settings
+│   │   └── play.vue                #   EL JUEGO (client-only; ensambla HUD + canvas + red)
+│   ├── layouts/                    # default (portal) · auth (login) · game (grid HUD §15.3)
+│   ├── middleware/auth.ts          # guard de sesión (sin token → /login)
+│   ├── plugins/                    # 02.network.client.ts (DI de la capa de red) ·
+│   │                               # 03.simclock.client.ts (ticker del reloj)
+│   └── assets/styles/              # ITCSS/7-1: settings (tokens --ii-*) · generic ·
+│                                   # elements · objects · themes (oscuro) · index.scss
+│
+└── tests/                          # vitest (94 tests): kernel · net (dobles del puerto) ·
+                                    # game (renderer fake) · ui (happy-dom)
+```
+
+Elementos del diseño original aún no materializados (siguen siendo diseño objetivo, no descartes): `modules/` por feature (FSD), raíces separadas `application/`/`domain/` (en v1 el dominio puro es `lib/kernel/` y la orquestación vive en composables + acciones `apply*` de stores), `network/mappers/` por context, stores `logistics`/`cadastre`/`diagnostics`, `public/`, `env/` con esquema zod, carpetas `charts/`/`forms/`/`feedback/` del UI kit y `playwright.config.ts`. *(v1: ver la lista de simplificaciones en `frontend/README.md`.)*
 
 ### 10.3 Justificación de la organización
 
-- **`modules/` (features por context) vs `game/`, `network/`, `stores/`, `application/`, `domain/`.** Las *features de UI* se agrupan por bounded context (FSD): cada `modules/<context>/` contiene sus componentes Vue, sus composables y sus vistas. El **estado** (`stores/`), la **lógica de aplicación** (`application/`) y el **dominio** (`domain/`) se extraen a raíces propias porque son *transversales* y deben permanecer **framework-agnostic** y testeables sin montar Vue. Esto materializa la regla de dependencias del §8: `modules/` (presentation) → `composables/`/`application/` → `domain/`; `game/` y `network/` implementan puertos de `application/`.
+- **Features por context vs `game/`, `lib/net/`, `stores/`.** En el diseño original las *features de UI* se agrupaban por bounded context (FSD, `modules/<context>/`), con raíces propias `application/` y `domain/` transversales. *(v1: los paneles por context viven en `components/panels/`, la lógica de aplicación en `composables/` + acciones `apply*` de stores, y el dominio puro en `lib/kernel/` — misma regla de dependencias del §8 con menos carpetas: `components/`/`pages/` (presentation) → `composables/` (application) → `lib/kernel/` (domain); `game/` y `lib/net/` implementan puertos.)*
 
-- **`game/` totalmente separado de `components/`.** Regla física que hace cumplir O2: el linter prohíbe que `game/**` importe de `components/**` o `modules/**`, y viceversa que `components/**`/`modules/**` importen de `game/scenes/**` o `game/renderer/**`. El único puente permitido es `game/bridge/` (suscripción a stores) y el `WorldRenderer` (puerto).
+- **`game/` totalmente separado de `components/`.** Regla física que hace cumplir O2: `game/**` no importa de `components/**` ni de Vue, y `components/**` no importa de `game/scenes/**`. Los únicos puentes permitidos son `game/bridge.ts` (suscripción a stores) y el puerto `WorldRenderer` (`game/types.ts`); el único componente que toca `game/` es `components/game/GameCanvasHost.vue`. *(v1: la regla se cumple por convención y revisión; el linter de fronteras que la automatiza queda pendiente, §23.3.)*
 
-- **`shared/` como kernel puro.** Nada de Vue, Phaser ni red. Solo tipos y utilidades de dominio universal (tiempo, dinero, ids, geometría, bus). Es lo que se podría extraer a `packages/domain-kernel` (§10.7).
+- **`lib/kernel/` como kernel puro.** Nada de Vue, Phaser ni red. Solo tipos y utilidades de dominio universal (tiempo, dinero, ids, proyección, result, bus). Es lo que se podría extraer a un paquete compartido si el monorepo adoptara workspaces (§10.7).
 
 ### 10.4 Arquitectura de estilos (Sass 7-1 / ITCSS adaptado)
 
 `assets/styles/` sigue una variante de **ITCSS** (capas de especificidad creciente) con `@use`/`@forward` (nunca `@import`, deprecado):
 
 ```
-settings/  → tokens puros (sin salida CSS): $color-*, $space-*, $font-*, $z-*, $motion-*
-tools/     → mixins/funciones (sin salida CSS): @mixin media(), @function fixed-fmt()
+settings/  → tokens puros: custom properties --ii-* (color, espacio, tipografía, z, motion)
+tools/     → mixins/funciones (sin salida CSS)          (v1: aún sin capa tools/)
 generic/   → reset, box-sizing (primera salida CSS)
 elements/  → html, body, headings, a, form base
-objects/   → layout sin cosmética: .o-stack, .o-cluster, .o-grid, .o-panel
-themes/    → mapas de tokens por tema (light/dark/high-contrast) vía custom properties
+objects/   → layout sin cosmética: grid, stack, panel
+themes/    → mapas de tokens por tema vía custom properties (v1: tema oscuro)
 ```
 
-Los **componentes** no usan estas capas globales para su cosmética propia: usan **CSS Modules** (`Component.module.scss`) que *consumen* `settings`/`tools` vía `@use`. Así, lo global es solo *tokens + layout*, y lo local (cosmética de cada componente) queda **encapsulado**. Ver §15.2.
+Los **componentes** no usan estas capas globales para su cosmética propia: la encapsulan localmente consumiendo los tokens. *(v1: con `<style lang="scss" scoped>` de Vue SFC en lugar de CSS Modules — misma garantía de encapsulación sin *specificity wars*.)* Así, lo global es solo *tokens + layout*, y lo local (cosmética de cada componente) queda **encapsulado**. Ver §15.2.
 
 ### 10.5 Convenciones de nombres y archivos
 
@@ -883,11 +831,11 @@ Los **componentes** no usan estas capas globales para su cosmética propia: usan
 | Casos de uso | PascalCase `*UseCase` | `AcceptPublicationUseCase.ts` |
 | Modelos de dominio | PascalCase | `Contract.ts` |
 | Puertos | PascalCase interface | `NetworkTransport.ts` |
-| Adaptadores | `*.adapter.ts` | `gateway.adapter.ts` |
+| Adaptadores | `*-transport.ts` / `*.adapter.ts` | `gateway-transport.ts` (v1) |
 | Mappers | `*.mapper.ts` | `contract.mapper.ts` |
 | Sprites Phaser | `*Sprite.ts` | `VehicleSprite.ts` |
 | Escenas Phaser | `*Scene.ts` | `WorldScene.ts` |
-| CSS Modules | `*.module.scss` | `Panel.module.scss` |
+| Estilos de componente | `<style lang="scss" scoped>` en el SFC (v1; el diseño original preveía CSS Modules `*.module.scss`) | `BasePanel.vue` |
 | Tests | `*.spec.ts` / `*.e2e.ts` | `AcceptPublication.spec.ts` |
 
 ### 10.6 Nuxt: qué se renderiza dónde
@@ -902,9 +850,9 @@ Los **componentes** no usan estas capas globales para su cosmética propia: usan
 
 Regla dura (repite §6.2): **el estado de dominio en vivo nunca se hidrata desde SSR**. `/play` es una isla cliente; Nuxt entrega el shell y el arranque (§11.2) monta el mundo contra el socket.
 
-### 10.7 `packages/` compartidos (opcional, recomendado)
+### 10.7 Paquetes compartidos (diseño objetivo, no implementado)
 
-Si el equipo de backend (TS/Fastify) y el frontend comparten tipos, `packages/api-types` y `packages/domain-kernel` permiten **una sola definición** de `Money`, `SimTime`, `Ulid`, códigos de error, y de los DTO del contrato. Beneficio: el mismo `error.code` que emite el Gateway tiene su tipo en el cliente. Coste: disciplina de versionado del monorepo. **Recomendado** desde Fase 2; no bloqueante para Fase 1 (donde `api-types` puede vivir dentro de `apps/web`).
+Si el equipo de backend (TS/Fastify) y el frontend compartieran tipos vía workspaces, paquetes de tipos del contrato y del kernel de dominio permitirían **una sola definición** de `Money`, `SimTime`, `Id`, códigos de error, y de los DTO del contrato. Beneficio: el mismo `error.code` que emite el Gateway tiene su tipo en el cliente. Coste: disciplina de versionado del monorepo. *(v1 implementada: el monorepo va **sin workspaces** por mandato del proyecto — ver `docs/desarrollo.md` §1 —, así que los tipos del contrato viven en `app/lib/api/types.ts` y el kernel en `app/lib/kernel/`. La extracción a paquetes queda como opción futura si se adoptan workspaces.)*
 ---
 
 ## 11. Integración de Phaser en Nuxt/Vue
@@ -1004,7 +952,7 @@ stateDiagram-v2
 
 Este es el corazón de "cómo Phaser se comunica con Pinia y comparte estado". La regla: **Phaser no lee stores arbitrariamente; se suscribe a proyecciones espaciales acotadas a lo visible.**
 
-`game/bridge/` implementa un **WorldStateBridge** que:
+El bridge (v1: `app/game/bridge.ts`) implementa un **WorldStateBridge** que:
 
 1. **Observa** las stores de gameplay (buildings, fleet, shipments, logistics, cities) mediante `store.$subscribe` / `watch` sobre *getters espaciales* parametrizados por el **viewport actual** (la cámara define qué chunks son visibles).
 2. **Deriva view-models de render**: estructuras planas y baratas (`BuildingVM`, `VehicleVM`, `CityVM`) que contienen solo lo que el sprite necesita (posición isométrica, tipo, nivel, estado visual, flags de selección/propiedad), no la entidad de dominio completa.
@@ -1134,7 +1082,7 @@ interface NetworkTransport {
 - `RoomSpec` describe **qué** se quiere observar: `world:region:<regionId>`, `fleet:corp:<corpId>`, `alerts:corp:<corpId>`, `viewport:<bbox>`. Es la expresión cliente del **interest management** del Gateway.
 - `RoomHandle` es opaco; el adaptador lo mapea al mecanismo real del Gateway (una suscripción con filtros, no necesariamente una "sala" física).
 
-**El adaptador real** (`GatewayTransportAdapter`) y el adaptador mock de pruebas implementan esto (§4.4). El resto de esta sección describe el *comportamiento* que el transporte debe garantizar; el `GatewayTransportAdapter` lo consigue como ACL sobre el WS real del backend.
+**El adaptador real** (`GatewayTransportAdapter`) y el adaptador mock de pruebas implementan esto (§4.4). El resto de esta sección describe el *comportamiento* que el transporte debe garantizar; el `GatewayTransportAdapter` lo consigue como ACL sobre el WS real del backend. *(v1 implementada: el cable real es `specs/ws-protocol.md` — frames JSON `hello/join/leave/ping` ↔ `snapshot/patch/message/pong/error` — y el adaptador vive en `app/lib/net/gateway-transport.ts`.)*
 
 ### 12.3 Rooms = áreas de interés
 
@@ -1146,6 +1094,8 @@ El GDD (§14.2, §19) define **interest management**: el cliente solo recibe eve
 | `corp:<corpId>` | Todo lo *propio* (edificios, flota, contratos, finanzas) allá donde esté | Toda la sesión |
 | `alerts:<corpId>` | Alertas explícitas configuradas por el jugador (GDD §14.2) | Toda la sesión |
 | `market:watch:<filter>` | *Opcional*: notificación de aparición de ofertas que casan un filtro guardado (push de alerta, no del tablón entero — C10) | Mientras el filtro esté activo |
+
+> **Rooms reales (v1 implementada, `specs/ws-protocol.md` §3):** `corp:<account_id>` (todo lo propio: edificios, vehículos, cargamentos, publicaciones, contratos, cuentas del ledger), `viewport:<minLon>,<minLat>,<maxLon>,<maxLat>` (entidades espaciales del bbox; **un solo viewport activo por conexión** — un `join` nuevo reemplaza al anterior) y `alerts:<account_id>` (solo `message`, sin snapshot de estado). `market:watch:` queda como diseño futuro.
 
 **Regla dura (C10):** no existe una room "tablón global". El tablón se consulta por REST (`GET /contracts/board`). Solo se suscriben *alertas* de mercado, nunca el stream completo.
 
@@ -1177,7 +1127,7 @@ sequenceDiagram
     end
 ```
 
-- El **token** proviene del login REST (`/auth/sessions`) y se pasa en el upgrade del WS.
+- El **token** proviene del login REST (`/auth/sessions`) y se presenta tras el upgrade del WS *(v1: como **primer frame `hello`** — nunca en la URL —; el gateway responde `hello_ok` con `sim_seconds`/`frozen` o cierra con código 4401, `specs/ws-protocol.md` §1)*.
 - Tras conectar, el cliente hace `join` de sus rooms base y recibe **snapshots** iniciales (§12.6) que *bootstrappean* las stores antes de aplicar patches.
 - El primer `meta.sim_time` (de la respuesta REST o del snapshot) **inicializa el `SimClock`**.
 
@@ -1186,10 +1136,12 @@ sequenceDiagram
 El modelo de sincronización es **snapshot inicial + patches incrementales ordenados**, idempotente y recuperable:
 
 - **Snapshot**: estado completo y autoritativo de una room en un `sim_time` dado. Reemplaza (no fusiona parcialmente) el subárbol correspondiente en las stores. Se recibe al `join`, y de nuevo tras un *resync* (§12.13).
-- **Patch**: delta con `{ sim_time, sequence, ops[] }`. Las `ops` son `upsert`/`remove`/`update-field` sobre entidades identificadas por ULID. Se aplican **en orden** `(sim_time, sequence)` (espejando el desempate del backend, GDD §1.1).
+- **Patch**: delta con `{ sim_time, sequence, ops[] }`. Las `ops` son `upsert`/`remove`/`update-field` sobre entidades identificadas por su id (uuid). Se aplican **en orden** `(sim_time, sequence)` (espejando el desempate del backend, GDD §1.1).
 - **Message**: evento puntual sin estado persistente (resultado de sorteo, alerta, aviso de mantenimiento). No entra en el pipeline de patches; se enruta a los casos de uso correspondientes.
 
-**Pipeline de aplicación de patches** (`network/pipeline/`):
+> **Forma real (v1 implementada, `specs/ws-protocol.md` §4):** los frames llevan `{ room, seq, sim_seconds, ops[] }` con `seq` monotónico **por conexión y room** (snapshot fija `seq = 0`; primer patch `seq = 1`); las `ops` son `upsert` (entidad completa, no parcial) y `remove`. El orden de entrega es el del socket (TCP), así que el pipeline v1 (`app/lib/net/sync.ts`) se reduce a **dedup por `seq`** + aplicación idempotente; no hay detección de huecos intra-conexión — tras una reconexión se re-hace `join` y el snapshot nuevo resincroniza (§12.13).
+
+**Pipeline de aplicación de patches** (v1: `app/lib/net/sync.ts`):
 
 ```mermaid
 graph LR
@@ -1234,7 +1186,7 @@ El cliente **no** hace *lag compensation* al estilo FPS (rewind de hitboxes): no
 **La mayoría de comandos van por REST** (coherente con `openapi.yaml`: construir, publicar, aceptar, asignar ruta, comprar slot, renovar concesión…). El WS se reserva para *mensajes* de tiempo real que el Gateway acepte (si los hay); por defecto, el cliente **no** asume comandos por WS.
 
 Cada comando REST:
-- Lleva una **`Idempotency-Key`** (ULID de cliente) para tolerar reintentos sin doble ejecución (P6) — el backend, siendo autoritativo y transaccional, es el árbitro; la clave evita duplicar una publicación por un reintento de red.
+- Lleva una **`Idempotency-Key`** (uuid generado por el cliente; cabecera de `openapi.yaml` v1.1.0) para tolerar reintentos sin doble ejecución (P6) — el backend, siendo autoritativo y transaccional, es el árbitro: almacena la respuesta en `auth.idempotency_keys` y la reproduce ante una clave repetida (ADR-IMPL-09). El cliente v1 la añade automáticamente en todos los comandos (`app/lib/api/client.ts`).
 - Es **idempotente en efecto** desde la perspectiva del cliente: si la respuesta se pierde pero el comando se aplicó, el reintento con la misma clave no crea un segundo efecto.
 - Devuelve `{data, meta}` en éxito o `{error:{code,message,details}}` tipado; el cliente **mapea `error.code`** a UX (§13.7). Nunca inventa el resultado.
 
@@ -1282,7 +1234,7 @@ El backend tiene un techo de capacidad consciente. El cliente coopera:
 
 - **Coalescing**: intents repetidos/redundantes del mismo tipo (p. ej. arrastrar un slider de cantidad) se *debouncean* antes de convertirse en comando.
 - **Cola con límite**: los comandos en vuelo tienen un límite; si se excede (red lenta), la UI muestra "procesando" en vez de disparar N peticiones.
-- **Rate-limit awareness**: ante `429` (rate limit, idéntico para humanos y bots, GDD §9), el cliente respeta el backoff que indique el servidor y comunica al jugador que vaya más despacio, sin reintentar en tromba.
+- **Rate-limit awareness**: ante `429` (rate limit, idéntico para humanos y bots, GDD §9), el cliente respeta el backoff que indique el servidor y comunica al jugador que vaya más despacio, sin reintentar en tromba. *(v1 implementada: el gateway aplica **300 req/min por cuenta** y responde `429 RATE_LIMITED` con cabecera `Retry-After` en segundos.)*
 
 ### 12.11 Heartbeats y salud de conexión
 
@@ -1343,7 +1295,7 @@ flowchart TD
     GW["Notification/Event Gateway (WSS)\ninterest management"]
     NT["NetworkTransport (ACL)\nsnapshot/patch/message"]
     PIPE["Patch Pipeline\norden · dedup · idempotencia"]
-    MAP["Mappers DTO→dominio\nMoney · SimTime · Ulid"]
+    MAP["Mappers DTO→dominio\nMoney · SimTime · Id"]
     STORE["Pinia stores\n(dominio normalizado)"]
     VUE["Vue (HUD/paneles)\nreactivo"]
     BRIDGE["WorldStateBridge\nview-models espaciales"]
@@ -1363,8 +1315,8 @@ flowchart TD
 
 1. **Gateway → NT**: el frame WS crudo del Gateway se traduce al modelo `snapshot|patch|message` (ACL, §4.4/§12.2).
 2. **NT → Pipeline**: ordenación por `(sim_time, sequence)`, dedup, detección de huecos (§12.5).
-3. **Pipeline → Mappers**: los DTO crudos (strings de punto fijo, ULID, sim-time en segundos) se convierten a **tipos de dominio branded** (`Money`, `Quantity`, `SimTime`, `Ulid<T>`). Aquí, y **solo aquí**, se cruza la frontera de infraestructura (§9.5).
-4. **Mappers → Store**: aplicación **idempotente** a la store dueña, normalizada por ULID (P2, §20.5).
+3. **Pipeline → Mappers**: los DTO crudos (strings de punto fijo, uuid, sim-time en segundos) se convierten a **tipos de dominio branded** (`Money`, `Quantity`, `SimTime`, `Id<T>`). Aquí, y **solo aquí**, se cruza la frontera de infraestructura (§9.5).
+4. **Mappers → Store**: aplicación **idempotente** a la store dueña, normalizada por id (P2, §20.5).
 5. **Store → Vue**: reactividad de grano fino; los componentes que leen los getters afectados se re-renderizan.
 6. **Store → Bridge → Phaser**: el bridge deriva view-models espaciales acotados al viewport y emite diffs al renderer (§11.6), que reconcilia sprites desde el pool.
 
@@ -1377,8 +1329,8 @@ sequenceDiagram
     participant NT
     participant Store as fleet.store
     participant Sprite as VehicleSprite
-    Shard->>GW: evento hito: veh_X llega a nodo N (sim_time, seq)
-    GW->>NT: patch { upsert veh_X: {link, tEnter, speedProfile} }
+    Shard->>GW: evento hito: vehículo X llega a nodo N (sim_time, seq)
+    GW->>NT: patch { upsert vehicle X: {link, tEnter, speedProfile} }
     NT->>Store: apply idempotente (mapeado a dominio)
     Note over Store: verdad cinemática actualizada
     loop cada frame de Phaser
@@ -1523,7 +1475,7 @@ El backend define una taxonomía de `error.code` (SAD §10: `INSUFFICIENT_COLLAT
 | `422 INSUFFICIENT_COLLATERAL` | Garantía insuficiente | Revertir predicción; señalar el campo; sugerir capital/menor cantidad |
 | `409` | Conflicto (publicación agotada, cooldown, stock ya reservado) | Revertir; refrescar el ítem del tablón; explicar |
 | `403` | Recurso ajeno / vehículo SELLADO | No debería ocurrir si `OwnershipPolicy` funcionó; log de discrepancia + revertir |
-| `404` | ULID no resuelto | Entidad desapareció; refrescar vista |
+| `404` | Id (uuid) no resuelto | Entidad desapareció; refrescar vista |
 | `429` | Rate limit | Backoff, "ve más despacio" (§12.10) |
 | `503 Retry-After` | Ventana de mantenimiento | Estado `frozen` (§12.9), no error |
 | `401` | Sesión expirada | Refresh de token o re-login |
@@ -1549,6 +1501,8 @@ Estos cuatro estados son de primera clase en el modelo de vista (§20.7) y se pi
 ## 14. Gestión de assets
 
 Los assets del cliente se dividen en dos universos que **no deben mezclarse**: (a) **assets de UI** (fuentes, iconos SVG, imágenes de portal) procesados por el build de Nuxt/Vite; y (b) **assets de juego** (spritesheets, atlases, tilemaps, audio) cargados en runtime por el **Loader de Phaser**. Esta sección cubre spritesheets, tilemaps, audio, fuentes, lazy loading, caché y versionado.
+
+> *(v1 implementada: el mundo se dibuja con **gráficos procedurales** de Phaser — `Graphics`/`generateTexture` — sin atlases ni assets binarios, ver `frontend/README.md`. Todo el pipeline de assets de esta sección — atlases, tilesets, audio, manifiesto con hash — es diseño objetivo para cuando exista arte; llega con FE-6+.)*
 
 ### 14.1 Taxonomía de assets
 
@@ -1635,7 +1589,7 @@ flowchart LR
     MAN --> PHL
 ```
 
-- El empaquetado (texture packing, audio sprite, export de tilemaps) es un **paso de build reproducible** (script `pnpm build:assets`), versionado en el repo o en un pipeline de arte. El resultado (atlases + manifiesto) es lo que consume el runtime, nunca el arte crudo.
+- El empaquetado (texture packing, audio sprite, export de tilemaps) es un **paso de build reproducible** (script npm `build:assets`, pendiente en v1: no hay assets binarios aún), versionado en el repo o en un pipeline de arte. El resultado (atlases + manifiesto) es lo que consume el runtime, nunca el arte crudo.
 - **Validación en CI**: presupuestos de tamaño de atlas y de peso total de assets críticos se verifican en CI; un atlas que exceda el presupuesto rompe el build (§21.6, §23.6).
 ---
 
@@ -1691,12 +1645,12 @@ El layout `game.vue` compone el mundo y la UI en capas z:
 | **Modal** | Interacción que bloquea el fondo | Sí | Centro, overlay | Confirmaciones críticas, publicación de contrato |
 | **Diálogo** | Modal pequeño de decisión | Sí | Centro | "¿Cancelar publicación?" |
 | **Tooltip** | Info efímera al hover/focus | No | Anclado al target | Detalle de sprite, ayuda de campo |
-| **Toast/Notificación** | Aviso no bloqueante | No | Esquina | "Contrato liquidado", "Avería en veh_X" |
+| **Toast/Notificación** | Aviso no bloqueante | No | Esquina | "Contrato liquidado", "Avería en el vehículo X" |
 | **Popover/Menú** | Acciones contextuales | No | Anclado | Menú contextual espacial, dropdowns |
 
 ### 15.5 Gestión de ventanas y paneles (window manager)
 
-Un **WindowManager** (composable + slice de UI store) gestiona el estado de paneles/ventanas: abiertos, posición, tamaño, z-order, acoplado/flotante, colapsado.
+Un **WindowManager** (composable + slice de UI store) gestiona el estado de paneles/ventanas: abiertos, posición, tamaño, z-order, acoplado/flotante, colapsado. *(v1: el panel de gestión activo se acopla en **posición fija** sobre el canvas, gobernado por `ui.store`; el WindowManager con paneles flotantes/redimensionables queda pendiente — ver `frontend/README.md`.)*
 
 - **Acoplables**: paneles pueden vivir acoplados en la sidebar o desprenderse como ventanas flotantes (para multi-monitor / power users con muchas corporaciones que gestionar).
 - **Persistencia de layout**: la disposición se guarda en `Storage` por usuario (§20.8); al reabrir, el jugador recupera su workspace.
@@ -1721,7 +1675,7 @@ Dos mecanismos según densidad:
 - **DataTable virtualizada** (§21.9): base del tablón, historial de contratos, lista de flota, inventarios. Ordenación, filtrado, columnas configurables, selección múltiple. Virtualiza filas para listas de miles.
 - **MoneyCell / QuantityCell**: renderizan `Money`/`Quantity` (punto fijo) con formateo localizado, números tabulares, signo y color; **nunca** hacen aritmética de float (P10, C11).
 - **SimTimeCell / DeadlineCell**: muestran plazos en sim-time + wall-clock + countdown vivo (suscrito al `SimClock`).
-- **OHLC/Candlestick chart** (§15.13): historial de precios por producto/región (GDD §5.2), Canvas/SVG propio.
+- **OHLC/Candlestick chart** (§15.13): historial de precios por producto/región (GDD §5.2), Canvas/SVG propio. *(v1: el OHLC se muestra **solo como tabla** en MarketPanel; el gráfico Canvas queda pendiente — ver `frontend/README.md`.)*
 - **StatusBadge**: pinta estados de dominio (contrato: aceptado/en ejecución/liquidado; edificio: operativa/embargo; etc.) con la máquina de estados de UI (§20.9).
 
 ### 15.9 HUD — barra superior (top bar)
@@ -1783,7 +1737,7 @@ El mundo es un **único mapa isométrico persistente, enorme y compartido** (GDD
 
 ### 16.2 Proyección isométrica
 
-- Proyección **isométrica 2:1** (o dimétrica según arte), con un `IsoProjection` en `shared/geometry` que convierte **coordenadas de mundo (celda) ↔ coordenadas de pantalla** de forma centralizada. Toda conversión pasa por ahí (no hay math iso disperso).
+- Proyección **isométrica 2:1** (o dimétrica según arte), con un `IsoProjection` en el kernel que convierte **coordenadas de mundo (celda) ↔ coordenadas de pantalla** de forma centralizada. Toda conversión pasa por ahí (no hay math iso disperso). *(v1: la proyección implementada es **top-down** — lon/lat → px con escala lineal, `app/lib/kernel/projection.ts` —, igualmente centralizada; la isométrica llega con FE-6 — ver `frontend/README.md`.)*
 - **Orden de dibujo (depth sorting)**: por `y` isométrico (y `z` para altura de edificios/relieve), para que lo "delante" tape lo "detrás". Phaser ordena por `depth`; el renderer asigna `depth` derivado de la posición iso (§16.4).
 - **Footprints** de edificios ocupan varias celdas; su anclaje y su depth se calculan desde la celda base.
 
@@ -1914,7 +1868,7 @@ La cámara es el instrumento principal de navegación de un mundo enorme. Se con
 ### 17.5 Animaciones de cámara y el servicio de tiempo
 
 - **Transiciones**: `pan`/`zoomTo` con easing para saltos (ir a una ciudad desde el inspector, "ver esta ruta", saltar a una alerta). Duración corta y saltable.
-- **Cinemática de alertas**: al clicar una notificación ("avería en veh_X"), la cámara hace un *fly-to* animado a la entidad y la resalta.
+- **Cinemática de alertas**: al clicar una notificación ("avería en el vehículo X"), la cámara hace un *fly-to* animado a la entidad y la resalta.
 - Las animaciones de cámara usan el **RAF de Phaser**, no el `SimClock` (son wall-clock puro, presentación), a diferencia de la interpolación de vehículos que sí usa sim-time (§11.7). Esta distinción es deliberada: mover la cámara no es un evento de dominio.
 
 ### 17.6 Límites (bounds)
@@ -2029,7 +1983,7 @@ El cliente es internamente **event-driven** (coherente con el backend, P y §3.2
 
 ### 19.3 Traducción Phaser → intents (la frontera de eventos del render)
 
-Los eventos internos de Phaser (`pointerdown`, `dragstart`, `wheel`, colisiones de picking) **no** salen crudos de la Rendering Layer. El módulo `game/input/` y `game/bridge/` los **traducen** a:
+Los eventos internos de Phaser (`pointerdown`, `dragstart`, `wheel`, colisiones de picking) **no** salen crudos de la Rendering Layer. Las escenas y el bridge (v1: `app/game/scenes/` y `app/game/bridge.ts`) los **traducen** a:
 - **Intents de dominio** (`RequestBuildAt`, `AssignRouteTo`) → casos de uso.
 - **Eventos de UX** (`SelectEntity`, `ContextMenuRequested`, `camera:flyTo`) → AppEventBus.
 
@@ -2092,7 +2046,7 @@ Regla dura (O1/P1): **el estado replicado nunca se escribe salvo por aplicación
 
 ### 20.2 Una store por bounded context
 
-Las stores mapean 1:1 a los contexts (§9.1, §10.2): `session`, `world`, `buildings`, `fleet`, `logistics`, `shipments`, `market`, `cities`, `cadastre`, `finance`, `notifications`, `diagnostics`. Cada store:
+Las stores mapean 1:1 a los contexts (§9.1, §10.2): `session`, `world`, `buildings`, `fleet`, `logistics`, `shipments`, `market`, `cities`, `cadastre`, `finance`, `notifications`, `diagnostics`. *(v1 implementada: 11 stores — `session`, `sim` (reloj/estado del mundo), `world`, `cities`, `buildings`, `fleet`, `shipments`, `market`, `finance`, `notifications`, `ui`; `logistics`, `cadastre` y `diagnostics` quedan pendientes — BuildPanel/FleetPanel hacen pull local de red logística mientras tanto, ver `frontend/README.md`.)* Cada store:
 - Es **dueña** de su porción de estado (P2). Nadie más la muta.
 - Expone **getters** (estado derivado) como su API de lectura pública.
 - Expone **acciones de aplicación** (`applySnapshot`, `applyPatch`, `applyCommandResult`) usadas por la Application Layer — **no** por la UI directamente.
@@ -2100,20 +2054,20 @@ Las stores mapean 1:1 a los contexts (§9.1, §10.2): `session`, `world`, `build
 
 ### 20.3 Normalización
 
-Las colecciones de entidades con identidad (ULID) se guardan **normalizadas** (P2):
+Las colecciones de entidades con identidad (uuid) se guardan **normalizadas** (P2):
 
 ```
 buildings.store = {
-  byId: Record<Ulid<'bld'>, Building>,
-  idsByRegion: Record<RegionId, Ulid<'bld'>[]>,   // índices para consultas espaciales
-  idsByType: Record<BuildingType, Ulid<'bld'>[]>,
+  byId: Record<Id<'building'>, Building>,
+  idsByRegion: Record<RegionId, Id<'building'>[]>,   // índices para consultas espaciales
+  idsByType: Record<BuildingType, Id<'building'>[]>,
   // sin duplicar entidades; las listas son índices de ids
 }
 ```
 
-- **Fuente única por entidad**: una entidad vive en `byId` de su store dueña; cualquier otra referencia es por ULID, nunca por copia.
+- **Fuente única por entidad**: una entidad vive en `byId` de su store dueña; cualquier otra referencia es por id, nunca por copia.
 - **Índices** (`idsByRegion`, `idsByType`, `idsByOwner`) se mantienen al aplicar patches, para consultas O(1)/O(k) sin recorrer todo.
-- **Referencias cross-store por ULID**: un `Contract` referencia `shipmentId`, `buildingId`; se resuelven por getter contra la store dueña, no se embeben.
+- **Referencias cross-store por id**: un `Contract` referencia `shipmentId`, `buildingId`; se resuelven por getter contra la store dueña, no se embeben.
 
 ### 20.4 Aplicación de eventos (la única vía de escritura de dominio)
 
@@ -2136,18 +2090,18 @@ Los getters son **puros** y memoizados por la reactividad de Vue/Pinia; se recom
 
 ### 20.6 Tipos que hacen el estado seguro (branded types)
 
-El dominio usa **branded types** (P9/P10) para que el compilador impida errores de unidad:
+El dominio usa **branded types** (P9/P10) para que el compilador impida errores de unidad. *(v1 implementada: los IDs son **UUIDv7 sin prefijos** — ADR-IMPL-01 en `docs/desarrollo.md` — y el branded type es `Id<T>` sobre uuid, tal como está en `app/lib/kernel/ids.ts`; el diseño original usaba `Ulid<T>` con namespace por prefijo, cuyo papel asume ahora el sistema de tipos.)*
 
 ```
 type Money    = string & { readonly __brand: 'Money' }      // punto fijo, del servidor
 type Quantity = string & { readonly __brand: 'Quantity' }
 type SimTime  = number & { readonly __brand: 'SimTime' }     // segundos desde génesis
-type Ulid<T extends string> = string & { readonly __brand: `ulid:${T}` }
-type RegionId = Ulid<'reg'>
+type Id<T extends string> = string & { readonly [idBrand]: T }  // uuid (v7 en el backend)
+type RegionId = Id<'region'>
 ```
 
-- **`Money`/`Quantity`** solo se manipulan con helpers de `shared/money` (suma/resta/comparación en punto fijo); **prohibido** `Number(money)` para aritmética (C11). El formateo a texto es la única salida.
-- **`Ulid<T>`** impide pasar un `bld_` donde se espera `veh_`; los mappers validan el namespace al entrar (§9.5).
+- **`Money`/`Quantity`** solo se manipulan con helpers de `lib/kernel/money.ts` (suma/resta/comparación en punto fijo); **prohibido** `Number(money)` para aritmética (C11). El formateo a texto es la única salida.
+- **`Id<T>`** impide pasar un `Id<'building'>` donde se espera un `Id<'vehicle'>`, aunque ambos sean strings uuid; la frontera de infraestructura valida el formato con `idOf` (§9.5).
 - **`SimTime`** solo se convierte a wall-clock por el `SimClock` (P5). Nunca se hace `new Date(simTime)` directo.
 
 ### 20.7 Estados de vista (staleness) de primera clase
@@ -2171,13 +2125,13 @@ Los ciclos de vida del dominio (contrato: publicado→aceptado→en ejecución�
 
 ### 20.10 Sincronización entre stores
 
-- **Sin acoplamiento directo**: una store no importa otra. La coordinación cross-store ocurre en **casos de uso** (Application) que leen varias stores y las actualizan de forma consistente, o por **getters** que resuelven referencias por ULID.
+- **Sin acoplamiento directo**: una store no importa otra. La coordinación cross-store ocurre en **casos de uso** (Application) que leen varias stores y las actualizan de forma consistente, o por **getters** que resuelven referencias por id.
 - **Consistencia transaccional local**: cuando un evento afecta varias stores (una liquidación toca `market`, `finance`, `shipments`), el caso de uso las aplica en un mismo *tick* para evitar estados intermedios visibles incoherentes (un contrato "liquidado" pero el saldo aún sin reflejar). Si el backend envía esas mutaciones en patches separados, el cliente las aplica idempotentemente y converge; la UI tolera el instante intermedio con marcado `pending`/`stale` si hiciera falta.
 
 ### 20.11 Reglas de oro de las stores (checklist)
 
 1. El estado replicado se escribe **solo** por `apply*` desde Application (P1).
-2. Colecciones **normalizadas** por ULID; referencias por id (P2).
+2. Colecciones **normalizadas** por id (uuid); referencias por id (P2).
 3. Lo computable es **getter**, no campo (P2).
 4. Importes con `Money`, tiempos con `SimTime`; **sin floats** (C11).
 5. Aplicación **idempotente y ordenada** (P6).
@@ -2271,7 +2225,7 @@ Estos números son *objetivos de arranque* a calibrar con hardware real; lo esen
 
 - **Tree shaking** (Vite/Rollup): imports nombrados, sin *side-effect imports* salvo los estrictamente necesarios (marcados en `package.json` `sideEffects`).
 - **Análisis de bundle en CI**: `bundle analyzer` con **presupuestos** por chunk; superar el presupuesto **rompe el CI** (§23.6). Evita el "creep" de peso.
-- **Dependencias auditadas**: cada dependencia nueva se justifica (el mandato C6 ya elimina las CSS/UI libs pesadas); preferir utilidades pequeñas o propias del `shared/` kernel.
+- **Dependencias auditadas**: cada dependencia nueva se justifica (el mandato C6 ya elimina las CSS/UI libs pesadas); preferir utilidades pequeñas o propias del kernel (`lib/kernel/`).
 - **Assets con hash + immutable cache** (§14.6): el peso se descarga una vez por versión.
 
 ### 21.12 Estrategia de degradación (resumen)
@@ -2291,6 +2245,8 @@ Nunca se degrada la **corrección del estado** (los datos siguen siendo los del 
 
 La estrategia de testing sigue la **pirámide** adaptada a un cliente con dos motores (Vue + Phaser) y una capa de red compleja. La testabilidad **es** la razón de tantos puertos: cada frontera es un punto de sustitución por dobles.
 
+> *(v1 implementada: **94 tests vitest** en `tests/` — kernel puro, red con dobles del puerto `NetworkTransport` (transporte/simclock/sync), bridge y cinemática con renderer fake, y componentes UI con happy-dom — sin backend. Los niveles contract con grabaciones reales, E2E Playwright, perf y chaos quedan pendientes; corresponden a FE-8/FE-9 del roadmap.)*
+
 ### 22.1 Niveles y herramientas
 
 | Nivel | Alcance | Herramienta | Doble de test |
@@ -2308,7 +2264,7 @@ La estrategia de testing sigue la **pirámide** adaptada a un cliente con dos mo
 
 - El **dominio** es framework-agnostic y puro (§8): se testea sin montar Vue ni Phaser. Money/time/ids, políticas de presentación, máquinas de estado de UI → tests unitarios rápidos y exhaustivos.
 - Los **casos de uso** se testean con **fakes de puertos** (`FakeRestApi`, `FakeNetworkTransport`, `FakeClock`): se verifica que un intent produce el comando correcto, aplica la predicción correcta, revierte ante `error.code`, y reconcilia ante el evento de confirmación.
-- Los **mappers** (ACL) se testean con **DTOs reales** tomados de `specs/openapi.yaml` (fixtures generadas): un DTO crudo entra, un modelo de dominio branded sale, con validación de ULID/punto fijo/sim-time.
+- Los **mappers** (ACL) se testean con **DTOs reales** tomados de `specs/openapi.yaml` (fixtures generadas): un DTO crudo entra, un modelo de dominio branded sale, con validación de uuid/punto fijo/sim-time.
 
 ### 22.3 Testing de Vue (UI)
 
@@ -2339,7 +2295,7 @@ Phaser es notoriamente difícil de testear; la arquitectura lo mitiga porque el 
 Es el conjunto de tests **más crítico** del frontend por el riesgo de la §4.4:
 - **`GatewayTransportAdapter`**: se alimenta con **grabaciones/fixtures del protocolo real** del Notification/Event Gateway (obtenidas del equipo de backend / de un entorno de staging) y se verifica que emite los `snapshot`/`patch`/`message` esperados por el puerto. Cualquier cambio del protocolo del Gateway que rompa la ACL **falla aquí**, no en producción.
 - **`MockTransportAdapter`**: se verifica que cumple el mismo contrato del puerto que el adaptador real, para que los tests de aplicación/UI que lo usan sean representativos.
-- Estos tests se ejecutan en cada PR que toque `network/` y forman parte del *gate* de la Fase 4 del roadmap.
+- Estos tests se ejecutan en cada PR que toque `lib/net/` y forman parte del *gate* de la Fase 4 del roadmap. *(v1: existen los tests de red con dobles guionizados en `tests/net/`; los contract-tests con grabaciones del Gateway real quedan pendientes.)*
 
 ### 22.7 E2E y visual
 
@@ -2364,23 +2320,25 @@ Es el conjunto de tests **más crítico** del frontend por el riesgo de la §4.4
 
 ### 23.1 Gestor de paquetes y monorepo
 
-- **pnpm** con workspaces (coherente con el monorepo; eficiente en disco y estricto en dependencias fantasma).
-- Scripts unificados: `pnpm dev` (Nuxt), `pnpm gen:api` (tipos desde OpenAPI), `pnpm build:assets` (atlases/tilemaps), `pnpm test`, `pnpm lint`, `pnpm typecheck`, `pnpm build`.
+- **npm sin workspaces** (mandato del proyecto; el monorepo no usa workspaces en ningún componente — ver `docs/desarrollo.md` §1). *(v1 implementada: el diseño original proponía otro gestor con workspaces; se sustituyó por npm plano.)*
+- Scripts reales (`frontend/package.json`, orquestables vía `make frontend-*`): `npm run dev` (Nuxt en `:3000`), `npm run test` (vitest), `npm run typecheck` (vue-tsc estricto), `npm run build` (nuxt build), `npm run generate`, `npm run preview`. Los scripts `gen:api` (tipos desde OpenAPI) y `build:assets` (atlases/tilemaps) del diseño original quedan pendientes (§10.1, §14.8).
+
+> **Gates reales v1:** `npm run test` (**vitest, 94 tests**), `npm run typecheck` (**vue-tsc estricto, cero errores**) y `npm run build` (**nuxt build** verde). El resto de esta sección (lint de fronteras, hooks, CI por etapas, presupuestos) describe el pipeline objetivo aún no montado.
 
 ### 23.2 TypeScript estricto
 
 - `strict: true` + `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`, `noImplicitOverride`, `noFallthroughCasesInSwitch`.
-- `pnpm typecheck` (vue-tsc) en CI; **cero errores** de tipos es gate de merge.
-- Tipos del contrato **generados** desde `specs/openapi.yaml` (§10.1); no se editan a mano.
+- `npm run typecheck` (vue-tsc); **cero errores** de tipos es gate de merge.
+- Tipos del contrato **generados** desde `specs/openapi.yaml` (§10.1); no se editan a mano. *(v1: espejo manual-fiel en `app/lib/api/types.ts`, mantenido en sincronía con el contrato v1.1.0 por revisión; la generación automática queda pendiente.)*
 
-### 23.3 ESLint + reglas de fronteras (lo que hace cumplir la arquitectura)
+### 23.3 ESLint + reglas de fronteras (lo que hace cumplir la arquitectura) *(pendiente en v1: las fronteras se cumplen por convención y revisión)*
 
 - **ESLint** (config plana) con `@typescript-eslint`, plugin Vue, plugin de imports.
 - **Reglas de fronteras de capa/módulo** (p. ej. `eslint-plugin-boundaries` o `import/no-restricted-paths`) que **codifican §8/§9/§10**:
-  - `game/**` no importa de `components/**` ni `modules/**` (O2).
-  - `components/**`/`modules/**` no importan de `game/scenes/**` ni `game/renderer/**`.
-  - `domain/**` no importa de `application/**`, `infrastructure/**`, `network/**`, `game/**`, Vue ni Phaser (dominio puro, §8).
-  - `application/**` no importa adaptadores concretos, solo puertos.
+  - `game/**` no importa de `components/**` ni de las features de UI (O2).
+  - `components/**` no importa de `game/scenes/**` (v1: el único autorizado a tocar `game/` es `GameCanvasHost.vue`).
+  - `lib/kernel/**` no importa de `lib/api/**`, `lib/net/**`, `game/**`, Vue ni Phaser (dominio puro, §8).
+  - `composables/**` (application) no importa adaptadores concretos, solo puertos.
   - una store no importa otra store (§20.10).
   - prohibido `Date.now()`/`new Date()` en dominio/aplicación fuera del `SimClock` (P5) — regla custom.
   - prohibido `parseFloat`/`Number()` sobre tipos `Money`/`Quantity` (C11) — regla custom.
@@ -2399,11 +2357,11 @@ Es el conjunto de tests **más crítico** del frontend por el riesgo de la §4.4
 
 ### 23.6 CI/CD
 
-Pipeline por etapas (en cada PR salvo lo indicado):
+Pipeline objetivo por etapas (en cada PR salvo lo indicado). *(v1: aún sin CI montada; los gates que ya se ejecutan localmente/via make son test + typecheck + build, ver §23.1.)*
 
 ```mermaid
 flowchart LR
-    PR[Pull Request] --> INSTALL[pnpm install]
+    PR[Pull Request] --> INSTALL[npm install]
     INSTALL --> GEN[gen:api + build:assets]
     GEN --> LINT[eslint + stylelint + prettier check]
     GEN --> TYPE[typecheck vue-tsc]
@@ -2436,7 +2394,7 @@ flowchart LR
 - **Storybook** (o equivalente ligero) para el UI kit: desarrollar/documentar componentes base en aislamiento con sus estados.
 - **Playground de escenas** (`/dev/world-sandbox`): una escena Phaser con datos sintéticos para iterar render/cámara/overlays sin backend.
 - **Mock server** del backend (sirve `openapi.yaml` + Gateway guionizado) para desarrollar sin depender del backend real.
-- **Documentación viva**: este FAD + ADRs en `docs/`; diagramas Mermaid versionados; convenciones en el README del `apps/web`.
+- **Documentación viva**: este FAD + ADRs en `docs/` (y ADR-IMPL en `docs/desarrollo.md`); diagramas Mermaid versionados; convenciones en `frontend/README.md`.
 ---
 
 ## 24. Seguridad del cliente
@@ -2451,7 +2409,7 @@ El principio de seguridad es el mismo que el del backend, visto desde el cliente
 
 ### 24.2 Autenticación y sesión
 
-- **Login** por REST (`POST /auth/sessions`); el token de sesión se maneja según la política del backend. **Preferencia**: cookies `HttpOnly`+`Secure`+`SameSite` gestionadas por el gateway/Caddy (el token no es accesible por JS → inmune a XSS-robo-de-token). Si el backend usa token en cuerpo, se guarda en memoria (no en `localStorage`) y se pasa en el upgrade del WS; nunca se persiste en disco.
+- **Login** por REST (`POST /auth/sessions`); el token de sesión se maneja según la política del backend. **Preferencia**: cookies `HttpOnly`+`Secure`+`SameSite` gestionadas por el gateway/Caddy (el token no es accesible por JS → inmune a XSS-robo-de-token). Si el backend usa token en cuerpo, se guarda en memoria (no en `localStorage`) y se pasa tras el upgrade del WS (frame `hello` de `specs/ws-protocol.md`); nunca se persiste en disco. *(v1: token en **memoria + `sessionStorage`** — solo dev, sobrevive a recargas de pestaña — y guard de auth solo en cliente; el endurecimiento con cookies httpOnly/BFF queda pospuesto — ver `frontend/README.md`.)*
 - **Renovación**: refresh de token vía REST antes de expirar; si expira durante una caída, se refresca en la reconexión (§12.12).
 - **Logout**: `DELETE /auth/sessions/current` + purga de memoria + cierre de WS + destrucción del juego (§12.14).
 - **Una sesión por pestaña** (no-objetivo multi-cuenta, §2.3).
@@ -2635,20 +2593,27 @@ flowchart TB
 
 Estas son **fases de construcción del frontend** (entregables internos del equipo cliente), distintas de las fases de producto del GDD (§21: Fase 0 prototipo → Fase 4 meta-juego). Se alinean así: las Fases FE 1–5 sostienen el **vertical slice jugable** del GDD (su Fase 1); las Fases FE 6–7 acompañan el multi-región y gameplay ampliado (GDD Fase 2); las FE 8–10 escalan y pulen (GDD Fases 3–4). El orden es incremental y cada fase deja algo **verificable**.
 
-> **Nota de secuencia sobre Networking (Fase FE 4).** Aunque Networking es la Fase FE 4, la **validación con el equipo de backend de ADR-FE-004** (§4.4) debe ocurrir *antes*, idealmente durante la Fase FE 1: es la dependencia inter-equipo de mayor riesgo. Las Fases FE 3–4 pueden desarrollarse contra el **mock server** (§23.8) en paralelo, pero no se consideran "hechas" hasta pasar los contract-tests (§22.6) contra el protocolo real.
+### 26.0 Estado real (v1 implementada)
+
+| Fases | Estado |
+|---|---|
+| **FE 1–5** | **Cubiertas por la v1**, con las simplificaciones aceptadas de `frontend/README.md`: proyección **top-down** en vez de isométrica (la iso llega con FE-6); **gráficos Phaser procedurales** (`Graphics`/`generateTexture`), sin atlases ni assets binarios; **token en memoria + `sessionStorage`** (solo dev); **panel de gestión en posición fija** sobre el canvas, sin WindowManager; **OHLC solo tabla** (sin gráfico Canvas). Además: tipos del contrato manual-fieles sin codegen (§10.1), sin linter de fronteras ni CI montada (§23), sin stores `logistics`/`cadastre`/`diagnostics` (§20.2), cinemática de vehículos derivada del DTO v1.1.0 y parcela por inputs numéricos en BuildPanel. Verificación: 94/94 tests, typecheck y build verdes (`docs/desarrollo.md` §6). |
+| **FE 6–10** | **Pendientes**: mapa a escala (chunks/LOD/overlays/minimapa e iso), gameplay ampliado, optimización con presupuestos, endurecimiento de testing (contract/E2E/perf/chaos) y release. |
+
+> **Nota de secuencia sobre Networking (Fase FE 4).** Aunque Networking es la Fase FE 4, la **validación con el equipo de backend de ADR-FE-004** (§4.4) debe ocurrir *antes*, idealmente durante la Fase FE 1: es la dependencia inter-equipo de mayor riesgo. Las Fases FE 3–4 pueden desarrollarse contra el **mock server** (§23.8) en paralelo, pero no se consideran "hechas" hasta pasar los contract-tests (§22.6) contra el protocolo real. *(v1: la validación se cumplió — el protocolo quedó fijado en `specs/ws-protocol.md` y gateway y cliente lo implementan 1:1; el flujo completo contra el gateway real se ejercita en `make verify`.)*
 
 ### 26.1 Fases
 
-#### Fase FE 1 — Infraestructura
-- Monorepo `apps/web`, pnpm workspaces, TypeScript estricto, ESLint + reglas de fronteras (§23.3), Prettier/Stylelint, Husky/Commitlint.
-- Generación de tipos desde `specs/openapi.yaml` (`gen:api`); pipeline de assets (`build:assets`) esqueleto.
-- CI base (lint/typecheck/unit/build + presupuestos de bundle).
-- `shared/` kernel: `Money`, `Quantity`, `SimTime`, `Ulid`, `Result`, `EventBus`, `IsoProjection` (con tests exhaustivos).
-- Runtime config tipada (zod), entornos, mock server del backend.
-- **Validación inter-equipo de ADR-FE-004** con backend (protocolo real del Gateway).
-- *Entregable:* andamiaje verde en CI, kernel probado, contrato de red acordado.
+#### Fase FE 1 — Infraestructura — **✔ cubierta por la v1** (con simplificaciones)
+- Estructura `frontend/` top-level, npm sin workspaces (v1; el diseño original preveía workspaces), TypeScript estricto; ESLint + reglas de fronteras (§23.3), Prettier/Stylelint, Husky/Commitlint *(pendientes en v1)*.
+- Tipos del contrato de `specs/openapi.yaml` *(v1: espejo manual-fiel `app/lib/api/types.ts`; codegen pendiente)*; pipeline de assets *(pendiente: v1 procedural)*.
+- CI base (lint/typecheck/unit/build + presupuestos de bundle) *(v1: gates locales test/typecheck/build, §23.1)*.
+- Kernel `lib/kernel/`: `Money`, `Quantity`, `SimTime`, `Id`, `Result`, `EventBus`, proyección (v1: top-down) — con tests exhaustivos. ✔
+- Runtime config tipada, entornos, dobles de red para tests. ✔
+- **Validación inter-equipo de ADR-FE-004** con backend (protocolo real del Gateway). ✔ **Resuelto**: `specs/ws-protocol.md`.
+- *Entregable:* andamiaje verde, kernel probado, contrato de red acordado. ✔
 
-#### Fase FE 2 — Framework (Nuxt/Vue/Pinia base)
+#### Fase FE 2 — Framework (Nuxt/Vue/Pinia base) — **✔ cubierta por la v1**
 - Nuxt 4 configurado; rutas `index/login/lobby/play/settings`; layouts; SSR/SSG selectivo (§10.6).
 - Plugins de arranque (pinia, sim-clock, error-handler); providers de puertos.
 - Pinia: stores esqueleto por context; patrón `apply*`; normalización base (§20).
@@ -2656,7 +2621,7 @@ Estas son **fases de construcción del frontend** (entregables internos del equi
 - Login/lobby funcionales contra REST (auth), `SimClock` inicializado desde `meta.sim_time`.
 - *Entregable:* app navegable, login real, shell de `/play` (aún sin mundo).
 
-#### Fase FE 3 — Motor Phaser
+#### Fase FE 3 — Motor Phaser — **✔ cubierta por la v1** (top-down procedural; iso/atlases → FE-6)
 - Bootstrap de Phaser client-only en `/play` (§11.2); BootScene/PreloadScene/WorldScene.
 - Puerto `WorldRenderer`; renderer headless-testable; pools; `IsoProjection` en render.
 - Tilemap isométrico básico + chunks + culling + cámara (zoom/pan/bounds) (§16, §17).
@@ -2664,7 +2629,7 @@ Estas son **fases de construcción del frontend** (entregables internos del equi
 - Playground de escenas (`/dev/world-sandbox`).
 - *Entregable:* un mundo navegable con datos **sintéticos**, 60 FPS con culling, render testeado headless.
 
-#### Fase FE 4 — Networking
+#### Fase FE 4 — Networking — **✔ cubierta por la v1** (protocolo real de `specs/ws-protocol.md`; contract-tests con grabaciones pendientes)
 - Puerto `NetworkTransport`; `GatewayTransportAdapter` (ACL sobre el WS real) + `MockTransportAdapter` (dev/test).
 - Pipeline de patches (orden/dedup/idempotencia/resync); snapshots; rooms (viewport/corp/alerts).
 - Conexión, heartbeat, reconexión con backoff, estado `frozen` (mantenimiento) (§12).
@@ -2672,7 +2637,7 @@ Estas son **fases de construcción del frontend** (entregables internos del equi
 - **Contract-tests** verdes (§22.6). Interpolación de vehículos desde eventos reales (§11.7).
 - *Entregable:* el mundo se puebla con **estado real del servidor**; reconexión/mantenimiento manejados; el mundo sintético de FE 3 pasa a datos reales.
 
-#### Fase FE 5 — UI (sistema de gestión)
+#### Fase FE 5 — UI (sistema de gestión) — **✔ cubierta por la v1** (panel fijo sin WindowManager; OHLC tabla)
 - HUD completo (top/bottom/side bar, inspector, minimapa) (§15).
 - WindowManager (paneles acoplables/flotantes, persistencia de layout).
 - Paneles de feature del vertical slice: construcción, industria/recetas/cola, flota, finanzas/ledger, y **mercado** (tablón pull + publicar/aceptar + ventana de sorteo + OHLC) (§13.3, §13.4).
@@ -2680,14 +2645,14 @@ Estas son **fases de construcción del frontend** (entregables internos del equi
 - Accesibilidad, teclado, i18n scaffolding, temas.
 - *Entregable:* **loop completo jugable** (construir → producir → publicar/aceptar → ver liquidación) — cubre el vertical slice del GDD Fase 1.
 
-#### Fase FE 6 — Mapa (mundo a escala)
+#### Fase FE 6 — Mapa (mundo a escala) — ⏳ pendiente (incluye la vista isométrica y el picking de parcela sobre el mapa)
 - Streaming completo de chunks (datos + assets on-demand, prefetch por dirección) (§16.8).
 - LOD por zoom con clustering a lejano; render parcial; overlays analíticos (congestión, propiedad, demanda, cobertura, fiscalidad, recursos) (§16.6, §11.9).
 - Minimapa con RenderTexture del mundo agregado; modelo agregado por región (§16.9).
 - Bounds dinámicos para expansión de mundo (GDD Fase 4).
 - *Entregable:* mundo multi-región navegable a cualquier escala dentro de presupuesto (acompaña GDD Fase 2).
 
-#### Fase FE 7 — Gameplay (ampliación de features)
+#### Fase FE 7 — Gameplay (ampliación de features) — ⏳ pendiente
 - Logística avanzada: diseñador de rutas, ETAs (`/logistics/route-plans`), multimodal, terminales y **slots de prioridad**; congestión en overlay y en decisiones de UI.
 - **CCRI-Flete** (contratos de transporte) y contratos privados (GDD §5.3.2) cuando el backend los exponga (feature flags).
 - Ciudades: panel de demanda/crecimiento; concesiones (canon, vencimiento, traspaso, embargo/subasta, GDD §11).
@@ -2695,7 +2660,7 @@ Estas son **fases de construcción del frontend** (entregables internos del equi
 - Selección múltiple y acciones masivas de flota (GDD §8).
 - *Entregable:* superficie de gameplay completa del núcleo v1 (acompaña GDD Fase 2→3).
 
-#### Fase FE 8 — Optimización
+#### Fase FE 8 — Optimización — ⏳ pendiente
 - Cumplimiento de todos los presupuestos §21 en hardware objetivo; perfiles de calidad y degradación dinámica (§21.6, §21.12).
 - Object pooling exhaustivo, virtualización de todas las listas, memoización/coalescing afinados.
 - Presupuesto de VRAM y evicción LRU de chunks/atlases; anti-fugas verificado (§11.13).
@@ -2703,14 +2668,14 @@ Estas son **fases de construcción del frontend** (entregables internos del equi
 - HUD de diagnóstico + telemetría de rendimiento (§21.10, §24.6).
 - *Entregable:* rendimiento AAA sostenido; perf gates en CI.
 
-#### Fase FE 9 — Testing (endurecimiento)
+#### Fase FE 9 — Testing (endurecimiento) — ⏳ pendiente
 - Cobertura objetivo en dominio/aplicación/mappers; suite de componentes; render headless; E2E de flujos de oro.
 - **Caos de red** completo (reconexión, mantenimiento, huecos, fugas) (§22.5); contract-tests como gate permanente.
 - Regresión visual de UI; escenas sintéticas grandes para perf.
 - Endurecimiento de seguridad (CSP, cabeceras, escape/`v-html` prohibido, auditoría de deps) (§24).
 - *Entregable:* suite completa verde y estable; confianza para producción.
 
-#### Fase FE 10 — Release
+#### Fase FE 10 — Release — ⏳ pendiente
 - Build de producción tras Caddy; despliegue **coordinado con la ventana de mantenimiento** (§14.6, §23.6); versionado de assets/manifiesto.
 - Observabilidad en producción (telemetría, alertas de FPS/desync); runbook de cliente.
 - Feature flags de fase; i18n de lanzamiento; pulido de UX y accesibilidad final.
@@ -2748,11 +2713,11 @@ gantt
 
 | Hito | Criterio objetivo |
 |---|---|
-| Kernel probado (FE1) | `Money`/`SimTime`/`Ulid`/`IsoProjection` con tests; CI verde; contrato de red acordado |
-| Login real (FE2) | Autenticación REST + `SimClock` corriendo desde `meta.sim_time` |
-| Mundo sintético 60 FPS (FE3) | Culling + pooling + cámara; render headless testeado |
-| Estado real en el mundo (FE4) | Snapshots/patches pueblan stores; reconexión y mantenimiento OK; contract-tests verdes |
-| Loop jugable (FE5) | Construir→producir→publicar/aceptar→liquidar, con sorteo y OHLC |
+| Kernel probado (FE1) | `Money`/`SimTime`/`Id`/proyección con tests; gates verdes; contrato de red acordado (`specs/ws-protocol.md`) — ✔ v1 |
+| Login real (FE2) | Autenticación REST + `SimClock` corriendo desde `meta.sim_time` — ✔ v1 |
+| Mundo sintético 60 FPS (FE3) | Culling + pooling + cámara; render testeado con renderer fake — ✔ v1 (top-down procedural) |
+| Estado real en el mundo (FE4) | Snapshots/patches pueblan stores; reconexión y mantenimiento OK — ✔ v1 (contract-tests con grabaciones pendientes) |
+| Loop jugable (FE5) | Construir→producir→publicar/aceptar→liquidar, con sorteo y OHLC — ✔ v1 (OHLC tabla) |
 | Mundo a escala (FE6) | Streaming + LOD + overlays + minimapa dentro de presupuesto |
 | Gameplay v1 (FE7) | Logística/fletes/ciudades/concesiones/insolvencia |
 | Perf AAA (FE8) | Todos los presupuestos §21 en CI |
@@ -2787,9 +2752,9 @@ gantt
 
 | Puerto | Responsabilidad | Adaptador(es) |
 |---|---|---|
-| `NetworkTransport` | Tiempo real (room/snapshot/patch/message) | `GatewayTransportAdapter` (real), `MockTransportAdapter` (dev/test) |
-| `RestApi` | Comandos/consultas REST (OpenAPI) | cliente generado + interceptores |
-| `WorldRenderer` | Render del mundo | impl. Phaser (`game/renderer`) |
+| `NetworkTransport` | Tiempo real (room/snapshot/patch/message) | `GatewayTransportAdapter` (real, `app/lib/net/gateway-transport.ts` — habla `specs/ws-protocol.md`), dobles guionizados en tests (dev/test) |
+| `RestApi` | Comandos/consultas REST (OpenAPI) | `app/lib/api/client.ts` (v1: tipos manual-fieles) + Idempotency-Key automática |
+| `WorldRenderer` | Render del mundo | impl. Phaser (v1: puerto en `app/game/types.ts`, escenas en `app/game/scenes/`) |
 | `Clock` | Sim-time ↔ wall-clock, freeze | `SimClock` |
 | `Storage` | Persistencia de UI-state | IndexedDB/localStorage |
 | `Telemetry` | Métricas/errores | sink de telemetría |
@@ -2830,8 +2795,8 @@ gantt
 
 | Riesgo | Prob. | Impacto | Mitigación |
 |---|---|---|---|
-| **Divergencia con el protocolo real del Gateway** (fuera del OpenAPI, ADR-FE-004) | Media | Alto | ACL en un solo adaptador; contract-tests (§22.6); acuerdo inter-equipo en FE1; mock server |
-| **Deriva del contrato REST** sin avisar al cliente | Media | Alto | Tipos generados desde OpenAPI; CI falla si desincroniza (§10.1, §23.6) |
+| ~~**Divergencia con el protocolo real del Gateway**~~ (fuera del OpenAPI, ADR-FE-004) — **resuelto en v1**: protocolo normativo en `specs/ws-protocol.md`, implementado 1:1 por ambos lados | ~~Media~~ Baja | Alto | ACL en un solo adaptador (`gateway-transport.ts`); contract-tests (§22.6, pendientes); `make verify` end-to-end |
+| **Deriva del contrato REST** sin avisar al cliente | Media | Alto | Tipos generados desde OpenAPI; CI falla si desincroniza (§10.1, §23.6) *(v1: espejo manual-fiel `types.ts` — riesgo vivo hasta tener codegen con gate)* |
 | **Presupuesto de rendimiento no alcanzado** en hardware bajo | Media | Medio | Perfiles de calidad + degradación dinámica (§21.6/§21.12); perf gates |
 | **Fugas de memoria WebGL** en sesiones largas | Media | Alto | Pooling, unload de chunks, teardown estricto, test de fugas (§11.13, §22.5) |
 | **Erosión de fronteras arquitectónicas** con el tiempo | Alta | Medio | Reglas de linter de fronteras como gate (§23.3) |
@@ -2840,14 +2805,14 @@ gantt
 | **Ventana de mantenimiento mal manejada** (UX rota al pausar) | Baja | Medio | Estado `frozen` de primera clase; tests de caos (§12.9, §22.5) |
 | **Desincronización de estado** (huecos de patches) | Media | Medio | Resync por snapshot, idempotencia, marcado stale (§12.13, §13.8) |
 
-### 27.5 Cuestiones abiertas para el equipo de backend (sincronización requerida)
+### 27.5 Cuestiones abiertas para el equipo de backend — **todas respondidas en la v1**
 
-1. **Protocolo exacto del Notification/Event Gateway** (formato de frame, autenticación del WS, semántica de suscripción/interest, forma de snapshots vs deltas, heartbeats). *Bloqueante para ADR-FE-004 / FE4.*
-2. **Estabilidad de `meta.sim_time`** y de los timestamps para calibrar el `SimClock` (frecuencia, monotonicidad).
-3. **Rooms/interest disponibles**: ¿el Gateway soporta suscripción por bbox de viewport, o el interest se define por región? Afecta §12.3/§16.
-4. **Rate limits concretos** (valores de `429`, cabeceras de backoff) para calibrar coalescing/backpressure (§12.10).
-5. **Endpoints de detalle** aún no en el OpenAPI que la UI necesite (p. ej. inventario de edificio ajeno observable, detalle de ciudad para overlay de demanda) — confirmar cobertura de `openapi.yaml`.
+1. **Protocolo exacto del Notification/Event Gateway** (formato de frame, autenticación del WS, semántica de suscripción/interest, forma de snapshots vs deltas, heartbeats). *Bloqueante para ADR-FE-004 / FE4.* → **✔ Respondida:** definido y **normativo en `specs/ws-protocol.md`** (ADR-IMPL-08): frames JSON con discriminador `type`; auth por frame `hello` con el token de la sesión REST tras el upgrade; `join`/`leave` de rooms con `snapshot` de respuesta; deltas como `patch` con `ops` `upsert` (entidad completa) / `remove` y `seq` por conexión y room; heartbeat `ping`/`pong` (el `pong` trae `sim_seconds` y `frozen`).
+2. **Estabilidad de `meta.sim_time`** y de los timestamps para calibrar el `SimClock` (frecuencia, monotonicidad). → **✔ Respondida:** toda respuesta REST trae `meta.sim_time` (legible `AÑO-DDD-HH:MM`) y **`meta.sim_time_seconds` canónico** (entero de segundos, openapi v1.1.0); el reloj persiste en `world.sim_clock` (motor a ratio 24×, ADR-IMPL-06) y el `pong` del WS re-sincroniza al cliente.
+3. **Rooms/interest disponibles**: ¿el Gateway soporta suscripción por bbox de viewport, o el interest se define por región? → **✔ Respondida:** rooms `corp:<account_id>`, **`viewport:<minLon>,<minLat>,<maxLon>,<maxLat>` (bbox)** y `alerts:<account_id>`; un solo viewport activo por conexión (un `join` nuevo lo reemplaza). Ver `specs/ws-protocol.md` §3.
+4. **Rate limits concretos** (valores de `429`, cabeceras de backoff). → **✔ Respondida:** **300 req/min por cuenta** (token-bucket en el gateway, idéntico para humanos y bots), respuesta `429 RATE_LIMITED` con cabecera **`Retry-After`** en segundos.
+5. **Endpoints de detalle** aún no en el OpenAPI que la UI necesite. → **✔ Respondida:** la superficie REST que consume el cliente v1 está **confirmada y cubierta por `specs/openapi.yaml` v1.1.0** (incl. cabecera `Idempotency-Key`); las necesidades de FE-6+ (p. ej. resúmenes agregados por región para overlays) se negociarán como evolución del contrato.
 
 ---
 
-*Fin del Frontend Architecture Document (FAD) v1.0. Documento vivo: toda decisión estructural nueva se incorpora vía ADR (§7). Ante discrepancia con el GDD/SAD o `specs/openapi.yaml`, prevalece el backend y este documento se corrige.*
+*Fin del Frontend Architecture Document (FAD) v1.1. Documento vivo: toda decisión estructural nueva se incorpora vía ADR (§7); las decisiones de implementación transversales viven como ADR-IMPL en `docs/desarrollo.md`. Ante discrepancia con el GDD/SAD, `specs/openapi.yaml` o `specs/ws-protocol.md`, prevalece el backend y este documento se corrige.*

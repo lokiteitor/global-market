@@ -1,0 +1,84 @@
+name: imperio-industrial
+
+services:
+  db:
+    image: postgis/postgis:18-3.6
+    container_name: imperio-db
+    environment:
+      POSTGRES_USER: imperio
+      POSTGRES_PASSWORD: imperio
+      POSTGRES_DB: imperio
+    ports:
+      - "${IMPERIO_DB_PORT:-5440}:5432"
+    volumes:
+      # postgres:18 cambió el punto de montaje del volumen a /var/lib/postgresql
+      # (PGDATA vive en un subdirectorio versionado gestionado por la imagen).
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U imperio -d imperio"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  caddy:
+    image: caddy:2
+    container_name: imperio-caddy
+    # network_mode host: el edge debe alcanzar gateway (:8080) y frontend dev (:3000)
+    # que corren en el host; el bridge de docker queda bloqueado por firewalls típicos.
+    network_mode: host
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+
+  # ── Perfil "full": stack de aplicación contenedorizado ─────────────────────
+  # Las migraciones NUNCA se aplican solas: ejecuta `make db-migrate` antes de
+  # `make stack-up` (los servicios reintentan/arrancan degradados hasta entonces).
+
+  engine:
+    profiles: ["full"]
+    build: ../backend/engine
+    image: imperio/engine:dev
+    container_name: imperio-engine
+    environment:
+      DATABASE_URL: postgres://imperio:imperio@db:5432/imperio
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  gateway:
+    profiles: ["full"]
+    build: ../backend/gateway
+    image: imperio/gateway:dev
+    container_name: imperio-gateway
+    environment:
+      DATABASE_URL: postgres://imperio:imperio@db:5432/imperio
+      PORT: "8080"
+    ports:
+      - "8080:8080"   # publicado en el host para que el edge Caddy (network host) lo alcance
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  bots:
+    profiles: ["full"]
+    build: ../backend/bots
+    image: imperio/bots:dev
+    container_name: imperio-bots
+    environment:
+      GATEWAY_URL: http://gateway:8080
+    depends_on:
+      - gateway
+    restart: unless-stopped
+
+  frontend:
+    profiles: ["full"]
+    build: ../frontend
+    image: imperio/frontend:dev
+    container_name: imperio-frontend
+    ports:
+      - "3000:3000"   # el edge Caddy enruta el resto de rutas aquí
+    restart: unless-stopped
+
+volumes:
+  pgdata:

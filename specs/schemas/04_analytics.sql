@@ -6,13 +6,15 @@
 -- Fuente: contratos LIQUIDADOS, no órdenes vivas (GDD 5.2).
 -- TimescaleDB solo si el volumen medido lo justifica; a la escala de Fases
 -- 0-1 basta un GROUP BY por bucket (GDD 17.1).
+-- Identificadores: uuid, referencias a claves UUIDv7 nativas de PostgreSQL 18.
+-- Fuente ejecutable: backend/migrations/0005_analytics.sql (aplicación manual vía make db-migrate).
 -- =============================================================================
 
 -- 1. market_ohlc — velas OHLC por producto y región, construidas a partir de
 --    contratos efectivamente cerrados; referencia de precio para todos (GDD 5.2/5.4)
 CREATE TABLE analytics.market_ohlc (
-    product_id        ulid_id NOT NULL REFERENCES world.products(id),
-    region_id         ulid_id NOT NULL REFERENCES world.regions(id),
+    product_id        uuid NOT NULL REFERENCES world.products(id),
+    region_id         uuid NOT NULL REFERENCES world.regions(id),
     bucket_start_sim  sim_time NOT NULL,        -- bucket en sim-time (p. ej. 1 día de juego)
     bucket_sim_secs   BIGINT NOT NULL CHECK (bucket_sim_secs > 0),
     open_price        money_amount NOT NULL,
@@ -32,7 +34,7 @@ CREATE INDEX ix_ohlc_region_time ON analytics.market_ohlc (region_id, bucket_sta
 -- 2. city_snapshots — evolución de ciudades (nivel, población, índice de
 --    suministro): agregado permanente, objetivo estratégico observable (GDD 5.6)
 CREATE TABLE analytics.city_snapshots (
-    city_id           ulid_id NOT NULL REFERENCES world.cities(id),
+    city_id           uuid NOT NULL REFERENCES world.cities(id),
     bucket_start_sim  sim_time NOT NULL,
     level             INT NOT NULL,
     population        BIGINT NOT NULL,
@@ -44,7 +46,7 @@ CREATE TABLE analytics.city_snapshots (
 -- 3. region_stats — estadísticas regionales para el Economy Balancer:
 --    saturación industrial (fórmula laboral 5.7), actividad, fiscalidad
 CREATE TABLE analytics.region_stats (
-    region_id              ulid_id NOT NULL REFERENCES world.regions(id),
+    region_id              uuid NOT NULL REFERENCES world.regions(id),
     bucket_start_sim       sim_time NOT NULL,
     industrial_occupation  NUMERIC NOT NULL,   -- factor_saturación laboral (GDD 5.7)
     active_buildings       INT NOT NULL,

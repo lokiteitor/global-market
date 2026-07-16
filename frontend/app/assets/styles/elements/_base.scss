@@ -1,0 +1,65 @@
+// ============================================================================
+// elements/_base.scss — estilos base de elementos HTML (capa "elements").
+// Consume las custom properties definidas en themes/_dark.scss.
+// ============================================================================
+@use '../settings/tokens' as t;
+
+html {
+  font-family: t.$font-ui;
+  font-size: 100%;
+  line-height: t.$line-height;
+}
+
+body {
+  background-color: var(--ii-bg-deep);
+  color: var(--ii-text);
+  font-size: t.$font-size-md;
+}
+
+h1,
+h2,
+h3,
+h4 {
+  line-height: 1.2;
+  font-weight: 600;
+}
+
+a {
+  color: var(--ii-accent);
+  text-decoration: none;
+
+  &:hover,
+  &:focus-visible {
+    color: var(--ii-accent-strong);
+    text-decoration: underline;
+  }
+}
+
+code,
+kbd,
+samp,
+pre {
+  font-family: t.$font-mono;
+  font-size: 0.9em;
+}
+
+// Cifras (dinero, stock, sim-time): monospace tabular siempre.
+.e-num {
+  font-family: t.$font-mono;
+  font-variant-numeric: tabular-nums;
+}
+
+hr {
+  border: none;
+  border-top: 1px solid var(--ii-border);
+}
+
+::selection {
+  background-color: var(--ii-accent);
+  color: var(--ii-bg-deep);
+}
+
+:focus-visible {
+  outline: 2px solid var(--ii-accent);
+  outline-offset: 2px;
+}

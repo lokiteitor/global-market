@@ -8,13 +8,16 @@
 -- transacción que su cambio de estado; los consumidores (Notification Gateway,
 -- módulos del motor) hacen polling por cursor. Publicar nunca puede divergir
 -- del estado que lo causó.
+--
+-- Identificadores: uuid con DEFAULT uuidv7(), UUIDv7 nativo de PostgreSQL 18.
+-- Fuente ejecutable: backend/migrations/0006_outbox.sql (aplicación manual vía make db-migrate).
 -- =============================================================================
 
 CREATE TABLE outbox.events (
     seq             BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY, -- orden total de polling
-    event_id        ulid_id NOT NULL UNIQUE CHECK (event_id LIKE 'evt_%'),
+    event_id        uuid NOT NULL UNIQUE DEFAULT uuidv7(),
     aggregate_type  TEXT NOT NULL,       -- 'contract', 'vehicle', 'building', 'city', ...
-    aggregate_id    ulid_id NOT NULL,    -- entidad de dominio que emite el evento
+    aggregate_id    uuid NOT NULL,       -- entidad de dominio que emite el evento
     event_type      TEXT NOT NULL,       -- 'contract.settled', 'vehicle.arrived', 'batch.completed', ...
     payload         JSONB NOT NULL,
     sim_time_at     sim_time NOT NULL,

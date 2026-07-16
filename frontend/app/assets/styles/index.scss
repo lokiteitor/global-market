@@ -1,0 +1,9 @@
+// ============================================================================
+// index.scss — entrada del sistema de estilos (ITCSS mínimo, FAD §15.2).
+// Orden de capas: settings → generic → elements → objects → themes.
+// ============================================================================
+@use './settings/tokens';
+@use './generic/reset';
+@use './elements/base';
+@use './objects/layout';
+@use './themes/dark';

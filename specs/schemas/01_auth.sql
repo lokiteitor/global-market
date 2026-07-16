@@ -4,6 +4,8 @@
 -- Propiedad: Gateway TS (Fastify + Drizzle). Jugadores y bots comparten el
 -- mismo modelo de cuenta (GDD 18.1 #1); ciudades y banco central son cuentas
 -- de sistema sin canal privilegiado (Arquitectura §9).
+-- Identificadores: uuid con DEFAULT uuidv7(), UUIDv7 nativo de PostgreSQL 18.
+-- Fuente ejecutable: backend/migrations/0002_auth.sql (aplicación manual vía make db-migrate).
 -- =============================================================================
 
 CREATE TYPE auth.account_kind AS ENUM (
@@ -28,7 +30,7 @@ CREATE TYPE auth.bot_archetype AS ENUM (
 
 -- 1. accounts — corporaciones: humanos, bots, ciudades y sistema
 CREATE TABLE auth.accounts (
-    id            ulid_id PRIMARY KEY CHECK (id LIKE 'acc_%'),
+    id            uuid PRIMARY KEY DEFAULT uuidv7(),
     kind          auth.account_kind NOT NULL,
     name          TEXT NOT NULL,
     status        auth.account_status NOT NULL DEFAULT 'active',
@@ -42,8 +44,8 @@ CREATE INDEX ix_accounts_kind ON auth.accounts (kind) WHERE status = 'active';
 -- 2. sessions — sesiones de cliente (wall-clock: única capa donde el tiempo
 --    real es legítimo como regla; GDD 1.1)
 CREATE TABLE auth.sessions (
-    id            ulid_id PRIMARY KEY CHECK (id LIKE 'ses_%'),
-    account_id    ulid_id NOT NULL REFERENCES auth.accounts(id),
+    id            uuid PRIMARY KEY DEFAULT uuidv7(),
+    account_id    uuid NOT NULL REFERENCES auth.accounts(id),
     token_hash    TEXT NOT NULL,
     client_info   JSONB NOT NULL DEFAULT '{}',
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -58,8 +60,8 @@ CREATE INDEX ix_sessions_expiry ON auth.sessions (expires_at);
 -- 3. bot_profiles — parámetros de comportamiento de la población de bots
 --    (densidad dinámica gestionada por el Bot Orchestration Service, GDD 13.4)
 CREATE TABLE auth.bot_profiles (
-    id             ulid_id PRIMARY KEY CHECK (id LIKE 'bot_%'),
-    account_id     ulid_id NOT NULL UNIQUE REFERENCES auth.accounts(id),
+    id             uuid PRIMARY KEY DEFAULT uuidv7(),
+    account_id     uuid NOT NULL UNIQUE REFERENCES auth.accounts(id),
     archetype      auth.bot_archetype NOT NULL,
     behavior       JSONB NOT NULL DEFAULT '{}',   -- umbrales, agresividad, región foco
     density_weight NUMERIC NOT NULL DEFAULT 1.0 CHECK (density_weight >= 0),
@@ -69,3 +71,27 @@ CREATE TABLE auth.bot_profiles (
 );
 
 CREATE INDEX ix_bot_profiles_archetype ON auth.bot_profiles (archetype) WHERE active;
+
+-- 4. account_credentials — credenciales de autenticación por cuenta.
+--    Necesaria para POST /auth/sessions: el gateway compara el secreto
+--    presentado (hash sha256 hex, nivel dev) con secret_hash para emitir la
+--    sesión. Una fila por cuenta; las cuentas sin credenciales (bots,
+--    ciudades, sistema) no pueden abrir sesión.
+CREATE TABLE auth.account_credentials (
+    account_id  uuid PRIMARY KEY REFERENCES auth.accounts(id),
+    secret_hash text NOT NULL,   -- sha256 hex del secreto (nivel dev)
+    updated_at  timestamptz NOT NULL DEFAULT now()
+);
+
+-- 5. idempotency_keys — idempotencia de comandos del gateway (ADR-IMPL-09).
+--    Ante una cabecera Idempotency-Key repetida por la misma cuenta, el
+--    gateway reproduce la respuesta almacenada (si status < 500) en lugar de
+--    re-ejecutar el comando. Fuente ejecutable: backend/migrations/0007_idempotency.sql.
+CREATE TABLE auth.idempotency_keys (
+    key             uuid PRIMARY KEY,
+    account_id      uuid NOT NULL REFERENCES auth.accounts(id),
+    endpoint        text NOT NULL,
+    response_status int NOT NULL,
+    response_body   jsonb NOT NULL,
+    created_at      timestamptz NOT NULL DEFAULT now()
+);

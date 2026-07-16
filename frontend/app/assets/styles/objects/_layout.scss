@@ -1,0 +1,60 @@
+// ============================================================================
+// objects/_layout.scss — primitivas de composición sin tema (capa "objects").
+// Prefijo o- (objetos). No conocen colores de contenido, solo disposición.
+// ============================================================================
+@use '../settings/tokens' as t;
+
+// Pila vertical con hueco uniforme.
+.o-stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--o-gap, #{t.$space-4});
+
+  &--tight {
+    --o-gap: #{t.$space-2};
+  }
+
+  &--loose {
+    --o-gap: #{t.$space-6};
+  }
+}
+
+// Agrupación horizontal con salto de línea y hueco uniforme.
+.o-cluster {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--o-gap, #{t.$space-3});
+
+  &--between {
+    justify-content: space-between;
+  }
+
+  &--end {
+    justify-content: flex-end;
+  }
+}
+
+// Panel: superficie elevada con borde, base de HUD e inspectores.
+.o-panel {
+  background-color: var(--ii-bg-raised);
+  border: 1px solid var(--ii-border);
+  border-radius: t.$radius-md;
+  padding: t.$space-4;
+
+  &__title {
+    font-size: t.$font-size-sm;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--ii-text-muted);
+    margin-bottom: t.$space-3;
+  }
+}
+
+// Contenedor centrado de ancho limitado (portal, formularios).
+.o-container {
+  width: 100%;
+  max-width: 64rem;
+  margin-inline: auto;
+  padding-inline: t.$space-4;
+}

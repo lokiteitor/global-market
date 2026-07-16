@@ -1,0 +1,12 @@
+# Binarios locales (el build siempre compila dentro de la imagen)
+engine
+cmd/engine/engine
+
+# Runtime local
+*.log
+.env
+.env.*
+
+# Docker
+Dockerfile
+.dockerignore
