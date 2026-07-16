@@ -1,18 +1,25 @@
 /**
  * kernel/projection.ts — proyección del mundo a pantalla.
  *
- * SIMPLIFICACIÓN v1 (aceptada): proyección TOP-DOWN equirectangular simple
- * (lon/lat → px con escala lineal). La proyección ISOMÉTRICA del FAD llega en
- * FE-6; este módulo es el único punto que se sustituirá entonces — nada fuera
- * de aquí conoce la fórmula de proyección.
+ * FE-6: proyección ISOMÉTRICA 2:1 estilo Simutrans (rombo de 128×64 px).
+ * Este módulo es el ÚNICO punto que conoce la fórmula — nada fuera de aquí
+ * hace math de proyección ni de tiles.
  *
- * Convención de pantalla: x crece hacia el este, y crece hacia el SUR (norte
- * arriba), de ahí la inversión de latitud.
+ * Dos pasos afines:
+ *   lon/lat → (u,v) coordenadas de tile continuas (u crece al ESTE, v al SUR)
+ *   (u,v)   → px de pantalla-mundo: x=(u-v)·tw/2, y=(u+v)·th/2
+ *
+ * Convención resultante (Simutrans): el norte queda arriba-derecha y el este
+ * abajo-derecha. La transformación es afín e invertible de forma exacta.
  */
 
 export interface ProjectionConfig {
-  /** Píxeles por grado de lon/lat (escala uniforme en v1). */
-  readonly pxPerDegree: number
+  /** Tiles por grado de lon/lat (escala del mundo en celdas). */
+  readonly tilesPerDegree: number
+  /** Ancho del rombo base en px (pak128: 128). */
+  readonly tileWidth: number
+  /** Alto del rombo base en px (pak128: 64, relación 2:1). */
+  readonly tileHeight: number
   /** Longitud del origen de pantalla (x = 0). */
   readonly originLon: number
   /** Latitud del origen de pantalla (y = 0). */
@@ -29,8 +36,16 @@ export interface WorldPoint {
   readonly lat: number
 }
 
+/** Coordenadas de tile CONTINUAS; floor() da el índice de celda entera. */
+export interface TilePoint {
+  readonly u: number
+  readonly v: number
+}
+
 export const DEFAULT_PROJECTION: ProjectionConfig = {
-  pxPerDegree: 900,
+  tilesPerDegree: 32,
+  tileWidth: 128,
+  tileHeight: 64,
   originLon: 0,
   originLat: 0
 }
@@ -41,23 +56,45 @@ export interface WorldProjection {
   screenToWorld(x: number, y: number): WorldPoint
 }
 
-export function createProjection(config: Partial<ProjectionConfig> = {}): WorldProjection {
+/** Proyección isométrica: expone además la capa intermedia de tiles. */
+export interface IsoProjection extends WorldProjection {
+  /** lon/lat → coordenadas de tile continuas. */
+  worldToTile(lon: number, lat: number): TilePoint
+  /** Coordenadas de tile (continuas) → px de pantalla-mundo. */
+  tileToScreen(u: number, v: number): ScreenPoint
+}
+
+export function createProjection(config: Partial<ProjectionConfig> = {}): IsoProjection {
   const cfg: ProjectionConfig = { ...DEFAULT_PROJECTION, ...config }
+  const halfW = cfg.tileWidth / 2
+  const halfH = cfg.tileHeight / 2
+
+  const worldToTile = (lon: number, lat: number): TilePoint => ({
+    u: (lon - cfg.originLon) * cfg.tilesPerDegree,
+    v: (cfg.originLat - lat) * cfg.tilesPerDegree
+  })
+
+  const tileToScreen = (u: number, v: number): ScreenPoint => ({
+    x: (u - v) * halfW,
+    y: (u + v) * halfH
+  })
 
   return {
     config: cfg,
+    worldToTile,
+    tileToScreen,
 
     worldToScreen(lon, lat) {
-      return {
-        x: (lon - cfg.originLon) * cfg.pxPerDegree,
-        y: (cfg.originLat - lat) * cfg.pxPerDegree
-      }
+      const t = worldToTile(lon, lat)
+      return tileToScreen(t.u, t.v)
     },
 
     screenToWorld(x, y) {
+      const u = (x / halfW + y / halfH) / 2
+      const v = (y / halfH - x / halfW) / 2
       return {
-        lon: cfg.originLon + x / cfg.pxPerDegree,
-        lat: cfg.originLat - y / cfg.pxPerDegree
+        lon: cfg.originLon + u / cfg.tilesPerDegree,
+        lat: cfg.originLat - v / cfg.tilesPerDegree
       }
     }
   }

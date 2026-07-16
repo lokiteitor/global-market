@@ -8,7 +8,7 @@ import { createPinia, setActivePinia } from 'pinia'
 import { beforeEach, describe, expect, it } from 'vitest'
 import { createWorldBridge, type WorldNetwork, type WorldStateBridge } from '~/game/bridge'
 import { DEFAULT_PALETTE } from '~/game/palette'
-import type { AnyVM, EntityKind, VehicleVM, VMByKind, WorldRenderer } from '~/game/types'
+import type { AnyVM, EntityKind, LinkVM, VehicleVM, VMByKind, WorldRenderer } from '~/game/types'
 import type { Building, City, NetworkLink, NetworkNode, Region, Vehicle } from '~/lib/api/types'
 import { createEventBus, type AppEvents } from '~/lib/kernel/event-bus'
 import { createProjection } from '~/lib/kernel/projection'
@@ -337,9 +337,18 @@ describe('game/bridge — view-models de edificios (status y propiedad)', () => 
     })
     h.bridge.flush()
 
-    const byId = new Map(h.renderer.ofKind('building', 'upsert').map((c) => [c.id, c.vm as { color: number; owned: boolean }]))
-    expect(byId.get('mine')).toMatchObject({ color: DEFAULT_PALETTE.buildingByStatus['operational'], owned: true })
-    expect(byId.get('theirs')).toMatchObject({ color: DEFAULT_PALETTE.buildingByStatus['seized'], owned: false })
+    const byId = new Map(
+      h.renderer.ofKind('building', 'upsert').map((c) => [c.id, c.vm as { statusTint: number; owned: boolean; frame: string }])
+    )
+    expect(byId.get('mine')).toMatchObject({
+      statusTint: DEFAULT_PALETTE.buildingTintByStatus['operational'],
+      owned: true,
+      frame: 'building.bakery'
+    })
+    expect(byId.get('theirs')).toMatchObject({
+      statusTint: DEFAULT_PALETTE.buildingTintByStatus['seized'],
+      owned: false
+    })
   })
 })
 
@@ -365,10 +374,11 @@ describe('game/bridge — cinemática de vehículos (advance_fn + position)', ()
     expect(vm.motion.baseProgress).toBeCloseTo(0.4)
     // 30 km a 60 km/h con congestión 1 → 1800 s de sim.
     expect(vm.motion.durationSim).toBeCloseTo(1800)
-    // LineString proyectado con la proyección del kernel (900 px/grado).
+    // LineString proyectado con la iso del kernel (32 tiles/grado, rombo 128×64):
+    // (1,1) → u=32,v=-32 → (4096, 0); (2,1) → u=64,v=-32 → (6144, 1024).
     expect(vm.motion.points).toEqual([
-      { x: 900, y: -900 },
-      { x: 1800, y: -900 }
+      { x: 4096, y: 0 },
+      { x: 6144, y: 1024 }
     ])
   })
 
@@ -381,7 +391,7 @@ describe('game/bridge — cinemática de vehículos (advance_fn + position)', ()
 
     const [call] = h.renderer.ofKind('vehicle', 'upsert')
     const vm = call?.vm as VehicleVM
-    expect(vm.motion).toEqual({ kind: 'fixed', x: 1800, y: -900 })
+    expect(vm.motion).toEqual({ kind: 'fixed', x: 6144, y: 1024 })
   })
 
   it('sin nodo conocido usa position.location derivada por el gateway', () => {
@@ -391,21 +401,42 @@ describe('game/bridge — cinemática de vehículos (advance_fn + position)', ()
     })
     h.bridge.flush()
 
+    // (1,2) → u=32, v=-64 → x=(32+64)·64=6144, y=(32-64)·32=-1024.
     const [call] = h.renderer.ofKind('vehicle', 'upsert')
-    expect((call?.vm as VehicleVM).motion).toEqual({ kind: 'fixed', x: 900, y: -1800 })
+    expect((call?.vm as VehicleVM).motion).toEqual({ kind: 'fixed', x: 6144, y: -1024 })
   })
 })
 
 describe('game/bridge — regiones y eventos de cámara', () => {
-  it('proyecta el bbox del bounds y tinta por bioma', () => {
+  it('convierte el bounds a rango de celdas de tile y elige suelo por bioma', () => {
     const h = makeHarness()
     h.stores.world.setRegions([makeRegion('r1', 0, 0, 2, 2, 'desert')])
     h.bridge.flush()
 
     const [call] = h.renderer.ofKind('region', 'upsert')
-    const vm = call?.vm as { x: number; y: number; width: number; height: number; fillColor: number }
-    expect(vm).toMatchObject({ x: 0, y: -1800, width: 1800, height: 1800 })
-    expect(vm.fillColor).toBe(DEFAULT_PALETTE.regionFillByBiome['desert'])
+    const vm = call?.vm as { u0: number; v0: number; u1: number; v1: number; groundFrame: string; labelX: number; labelY: number }
+    // (minLon 0, maxLat 2) → (u,v)=(0,-64); (maxLon 2, minLat 0) → (64, 0).
+    expect(vm).toMatchObject({ u0: 0, v0: -64, u1: 64, v1: 0 })
+    expect(vm.groundFrame).toBe(DEFAULT_PALETTE.groundFrameByBiome['desert'])
+    // Label en la esquina norte del rombo: tileToScreen(0,-64) = (4096, -2048).
+    expect(vm.labelX).toBe(4096)
+    expect(vm.labelY).toBe(-2048)
+  })
+
+  it('rasteriza los links visibles a celdas de carretera con frames por conexión', () => {
+    const h = makeHarness(true)
+    h.bridge.refresh()
+    h.scheduler.runFrame()
+
+    const [call] = h.renderer.ofKind('link', 'upsert')
+    const vm = call?.vm as LinkVM
+    // Path (1,1)→(2,1): 1° de lon a 32 tiles/grado = 33 celdas E-W.
+    expect(vm.cells).toHaveLength(33)
+    expect(vm.cells[0]?.frame).toBe('road.e')
+    expect(vm.cells[1]?.frame).toBe('road.ew')
+    expect(vm.cells[vm.cells.length - 1]?.frame).toBe('road.w')
+    // Congestión EMA 1 → tinte neutro (primer tramo de la rampa).
+    expect(vm.tint).toBe(DEFAULT_PALETTE.linkCongestion[0])
   })
 
   it("reenvía 'camera:flyTo' del bus al renderer", () => {

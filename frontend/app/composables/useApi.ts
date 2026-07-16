@@ -18,6 +18,7 @@ import type {
   InventoryItem,
   LedgerAccount,
   LedgerEntry,
+  NetworkLink,
   NetworkNode,
   OhlcCandle,
   Product,
@@ -106,6 +107,7 @@ export interface Api {
   updateVehicle(vehicleId: string, body: { route_id?: string | null; schedule_maintenance?: boolean }): Promise<ApiResult<Vehicle>>
   // logistics
   listNetworkNodes(query?: { region_id?: string; limit?: number }): Promise<ApiResult<NetworkNode[]>>
+  listNetworkLinks(query?: { region_id?: string; limit?: number }): Promise<ApiResult<NetworkLink[]>>
   createRoutePlan(originNodeId: string, destinationNodeId: string): Promise<ApiResult<RoutePlan>>
   listRoutes(): Promise<ApiResult<Route[]>>
   createRoute(name: string, kind: 'fixed_line' | 'on_demand', legs: string[]): Promise<ApiResult<Route>>
@@ -166,7 +168,9 @@ export function createApi(client: ApiClient): Api {
     updateVehicle: (vehicleId, body) => client.request<Vehicle>('PATCH', `/world/vehicles/${vehicleId}`, { body }),
 
     listNetworkNodes: (query = {}) =>
-      client.request<NetworkNode[]>('GET', '/logistics/network/nodes', { query: { limit: 500, ...query } }),
+      client.request<NetworkNode[]>('GET', '/logistics/network/nodes', { query: { limit: CATALOG_LIMIT, ...query } }),
+    listNetworkLinks: (query = {}) =>
+      client.request<NetworkLink[]>('GET', '/logistics/network/links', { query: { limit: CATALOG_LIMIT, ...query } }),
     createRoutePlan: (originNodeId, destinationNodeId) =>
       client.request<RoutePlan>('POST', '/logistics/route-plans', {
         body: { origin_node_id: originNodeId, destination_node_id: destinationNodeId }

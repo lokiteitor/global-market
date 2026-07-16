@@ -20,13 +20,15 @@ export interface CreatedGame {
 
 export async function createGame(canvasParent: HTMLElement, deps: GameDeps): Promise<CreatedGame> {
   // Carga perezosa client-only: nada de esto se evalúa en el servidor.
-  const [{ default: Phaser }, { WorldScene }, { OverlayScene }] = await Promise.all([
+  const [{ default: Phaser }, { PreloadScene }, { WorldScene }, { OverlayScene }] = await Promise.all([
     import('phaser'),
+    import('./scenes/PreloadScene'),
     import('./scenes/WorldScene'),
     import('./scenes/OverlayScene')
   ])
 
   const palette = deps.palette ?? DEFAULT_PALETTE
+  const preload = new PreloadScene()
   const world = new WorldScene(deps)
   const overlay = new OverlayScene()
   overlay.setPalette(palette)
@@ -52,8 +54,9 @@ export async function createGame(canvasParent: HTMLElement, deps: GameDeps): Pro
       width: '100%',
       height: '100%'
     },
-    // WorldScene arranca sola (primera); ella lanza la OverlayScene.
-    scene: [world, overlay]
+    // PreloadScene arranca sola (primera): carga el atlas pak128 y arranca la
+    // WorldScene; esta lanza la OverlayScene. El await de `ready` no cambia.
+    scene: [preload, world, overlay]
   })
 
   await ready

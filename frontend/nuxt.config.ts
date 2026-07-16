@@ -38,6 +38,11 @@ export default defineNuxtConfig({
 
   // P9 — tipos como contrato: TypeScript estricto en todo el frontend.
   typescript: {
-    strict: true
+    strict: true,
+    tsConfig: {
+      // El pakset fuente de Simutrans (PNG + .dat + scripts propios) no es
+      // código del frontend: fuera del typecheck (vue-tsc tropezaba con sus JS).
+      exclude: ['../app/assets/pak128']
+    }
   }
 })

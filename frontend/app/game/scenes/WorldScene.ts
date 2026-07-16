@@ -1,22 +1,31 @@
 /**
- * game/scenes/WorldScene.ts — única escena de mundo v1 (FAD §11, §16–§18).
+ * game/scenes/WorldScene.ts — única escena de mundo (FAD §11, §16–§18).
  *
- * Render TOP-DOWN (SIMPLIFICACIÓN v1 aceptada: proyección lon/lat → px del
- * kernel; la isométrica llega en FE-6) con gráficos PROCEDURALES
- * (SIMPLIFICACIÓN v1 aceptada: Shapes/Graphics de Phaser, sin atlases ni
- * assets binarios).
+ * Render ISOMÉTRICO 2:1 estilo Simutrans (FE-6) con sprites del atlas pak128
+ * (cargado por PreloadScene): terreno tileado por región (Blitter), carreteras
+ * rasterizadas celda a celda, edificios/ciudades/depósitos como sprites con
+ * anclaje en el pie del rombo y vehículos de 8 direcciones. Sin chunks ni
+ * streaming (SIMPLIFICACIÓN v1 aceptada: el mundo demo cabe entero; FAD §16
+ * completo llega después).
  *
  * La escena implementa el puerto `WorldRenderer`: recibe view-models planos
  * del bridge (upsert/remove con POOLING de Game Objects: se reutilizan y se
  * liberan a un pool, nunca se destruyen por frame) y emite intents espaciales
  * por el event bus tipado ('world:select'). No importa stores ni Vue (O2).
  *
+ * Depth sorting iso: los objetos "de pie" (edificio/depósito/ciudad/vehículo)
+ * usan depth = ISO_BASE + y del anclaje (pie del rombo): lo que está más al
+ * sur en pantalla tapa a lo que tiene detrás.
+ *
  * Interpolación (P5): cada frame, la posición de un vehículo en tránsito es
  * interpolateOnPath(path, progress) con progress = clamp(base +
  * (simNow - entered)/duration, 0, 1); simNow llega inyectado (deps.simNow),
  * único origen temporal — la escena jamás llama a Date.now() para dominio.
+ * El ángulo px del tramo se mapea al frame direccional (8 direcciones pak128)
+ * — los sprites iso no se rotan.
  */
 import Phaser from 'phaser'
+import { dirFromAngle } from '../iso-dirs'
 import { interpolateOnPath, progressAt } from '../kinematics'
 import { DEFAULT_PALETTE } from '../palette'
 import type {
@@ -35,6 +44,7 @@ import type {
   WorldRenderer
 } from '../types'
 import { OVERLAY_SCENE_KEY, type OverlayScene } from './OverlayScene'
+import { PAK_ATLAS_KEY, PAK_META_KEY } from './PreloadScene'
 
 export const WORLD_SCENE_KEY = 'world'
 
@@ -43,16 +53,29 @@ const ZOOM_MAX = 4
 const CLICK_SLOP_PX = 5
 const KEY_PAN_SPEED = 600 // px de pantalla por segundo
 
-// Profundidades por capa (de fondo a frente).
-const DEPTH = { region: 0, regionLabel: 1, link: 10, node: 20, deposit: 30, city: 40, cityLabel: 41, building: 50, vehicle: 60 } as const
+// Capas planas (fondo) — los objetos "de pie" van en la banda iso.
+const DEPTH = { terrain: 0, regionLabel: 1, link: 10, node: 20 } as const
+/** Base de la banda iso: depth = ISO_BASE + y del pie (px de mundo). */
+const ISO_BASE = 1000
+
+/** Ajustes de calibración vertical del arte pak128 (una constante por capa). */
+const GROUND_OFFSET_Y = 0
+
+/** Anclaje por defecto: centro del rombo (64,96) de una celda 128×128. */
+const FALLBACK_ANCHOR = { anchorX: 0.5, anchorY: 0.75 }
+
+interface FrameAnchor {
+  anchorX: number
+  anchorY: number
+}
 
 interface RegionEntry {
-  gfx: Phaser.GameObjects.Graphics
+  blitter: Phaser.GameObjects.Blitter
   label: Phaser.GameObjects.Text
   vm: RegionVM
 }
 interface LinkEntry {
-  gfx: Phaser.GameObjects.Graphics
+  imgs: Phaser.GameObjects.Image[]
   vm: LinkVM
 }
 interface NodeEntry {
@@ -60,20 +83,22 @@ interface NodeEntry {
   vm: NodeVM
 }
 interface DepositEntry {
-  poly: Phaser.GameObjects.Polygon
+  img: Phaser.GameObjects.Image
   vm: DepositVM
 }
 interface CityEntry {
-  arc: Phaser.GameObjects.Arc
+  img: Phaser.GameObjects.Image
   label: Phaser.GameObjects.Text
   vm: CityVM
 }
 interface BuildingEntry {
-  rect: Phaser.GameObjects.Rectangle
+  img: Phaser.GameObjects.Image
+  /** Rombo de 1 tile bajo el sprite: marca de lo propio (C13). */
+  marker: Phaser.GameObjects.Graphics
   vm: BuildingVM
 }
 interface VehicleEntry {
-  tri: Phaser.GameObjects.Triangle
+  img: Phaser.GameObjects.Image
   vm: VehicleVM
 }
 
@@ -108,6 +133,11 @@ export class WorldScene extends Phaser.Scene implements WorldRenderer {
     building: [],
     vehicle: []
   }
+  /** Pool compartido de tiles de carretera (N images por link). */
+  private readonly roadImagePool: Phaser.GameObjects.Image[] = []
+
+  /** Anclajes por frame del manifiesto meta.json (pie del rombo). */
+  private anchors: Record<string, FrameAnchor> = {}
 
   private drag: DragState | null = null
   private keys: Record<'up' | 'down' | 'left' | 'right' | 'w' | 'a' | 's' | 'd', Phaser.Input.Keyboard.Key> | null = null
@@ -136,6 +166,8 @@ export class WorldScene extends Phaser.Scene implements WorldRenderer {
   // ─── Ciclo de vida ─────────────────────────────────────────────────────────
 
   create(): void {
+    const meta = this.cache.json.get(PAK_META_KEY) as { frames?: Record<string, FrameAnchor> } | undefined
+    this.anchors = meta?.frames ?? {}
     this.scene.launch(OVERLAY_SCENE_KEY)
     this.cameras.main.setZoom(1)
     this.setupInput()
@@ -201,38 +233,54 @@ export class WorldScene extends Phaser.Scene implements WorldRenderer {
   }
 
   frameWorld(bbox: WorldBbox): void {
-    // Proyecta las esquinas del bbox de mundo a px (y crece hacia el sur, de
-    // ahí que maxLat mapee al borde superior). Centra la cámara y ajusta el
-    // zoom para abarcar todo el mundo con un margen, dentro de los límites.
-    const tl = this.deps.projection.worldToScreen(bbox.minLon, bbox.maxLat)
-    const br = this.deps.projection.worldToScreen(bbox.maxLon, bbox.minLat)
-    const worldW = Math.abs(br.x - tl.x)
-    const worldH = Math.abs(br.y - tl.y)
+    // En iso un rect lon/lat proyecta a un ROMBO: el bbox px que lo abarca
+    // sale de las 4 esquinas, no de dos. Centra la cámara y ajusta el zoom
+    // para abarcar todo el mundo con un margen, dentro de los límites.
+    const px = this.projectBboxCorners(bbox)
+    const worldW = px.maxX - px.minX
+    const worldH = px.maxY - px.minY
     if (worldW === 0 || worldH === 0) return
     const cam = this.cameras.main
     const margin = 1.12 // ~12 % de aire alrededor del mundo
     const zoom = Phaser.Math.Clamp(Math.min(cam.width / (worldW * margin), cam.height / (worldH * margin)), ZOOM_MIN, ZOOM_MAX)
     cam.setZoom(zoom)
-    cam.centerOn((tl.x + br.x) / 2, (tl.y + br.y) / 2)
+    cam.centerOn((px.minX + px.maxX) / 2, (px.minY + px.maxY) / 2)
   }
 
   /** Viewport actual en coordenadas de MUNDO (lon/lat) para interest management. */
   getViewportBbox(): WorldBbox {
+    // El rect px de la cámara mapea a un rombo lon/lat: el bbox correcto sale
+    // de proyectar las 4 esquinas (la iso es afín → min/max exactos ahí).
     const view = this.cameras.main.worldView
-    const tl = this.deps.projection.screenToWorld(view.x, view.y)
-    const br = this.deps.projection.screenToWorld(view.right, view.bottom)
-    return { minLon: tl.lon, maxLon: br.lon, minLat: br.lat, maxLat: tl.lat }
+    const corners = [
+      this.deps.projection.screenToWorld(view.x, view.y),
+      this.deps.projection.screenToWorld(view.right, view.y),
+      this.deps.projection.screenToWorld(view.x, view.bottom),
+      this.deps.projection.screenToWorld(view.right, view.bottom)
+    ]
+    return {
+      minLon: Math.min(...corners.map((c) => c.lon)),
+      maxLon: Math.max(...corners.map((c) => c.lon)),
+      minLat: Math.min(...corners.map((c) => c.lat)),
+      maxLat: Math.max(...corners.map((c) => c.lat))
+    }
   }
 
   // ─── Upserts con pooling ───────────────────────────────────────────────────
+
+  private applyAnchor(img: Phaser.GameObjects.Image, frame: string): void {
+    const a = this.anchors[frame] ?? FALLBACK_ANCHOR
+    img.setOrigin(a.anchorX, a.anchorY)
+  }
 
   private upsertRegion(vm: RegionVM): void {
     let entry = this.regions.get(vm.id)
     if (entry === undefined) {
       entry = (this.pools.region.pop() as RegionEntry | undefined) ?? {
-        gfx: this.add.graphics().setDepth(DEPTH.region),
+        blitter: this.add.blitter(0, 0, PAK_ATLAS_KEY).setDepth(DEPTH.terrain),
         label: this.add
           .text(0, 0, '', { fontFamily: 'monospace', fontSize: '13px', color: this.palette.label })
+          .setOrigin(0.5, 0)
           .setDepth(DEPTH.regionLabel)
           .setAlpha(0.6),
         vm
@@ -240,29 +288,46 @@ export class WorldScene extends Phaser.Scene implements WorldRenderer {
       this.regions.set(vm.id, entry)
     }
     entry.vm = vm
-    const g = entry.gfx
-    g.clear()
-    g.setVisible(true).setActive(true)
-    g.fillStyle(vm.fillColor, 0.18)
-    g.fillRect(vm.x, vm.y, vm.width, vm.height)
-    g.lineStyle(1.5, vm.strokeColor, 0.9)
-    g.strokeRect(vm.x, vm.y, vm.width, vm.height)
-    entry.label.setVisible(true).setActive(true).setPosition(vm.x + 8, vm.y + 6).setText(vm.name)
+    const blitter = entry.blitter
+    blitter.clear()
+    blitter.setVisible(true).setActive(true)
+    // Terreno tileado: un bob (rombo 128×64) por celda. Orden v-exterior /
+    // u-interior para que el solape natural de rombos pinte de norte a sur.
+    for (let v = vm.v0; v < vm.v1; v++) {
+      for (let u = vm.u0; u < vm.u1; u++) {
+        const c = this.deps.projection.tileToScreen(u + 0.5, v + 0.5)
+        blitter.create(c.x - 64, c.y - 32 + GROUND_OFFSET_Y, vm.groundFrame)
+      }
+    }
+    entry.label.setVisible(true).setActive(true).setPosition(vm.labelX, vm.labelY - 10).setText(vm.name)
     this.growWorldBounds(vm)
   }
 
   private upsertLink(vm: LinkVM): void {
     let entry = this.links.get(vm.id)
     if (entry === undefined) {
-      entry = (this.pools.link.pop() as LinkEntry | undefined) ?? { gfx: this.add.graphics().setDepth(DEPTH.link), vm }
+      entry = (this.pools.link.pop() as LinkEntry | undefined) ?? { imgs: [], vm }
       this.links.set(vm.id, entry)
     }
     entry.vm = vm
-    const g = entry.gfx
-    g.clear()
-    g.setVisible(true).setActive(true)
-    g.lineStyle(vm.width, vm.color, 0.75)
-    g.strokePoints(vm.points, false)
+    // Ajusta el nº de images al nº de celdas reutilizando el pool compartido.
+    while (entry.imgs.length > vm.cells.length) {
+      const img = entry.imgs.pop() as Phaser.GameObjects.Image
+      img.setVisible(false).setActive(false)
+      this.roadImagePool.push(img)
+    }
+    while (entry.imgs.length < vm.cells.length) {
+      const img = this.roadImagePool.pop() ?? this.add.image(0, 0, PAK_ATLAS_KEY).setDepth(DEPTH.link)
+      entry.imgs.push(img)
+    }
+    for (let i = 0; i < vm.cells.length; i++) {
+      const cell = vm.cells[i] as LinkVM['cells'][number]
+      const img = entry.imgs[i] as Phaser.GameObjects.Image
+      const c = this.deps.projection.tileToScreen(cell.u + 0.5, cell.v + 0.5)
+      img.setVisible(true).setActive(true).setFrame(cell.frame)
+      this.applyAnchor(img, cell.frame)
+      img.setPosition(c.x, c.y).setTint(vm.tint)
+    }
   }
 
   private upsertNode(vm: NodeVM): void {
@@ -278,80 +343,98 @@ export class WorldScene extends Phaser.Scene implements WorldRenderer {
   private upsertDeposit(vm: DepositVM): void {
     let entry = this.deposits.get(vm.id)
     if (entry === undefined) {
-      const s = vm.size
-      // Rombo procedural (sin texturas): polígono de 4 vértices.
       entry = (this.pools.deposit.pop() as DepositEntry | undefined) ?? {
-        poly: this.add.polygon(0, 0, [0, -s, s, 0, 0, s, -s, 0], vm.color, 0.95).setDepth(DEPTH.deposit),
+        img: this.add.image(0, 0, PAK_ATLAS_KEY),
         vm
       }
       this.deposits.set(vm.id, entry)
     }
     entry.vm = vm
-    entry.poly.setVisible(true).setActive(true).setPosition(vm.x, vm.y).setFillStyle(vm.color, 0.95)
+    entry.img.setVisible(true).setActive(true).setFrame(vm.frame)
+    this.applyAnchor(entry.img, vm.frame)
+    entry.img.setPosition(vm.x, vm.y).setDepth(ISO_BASE + vm.y)
   }
 
   private upsertCity(vm: CityVM): void {
     let entry = this.cities.get(vm.id)
     if (entry === undefined) {
       entry = (this.pools.city.pop() as CityEntry | undefined) ?? {
-        arc: this.add.circle(0, 0, 1).setDepth(DEPTH.city),
+        img: this.add.image(0, 0, PAK_ATLAS_KEY),
         label: this.add
           .text(0, 0, '', { fontFamily: 'monospace', fontSize: '12px', color: this.palette.label })
-          .setOrigin(0.5, 0)
-          .setDepth(DEPTH.cityLabel),
+          .setOrigin(0.5, 0),
         vm
       }
       this.cities.set(vm.id, entry)
     }
     entry.vm = vm
-    entry.arc
+    entry.img.setVisible(true).setActive(true).setFrame(vm.frame)
+    this.applyAnchor(entry.img, vm.frame)
+    entry.img.setPosition(vm.x, vm.y).setDepth(ISO_BASE + vm.y)
+    entry.label
       .setVisible(true)
       .setActive(true)
-      .setPosition(vm.x, vm.y)
-      .setRadius(vm.radius)
-      .setFillStyle(vm.color, 0.85)
-      .setStrokeStyle(1.5, 0xffffff, 0.35)
-    entry.label.setVisible(true).setActive(true).setPosition(vm.x, vm.y + vm.radius + 4).setText(vm.label)
+      .setPosition(vm.x, vm.y + 36)
+      .setDepth(ISO_BASE + vm.y + 0.5)
+      .setText(vm.label)
   }
 
   private upsertBuilding(vm: BuildingVM): void {
     let entry = this.buildings.get(vm.id)
     if (entry === undefined) {
       entry = (this.pools.building.pop() as BuildingEntry | undefined) ?? {
-        rect: this.add.rectangle(0, 0, 1, 1).setDepth(DEPTH.building),
+        img: this.add.image(0, 0, PAK_ATLAS_KEY),
+        marker: this.add.graphics(),
         vm
       }
       this.buildings.set(vm.id, entry)
     }
     entry.vm = vm
-    entry.rect
-      .setVisible(true)
-      .setActive(true)
-      .setPosition(vm.x, vm.y)
-      .setSize(vm.size, vm.size)
-      .setFillStyle(vm.color, 1)
-    // Borde destacado si es propio (C13: comandable), sutil si es ajeno.
-    if (vm.owned) entry.rect.setStrokeStyle(2, this.palette.ownedOutline, 1)
-    else entry.rect.setStrokeStyle(1, 0x000000, 0.35)
+    entry.img.setVisible(true).setActive(true).setFrame(vm.frame)
+    this.applyAnchor(entry.img, vm.frame)
+    entry.img.setPosition(vm.x, vm.y).setDepth(ISO_BASE + vm.y).setTint(vm.statusTint)
+    // Rombo de 1 tile bajo el pie: marca de lo propio (C13: comandable).
+    const marker = entry.marker
+    marker.clear()
+    marker.setVisible(vm.owned).setActive(vm.owned)
+    if (vm.owned) {
+      marker.setPosition(vm.x, vm.y).setDepth(ISO_BASE + vm.y - 0.5)
+      marker.lineStyle(2, this.palette.ownedOutline, 0.9)
+      marker.strokePoints(
+        [
+          { x: 0, y: -32 },
+          { x: 64, y: 0 },
+          { x: 0, y: 32 },
+          { x: -64, y: 0 }
+        ],
+        true
+      )
+    }
   }
 
   private upsertVehicle(vm: VehicleVM): void {
     let entry = this.vehicles.get(vm.id)
     if (entry === undefined) {
-      // Triángulo procedural apuntando a +x; rotation = ángulo del tramo.
       entry = (this.pools.vehicle.pop() as VehicleEntry | undefined) ?? {
-        tri: this.add.triangle(0, 0, -6, -4, 6, 0, -6, 4, vm.color, 1).setDepth(DEPTH.vehicle),
+        img: this.add.image(0, 0, PAK_ATLAS_KEY),
         vm
       }
       this.vehicles.set(vm.id, entry)
     }
     entry.vm = vm
-    entry.tri.setVisible(true).setActive(true).setFillStyle(vm.color, 1)
+    entry.img.setVisible(true).setActive(true).setTint(vm.owned ? this.palette.vehicleOwned : this.palette.vehicle)
     if (vm.motion.kind === 'fixed') {
-      entry.tri.setPosition(vm.motion.x, vm.motion.y).setRotation(0)
+      this.setVehicleFrame(entry, 'se') // aparcado: vista frontal por defecto
+      entry.img.setPosition(vm.motion.x, vm.motion.y).setDepth(ISO_BASE + vm.motion.y)
     } else {
       this.placeVehicle(entry)
     }
+  }
+
+  private setVehicleFrame(entry: VehicleEntry, dir: string): void {
+    const frame = `${entry.vm.frameBase}.${dir}`
+    entry.img.setFrame(frame)
+    this.applyAnchor(entry.img, frame)
   }
 
   private releaseEntry(kind: EntityKind, entry: unknown): void {
@@ -362,34 +445,41 @@ export class WorldScene extends Phaser.Scene implements WorldRenderer {
     switch (kind) {
       case 'region': {
         const e = entry as RegionEntry
-        e.gfx.clear()
-        hide(e.gfx)
+        e.blitter.clear()
+        hide(e.blitter)
         hide(e.label)
         break
       }
       case 'link': {
         const e = entry as LinkEntry
-        e.gfx.clear()
-        hide(e.gfx)
+        for (const img of e.imgs) {
+          hide(img)
+          this.roadImagePool.push(img)
+        }
+        e.imgs = []
         break
       }
       case 'node':
         hide((entry as NodeEntry).arc)
         break
       case 'deposit':
-        hide((entry as DepositEntry).poly)
+        hide((entry as DepositEntry).img)
         break
       case 'city': {
         const e = entry as CityEntry
-        hide(e.arc)
+        hide(e.img)
         hide(e.label)
         break
       }
-      case 'building':
-        hide((entry as BuildingEntry).rect)
+      case 'building': {
+        const e = entry as BuildingEntry
+        e.marker.clear()
+        hide(e.marker)
+        hide(e.img)
         break
+      }
       case 'vehicle':
-        hide((entry as VehicleEntry).tri)
+        hide((entry as VehicleEntry).img)
         break
     }
     this.pools[kind].push(entry)
@@ -405,7 +495,9 @@ export class WorldScene extends Phaser.Scene implements WorldRenderer {
       this.deps.simNow()
     )
     const sample = interpolateOnPath(motion.points, progress)
-    entry.tri.setPosition(sample.x, sample.y).setRotation(sample.angle)
+    // Sprites iso: nada de setRotation — el ángulo px elige el frame de 8 dir.
+    this.setVehicleFrame(entry, dirFromAngle(sample.angle))
+    entry.img.setPosition(sample.x, sample.y).setDepth(ISO_BASE + sample.y)
   }
 
   private updateVehicles(): void {
@@ -492,8 +584,31 @@ export class WorldScene extends Phaser.Scene implements WorldRenderer {
     if (dx !== 0 || dy !== 0) cam.setScroll(cam.scrollX + dx, cam.scrollY + dy)
   }
 
+  /** Bbox px de las 4 esquinas de un bbox lon/lat (la iso rota el rect). */
+  private projectBboxCorners(bbox: WorldBbox): { minX: number; minY: number; maxX: number; maxY: number } {
+    const pts = [
+      this.deps.projection.worldToScreen(bbox.minLon, bbox.maxLat),
+      this.deps.projection.worldToScreen(bbox.maxLon, bbox.maxLat),
+      this.deps.projection.worldToScreen(bbox.minLon, bbox.minLat),
+      this.deps.projection.worldToScreen(bbox.maxLon, bbox.minLat)
+    ]
+    return {
+      minX: Math.min(...pts.map((p) => p.x)),
+      maxX: Math.max(...pts.map((p) => p.x)),
+      minY: Math.min(...pts.map((p) => p.y)),
+      maxY: Math.max(...pts.map((p) => p.y))
+    }
+  }
+
   private growWorldBounds(vm: RegionVM): void {
-    const rect = new Phaser.Geom.Rectangle(vm.x, vm.y, vm.width, vm.height)
+    // Las 4 esquinas del rango de tiles de la región, proyectadas a px.
+    const proj = this.deps.projection
+    const pts = [proj.tileToScreen(vm.u0, vm.v0), proj.tileToScreen(vm.u1, vm.v0), proj.tileToScreen(vm.u0, vm.v1), proj.tileToScreen(vm.u1, vm.v1)]
+    const minX = Math.min(...pts.map((p) => p.x))
+    const maxX = Math.max(...pts.map((p) => p.x))
+    const minY = Math.min(...pts.map((p) => p.y))
+    const maxY = Math.max(...pts.map((p) => p.y))
+    const rect = new Phaser.Geom.Rectangle(minX, minY, maxX - minX, maxY - minY)
     this.worldPxBounds = this.worldPxBounds === null ? rect : Phaser.Geom.Rectangle.Union(this.worldPxBounds, rect)
     const pad = 400
     const b = this.worldPxBounds
@@ -521,17 +636,17 @@ export class WorldScene extends Phaser.Scene implements WorldRenderer {
 
   pick(x: number, y: number): { kind: 'vehicle' | 'building' | 'city' | 'deposit' | 'node'; id: string } | null {
     for (const [id, entry] of this.vehicles) {
-      if (Phaser.Math.Distance.Between(x, y, entry.tri.x, entry.tri.y) <= 12) return { kind: 'vehicle', id }
+      if (Phaser.Math.Distance.Between(x, y, entry.img.x, entry.img.y) <= 20) return { kind: 'vehicle', id }
     }
     for (const [id, entry] of this.buildings) {
-      const half = entry.vm.size / 2 + 4
-      if (Math.abs(x - entry.vm.x) <= half && Math.abs(y - entry.vm.y) <= half) return { kind: 'building', id }
+      // Zona de clic ≈ rombo del tile base (elipse 2:1 del anclaje).
+      if (Math.abs(x - entry.vm.x) / 2 + Math.abs(y - entry.vm.y) <= 40) return { kind: 'building', id }
     }
     for (const [id, entry] of this.cities) {
       if (Phaser.Math.Distance.Between(x, y, entry.vm.x, entry.vm.y) <= entry.vm.radius + 4) return { kind: 'city', id }
     }
     for (const [id, entry] of this.deposits) {
-      if (Phaser.Math.Distance.Between(x, y, entry.vm.x, entry.vm.y) <= entry.vm.size + 4) return { kind: 'deposit', id }
+      if (Math.abs(x - entry.vm.x) / 2 + Math.abs(y - entry.vm.y) <= 56) return { kind: 'deposit', id }
     }
     for (const [id, entry] of this.nodes) {
       if (Phaser.Math.Distance.Between(x, y, entry.vm.x, entry.vm.y) <= entry.vm.size + 5) return { kind: 'node', id }
@@ -544,11 +659,11 @@ export class WorldScene extends Phaser.Scene implements WorldRenderer {
     switch (kind) {
       case 'vehicle': {
         const e = this.vehicles.get(id)
-        return e === undefined ? null : { x: e.tri.x, y: e.tri.y, r: 14 }
+        return e === undefined ? null : { x: e.img.x, y: e.img.y, r: 24 }
       }
       case 'building': {
         const e = this.buildings.get(id)
-        return e === undefined ? null : { x: e.vm.x, y: e.vm.y, r: e.vm.size / 2 + 8 }
+        return e === undefined ? null : { x: e.vm.x, y: e.vm.y, r: 72 }
       }
       case 'city': {
         const e = this.cities.get(id)
@@ -556,7 +671,7 @@ export class WorldScene extends Phaser.Scene implements WorldRenderer {
       }
       case 'deposit': {
         const e = this.deposits.get(id)
-        return e === undefined ? null : { x: e.vm.x, y: e.vm.y, r: e.vm.size + 8 }
+        return e === undefined ? null : { x: e.vm.x, y: e.vm.y, r: 96 }
       }
       case 'node': {
         const e = this.nodes.get(id)

@@ -1,0 +1,6 @@
+Los frames de atlas.png proceden del pakset pak128 de Simutrans
+(https://github.com/simutrans/pak128), redistribuidos bajo Artistic License 2.0.
+Fuente en este repositorio: frontend/app/assets/pak128/ (LICENSE.txt).
+Autores originales: equipo pak128 (ver copyright en los .dat correspondientes,
+p. ej. bakery: Patrick; bulk_truck_0: Karl & Shorty).
+Generado por frontend/scripts/build-game-assets.mjs (npm run build:assets).

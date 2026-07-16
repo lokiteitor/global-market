@@ -57,16 +57,36 @@ tests/            # vitest: kernel, net (transporte/simclock/sync con dobles),
 
 Comunicación entre capas: `game/` y `components/` **leen** estado por stores y **emiten** intenciones por el event bus tipado (`lib/kernel/event-bus.ts`); la red escribe en las stores dueñas vía el pipeline de sync. Dinero y cantidades son *strings de punto fijo* manejados solo con los helpers BigInt de `lib/kernel/money.ts` (jamás `parseFloat`/`Number`).
 
+## Render isométrico (FE-6 v1, ADR-IMPL-15)
+
+El mundo se pinta en **isométrica 2:1 estilo Simutrans** con frames del pakset
+**pak128** (fuente en `app/assets/pak128/`, Artistic License 2.0):
+
+- `lib/kernel/projection.ts` — `IsoProjection` afín: lon/lat → tiles continuos
+  (32 tiles/grado) → px con rombo 128×64. Único punto con math de proyección.
+- `npm run build:assets` (`scripts/build-game-assets.mjs`, pngjs) — recorta los
+  frames curados de los tilesheets (color clave RGB 231,255,255 → alpha,
+  edificios multi-tile compuestos offline) y emite el atlas Phaser + manifiesto
+  de anclajes a `public/game/pak128/` (**output commiteado**; regenerar al
+  cambiar la lista de frames). Incluye `ATTRIBUTION.txt`.
+- `game/scenes/PreloadScene.ts` carga el atlas; `WorldScene` pinta terreno
+  tileado por región (Blitter), carreteras rasterizadas celda a celda
+  (`game/road-raster.ts`: supercover 4-conexo + máscara NSEW global → frame
+  recta/curva/T/cruce) y sprites con depth iso (`ISO_BASE + y` del pie);
+  vehículos con 8 direcciones (`game/iso-dirs.ts`), sin rotación de sprites.
+- Pendiente de FE-6: chunks/streaming, LOD, minimapa, overlays y frames
+  diagonales de carretera (las diagonales se ven como escalera de curvas,
+  igual que Simutrans sin gráficos diagonales).
+
 ## Simplificaciones v1 (aceptadas, documentadas en el código)
 
-- **Proyección top-down** del mundo (lon/lat → px con escala lineal, `lib/kernel/projection.ts`); la vista isométrica queda para FE-6.
-- **Gráficos Phaser procedurales** (`Graphics`/`generateTexture`): sin atlases ni assets binarios.
+
 - **Token de sesión en memoria + sessionStorage** (solo dev); el guard de auth decide solo en cliente. Endurecimiento (cookies httpOnly/BFF) pospuesto.
 - **Cinemática de vehículos derivada**: el DTO v1.1.0 no trae inicio/duración de segmento; se derivan de `updated_at_sim`, la geometría del link y `base_speed_kmh·congestion_ema` (ver `game/bridge.ts`).
 - **Parcela/footprint por inputs numéricos** en BuildPanel (el picking sobre el mapa llega con FE-6).
 - **OHLC solo tabla** (sin gráfico Canvas).
 - **Panel de gestión acoplado en posición fija** sobre el canvas; el WindowManager (paneles flotantes/redimensionables, §15.5) queda pendiente.
-- **Sin store de red logística** (nodos/enlaces) ni de concesiones/rutas: BuildPanel/FleetPanel hacen pull local y el bridge degrada a `position.location`; el `getNetwork` del bridge se cableará cuando exista la store.
+- **Sin store de red logística** (nodos/enlaces) ni de concesiones/rutas: `play.vue` pulsa la red por REST una vez y la pasa como prop a GameCanvasHost (`getNetwork` del bridge); migrará a store propia cuando exista.
 
 ## Puertos (docs/desarrollo.md)
 

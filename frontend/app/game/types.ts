@@ -6,10 +6,15 @@
  * frontera. No importa Phaser ni Vue: es seguro de evaluar en cualquier
  * entorno (tests node, SSR nunca lo carga porque game/ solo se importa
  * dinámicamente client-side).
+ *
+ * FE-6: los VMs referencian FRAMES del atlas pak128 (strings tipo
+ * 'building.bakery'); las coordenadas px ya vienen proyectadas con la
+ * IsoProjection del kernel.
  */
 import type { AppEvents, EventBus } from '~/lib/kernel/event-bus'
-import type { WorldProjection } from '~/lib/kernel/projection'
+import type { IsoProjection } from '~/lib/kernel/projection'
 import type { PathPoint } from './kinematics'
+import type { RoadCell } from './road-raster'
 
 // ─── Viewport en coordenadas de MUNDO (lon/lat, SRID 4326) ──────────────────
 
@@ -20,29 +25,37 @@ export interface WorldBbox {
   maxLat: number
 }
 
-// ─── View-models (coordenadas en px de pantalla-mundo, ya proyectadas) ──────
+// ─── View-models (px de pantalla-mundo ya proyectados, o celdas de tile) ─────
 
 export type EntityKind = 'region' | 'city' | 'deposit' | 'node' | 'link' | 'building' | 'vehicle'
 
+/**
+ * Región como rango de CELDAS de tile enteras [u0,u1) × [v0,v1): la escena
+ * pinta el terreno tileado (frame de suelo por bioma) — sustituye al fill
+ * rectangular de la v1 top-down, que en iso sería un rombo.
+ */
 export interface RegionVM {
   id: string
-  x: number
-  y: number
-  width: number
-  height: number
-  /** Tinte por bioma (config de paleta, nunca importado de Sass). */
-  fillColor: number
-  strokeColor: number
+  u0: number
+  v0: number
+  u1: number
+  v1: number
+  /** Frame de suelo del atlas por bioma (p. ej. 'ground.grass'). */
+  groundFrame: string
   name: string
+  /** Posición px del label (esquina norte del rombo de la región). */
+  labelX: number
+  labelY: number
 }
 
 export interface CityVM {
   id: string
   x: number
   y: number
-  /** Radio en px derivado del nivel (presentación, no dominio). */
+  /** Radio en px derivado del nivel (picking/highlight, no dominio). */
   radius: number
-  color: number
+  /** Frame de casa por nivel ('house.a'/'house.b'/'house.c'). */
+  frame: string
   /** Etiqueta "Nombre · Nv N". */
   label: string
 }
@@ -51,8 +64,7 @@ export interface DepositVM {
   id: string
   x: number
   y: number
-  size: number
-  color: number
+  frame: string
 }
 
 export interface NodeVM {
@@ -63,22 +75,23 @@ export interface NodeVM {
   color: number
 }
 
+/** Carretera rasterizada: una celda de la grilla iso por frame pak128. */
 export interface LinkVM {
   id: string
-  /** Polilínea proyectada a px. */
-  points: PathPoint[]
-  width: number
-  color: number
+  cells: RoadCell[]
+  /** Tinte por congestión EMA (rampa de la paleta). */
+  tint: number
 }
 
 export interface BuildingVM {
   id: string
   x: number
   y: number
-  size: number
-  /** Color por status (operational/under_construction/damaged/seized/…). */
-  color: number
-  /** Borde destacado si es de la corporación propia (C13: observable ≠ comandable). */
+  /** Frame del edificio (compuesto multi-tile, p. ej. 'building.bakery'). */
+  frame: string
+  /** Tinte por status (blanco = operational). */
+  statusTint: number
+  /** Marca destacada si es de la corporación propia (C13: observable ≠ comandable). */
   owned: boolean
 }
 
@@ -103,7 +116,8 @@ export type VehicleMotion =
 
 export interface VehicleVM {
   id: string
-  color: number
+  /** Prefijo de frame direccional: la escena resuelve `${frameBase}.<dir>`. */
+  frameBase: string
   owned: boolean
   motion: VehicleMotion
 }
@@ -136,18 +150,19 @@ export interface WorldRenderer {
 // ─── Paleta del mundo (config; espejo de settings/_tokens.scss) ─────────────
 
 export interface WorldPalette {
-  /** Fondo del lienzo (token $color-bg-deep). */
+  /** Fondo del lienzo = agua profunda (fuera de las regiones no hay tiles). */
   background: string
-  regionStroke: number
-  regionFillByBiome: Record<string, number>
-  city: number
-  deposit: number
+  /** Frame de suelo del atlas por bioma; sustituye al fill por color de la v1. */
+  groundFrameByBiome: Record<string, string>
+  groundFrameDefault: string
   node: number
-  /** Rampa de congestión: [fluido, medio, congestionado]. */
+  /** Rampa de congestión (tints): [fluido, medio, congestionado]. */
   linkCongestion: [number, number, number]
-  buildingByStatus: Record<string, number>
-  buildingDefault: number
+  /** Tinte del sprite de edificio por status (blanco = sin alterar). */
+  buildingTintByStatus: Record<string, number>
+  buildingTintDefault: number
   ownedOutline: number
+  /** Tinte del vehículo: neutro / dorado si es propio. */
   vehicle: number
   vehicleOwned: number
   selection: number
@@ -162,8 +177,8 @@ export interface GameDeps {
   simNow: () => number
   /** Bus tipado de intents (game/ nunca importa stores ni componentes Vue). */
   eventBus: EventBus<AppEvents>
-  /** Proyección top-down v1 del kernel (único punto que conoce la fórmula). */
-  projection: WorldProjection
+  /** Proyección isométrica del kernel (único punto que conoce la fórmula). */
+  projection: IsoProjection
   /** Paleta como config (prohibido importar Sass desde game/). */
   palette?: WorldPalette
   /** Notifica cambios de viewport (mundo lon/lat) para interest management. */

@@ -1,0 +1,149 @@
+{
+  "version": 1,
+  "tile": {
+    "width": 128,
+    "height": 64
+  },
+  "frames": {
+    "building.mine": {
+      "anchorX": 0.5,
+      "anchorY": 0.5833333333333334
+    },
+    "building.bakery": {
+      "anchorX": 0.5,
+      "anchorY": 0.625
+    },
+    "house.a": {
+      "anchorX": 0.5,
+      "anchorY": 0.75
+    },
+    "house.b": {
+      "anchorX": 0.5,
+      "anchorY": 0.75
+    },
+    "house.c": {
+      "anchorX": 0.5,
+      "anchorY": 0.75
+    },
+    "road.dead": {
+      "anchorX": 0.5,
+      "anchorY": 0.75
+    },
+    "road.e": {
+      "anchorX": 0.5,
+      "anchorY": 0.75
+    },
+    "road.ew": {
+      "anchorX": 0.5,
+      "anchorY": 0.75
+    },
+    "road.n": {
+      "anchorX": 0.5,
+      "anchorY": 0.75
+    },
+    "road.ne": {
+      "anchorX": 0.5,
+      "anchorY": 0.75
+    },
+    "road.new": {
+      "anchorX": 0.5,
+      "anchorY": 0.75
+    },
+    "road.ns": {
+      "anchorX": 0.5,
+      "anchorY": 0.75
+    },
+    "road.nse": {
+      "anchorX": 0.5,
+      "anchorY": 0.75
+    },
+    "road.nsew": {
+      "anchorX": 0.5,
+      "anchorY": 0.75
+    },
+    "road.nsw": {
+      "anchorX": 0.5,
+      "anchorY": 0.75
+    },
+    "road.nw": {
+      "anchorX": 0.5,
+      "anchorY": 0.75
+    },
+    "road.s": {
+      "anchorX": 0.5,
+      "anchorY": 0.75
+    },
+    "road.se": {
+      "anchorX": 0.5,
+      "anchorY": 0.75
+    },
+    "road.sew": {
+      "anchorX": 0.5,
+      "anchorY": 0.75
+    },
+    "road.sw": {
+      "anchorX": 0.5,
+      "anchorY": 0.75
+    },
+    "road.w": {
+      "anchorX": 0.5,
+      "anchorY": 0.75
+    },
+    "truck.e": {
+      "anchorX": 0.5,
+      "anchorY": 0.75
+    },
+    "truck.n": {
+      "anchorX": 0.5,
+      "anchorY": 0.75
+    },
+    "truck.ne": {
+      "anchorX": 0.5,
+      "anchorY": 0.75
+    },
+    "truck.nw": {
+      "anchorX": 0.5,
+      "anchorY": 0.75
+    },
+    "truck.s": {
+      "anchorX": 0.5,
+      "anchorY": 0.75
+    },
+    "truck.se": {
+      "anchorX": 0.5,
+      "anchorY": 0.75
+    },
+    "truck.sw": {
+      "anchorX": 0.5,
+      "anchorY": 0.75
+    },
+    "truck.w": {
+      "anchorX": 0.5,
+      "anchorY": 0.75
+    },
+    "ground.desert": {
+      "anchorX": 0.5,
+      "anchorY": 0.5
+    },
+    "ground.grass": {
+      "anchorX": 0.5,
+      "anchorY": 0.5
+    },
+    "ground.rocky": {
+      "anchorX": 0.5,
+      "anchorY": 0.5
+    },
+    "ground.snow": {
+      "anchorX": 0.5,
+      "anchorY": 0.5
+    },
+    "ground.tropic": {
+      "anchorX": 0.5,
+      "anchorY": 0.5
+    },
+    "ground.water": {
+      "anchorX": 0.5,
+      "anchorY": 0.5
+    }
+  }
+}

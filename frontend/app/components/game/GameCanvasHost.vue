@@ -23,13 +23,20 @@ import { useSimStore } from '~/stores/sim.store'
 import { useWorldStore } from '~/stores/world.store'
 // Solo TIPOS de game/ (se borran al compilar): los valores llegan por import().
 import type { CreatedGame } from '~/game/boot'
-import type { WorldStateBridge } from '~/game/bridge'
+import type { WorldNetwork, WorldStateBridge } from '~/game/bridge'
 import type { WorldBbox } from '~/game/types'
 
 const props = defineProps<{
   /** Callback de interest management (prioritario sobre provide('rooms')). */
   joinViewport?: (bbox: WorldBbox) => void
+  /**
+   * Red logística (nodos/enlaces) para el render de carreteras. Provider
+   * inyectado hasta que exista store de red propia (el bridge no cambia).
+   */
+  network?: WorldNetwork | null
 }>()
+
+const EMPTY_NETWORK: WorldNetwork = { nodes: [], links: [] }
 
 /** Puerto de red inyectable (la capa de red lo proveerá como useRooms()). */
 const rooms = inject<{ joinViewport: (bbox: WorldBbox) => void } | null>('rooms', null)
@@ -42,6 +49,10 @@ const worldStore = useWorldStore()
 const citiesStore = useCitiesStore()
 const buildingsStore = useBuildingsStore()
 const fleetStore = useFleetStore()
+
+// UNA sola proyección compartida por escena y bridge: garantiza que ambos
+// usan idéntica fórmula iso (FE-6).
+const projection = createProjection()
 
 let created: CreatedGame | null = null
 let bridge: WorldStateBridge | null = null
@@ -71,8 +82,8 @@ onMounted(async () => {
     // SimClock vía sim.store: ÚNICO origen del "ahora" de simulación (P5).
     simNow: () => simStore.now(),
     eventBus: appBus,
-    // Proyección top-down v1 del kernel (900 px/grado).
-    projection: createProjection(),
+    // Proyección isométrica 2:1 del kernel (32 tiles/grado, rombo 128×64).
+    projection,
     onViewportChange: (bbox) => {
       bridge?.setViewport(bbox)
       emitViewport(bbox)
@@ -87,13 +98,20 @@ onMounted(async () => {
 
   bridge = createWorldBridge({
     renderer: created.renderer,
-    projection: createProjection(),
+    projection,
     stores: { world: worldStore, cities: citiesStore, buildings: buildingsStore, fleet: fleetStore },
     eventBus: appBus,
-    ownAccountId: () => sessionStore.accountId
-    // SIMPLIFICACIÓN v1: sin provider de red logística (nodos/enlaces) hasta
-    // que exista su store; el bridge lo acepta como `getNetwork` opcional.
+    ownAccountId: () => sessionStore.accountId,
+    // Red logística por prop (play.vue la pulsa por REST): carreteras/nodos.
+    getNetwork: () => props.network ?? EMPTY_NETWORK
   })
+
+  // La red llega async por prop y el bridge solo observa stores: al cambiar
+  // la prop hay que forzar la recomputación.
+  watch(
+    () => props.network,
+    () => bridge?.refresh()
+  )
 
   const initial = created.renderer.getViewportBbox()
   bridge.setViewport(initial)

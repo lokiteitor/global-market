@@ -14,7 +14,8 @@
  */
 import type { NetworkLink, NetworkNode, Region, Vehicle } from '~/lib/api/types'
 import type { AppEvents, EventBus } from '~/lib/kernel/event-bus'
-import type { WorldProjection } from '~/lib/kernel/projection'
+import type { IsoProjection } from '~/lib/kernel/projection'
+import { rasterizeLinks, type RasterLink } from './road-raster'
 import type { useBuildingsStore } from '~/stores/buildings.store'
 import type { useCitiesStore } from '~/stores/cities.store'
 import type { useFleetStore } from '~/stores/fleet.store'
@@ -53,7 +54,7 @@ export interface WorldNetwork {
 
 export interface WorldBridgeDeps {
   renderer: WorldRenderer
-  projection: WorldProjection
+  projection: IsoProjection
   stores: WorldBridgeStores
   eventBus: EventBus<AppEvents>
   palette?: WorldPalette
@@ -133,6 +134,19 @@ function polygonCentroid(ring: readonly [number, number][]): [number, number] {
   return [lon / n, lat / n]
 }
 
+// ─── Frames pak128 (presentación v1: un arquetipo por tipo de entidad) ──────
+
+const DEPOSIT_FRAME = 'building.mine'
+const BUILDING_FRAME = 'building.bakery'
+const VEHICLE_FRAME_BASE = 'truck'
+
+/** Casa por nivel de ciudad: variación visual simple (presentación). */
+function cityFrame(level: number): string {
+  if (level <= 2) return 'house.a'
+  if (level <= 4) return 'house.b'
+  return 'house.c'
+}
+
 const defaultSchedule: (cb: () => void) => void =
   typeof requestAnimationFrame === 'function' ? (cb) => requestAnimationFrame(() => cb()) : (cb) => setTimeout(cb, 16)
 
@@ -145,6 +159,7 @@ export function createWorldBridge(deps: WorldBridgeDeps): WorldStateBridge {
   const schedule = deps.schedule ?? defaultSchedule
   const marginFactor = deps.cullMarginFactor ?? 0.25
   const project = deps.projection.worldToScreen.bind(deps.projection)
+  const toTile = deps.projection.worldToTile.bind(deps.projection)
 
   let culled: WorldBbox | null = null
   /** Época: viewport/red/config cambió → re-emitir todo lo visible. */
@@ -170,19 +185,26 @@ export function createWorldBridge(deps: WorldBridgeDeps): WorldStateBridge {
       if (ring === undefined || ring.length === 0) continue // sin geometría no hay render v1
       const bb = coordsBbox(ring)
       if (!intersects(culled, bb)) continue
-      const topLeft = project(bb.minLon, bb.maxLat)
-      const bottomRight = project(bb.maxLon, bb.minLat)
+      // Rango de celdas enteras del bounds: la esquina NO (minLon,maxLat) es
+      // el (u,v) mínimo y la SE (maxLon,minLat) el máximo. round() absorbe
+      // el error flotante de bounds alineados a la grilla.
+      const nw = toTile(bb.minLon, bb.maxLat)
+      const se = toTile(bb.maxLon, bb.minLat)
+      const u0 = Math.round(nw.u)
+      const v0 = Math.round(nw.v)
+      const label = deps.projection.tileToScreen(u0, v0)
       out.set(region.id, {
         src: region,
         vm: {
           id: region.id,
-          x: topLeft.x,
-          y: topLeft.y,
-          width: bottomRight.x - topLeft.x,
-          height: bottomRight.y - topLeft.y,
-          fillColor: palette.regionFillByBiome[region.biome] ?? palette.regionStroke,
-          strokeColor: palette.regionStroke,
-          name: region.name
+          u0,
+          v0,
+          u1: Math.round(se.u),
+          v1: Math.round(se.v),
+          groundFrame: palette.groundFrameByBiome[region.biome] ?? palette.groundFrameDefault,
+          name: region.name,
+          labelX: label.x,
+          labelY: label.y
         }
       })
     }
@@ -199,8 +221,8 @@ export function createWorldBridge(deps: WorldBridgeDeps): WorldStateBridge {
           id: city.id,
           x,
           y,
-          radius: 6 + city.level * 2, // radio por nivel (presentación)
-          color: palette.city,
+          radius: 24 + city.level * 4, // radio por nivel (picking/highlight)
+          frame: cityFrame(city.level),
           label: `${city.name} · N${city.level}`
         }
       })
@@ -214,7 +236,7 @@ export function createWorldBridge(deps: WorldBridgeDeps): WorldStateBridge {
       const { x, y } = project(lon, lat)
       out.set(deposit.id, {
         src: deposit,
-        vm: { id: deposit.id, x, y, size: 7, color: palette.deposit }
+        vm: { id: deposit.id, x, y, frame: DEPOSIT_FRAME }
       })
     }
   }
@@ -251,18 +273,27 @@ export function createWorldBridge(deps: WorldBridgeDeps): WorldStateBridge {
   }
 
   function deriveLinks(network: WorldNetwork, out: Map<string, { vm: LinkVM; src: unknown }>): void {
+    // La máscara NSEW es GLOBAL: se rasterizan juntos todos los links visibles
+    // para que los cruces/T entre links produzcan el frame correcto.
+    const visible: Array<{ link: NetworkLink; raster: RasterLink }> = []
     for (const link of network.links) {
       const coords = linkPathCoords(link, network)
       if (coords === null) continue
       if (!intersects(culled, coordsBbox(coords))) continue
-      const ema = linkCongestion(link)
+      visible.push({ link, raster: { id: link.id, coords } })
+    }
+    if (visible.length === 0) return
+    const cellsByLink = rasterizeLinks(
+      visible.map((v) => v.raster),
+      toTile
+    )
+    for (const { link } of visible) {
       out.set(link.id, {
         src: link,
         vm: {
           id: link.id,
-          points: projectPath(coords),
-          width: Math.min(6, 1.5 + (ema - 1) * 2), // grosor por congestión EMA
-          color: congestionColor(ema)
+          cells: cellsByLink.get(link.id) ?? [],
+          tint: congestionColor(linkCongestion(link))
         }
       })
     }
@@ -282,8 +313,8 @@ export function createWorldBridge(deps: WorldBridgeDeps): WorldStateBridge {
           id: building.id,
           x,
           y,
-          size: 12,
-          color: palette.buildingByStatus[building.status] ?? palette.buildingDefault,
+          frame: BUILDING_FRAME,
+          statusTint: palette.buildingTintByStatus[building.status] ?? palette.buildingTintDefault,
           owned: own !== null && building.owner_account_id === own
         }
       })
@@ -303,7 +334,10 @@ export function createWorldBridge(deps: WorldBridgeDeps): WorldStateBridge {
    *   deriva analíticamente de length_m, base_speed_kmh y congestion_ema.
    * El servidor sigue siendo la única verdad del hito (P1): esto solo pinta.
    */
-  function vehicleMotion(vehicle: Vehicle, network: WorldNetwork): VehicleMotion | null {
+  function vehicleMotion(
+    vehicle: Vehicle,
+    network: WorldNetwork
+  ): { motion: VehicleMotion; bbox: WorldBbox } | null {
     const pos = vehicle.position
 
     if (pos.at_node_id !== undefined) {
@@ -311,7 +345,7 @@ export function createWorldBridge(deps: WorldBridgeDeps): WorldStateBridge {
       const coords = node?.location.coordinates ?? pos.location?.coordinates
       if (coords === undefined) return null
       const { x, y } = project(coords[0], coords[1])
-      return { kind: 'fixed', x, y }
+      return { motion: { kind: 'fixed', x, y }, bbox: coordsBbox([coords]) }
     }
 
     if (pos.on_segment_id !== undefined) {
@@ -323,11 +357,14 @@ export function createWorldBridge(deps: WorldBridgeDeps): WorldStateBridge {
           const speedKmh = Math.max(1, link.base_speed_kmh)
           const durationSim = (segment.length_m / 1000 / speedKmh) * 3600 * Math.max(1, segment.congestion_ema)
           return {
-            kind: 'path',
-            points: projectPath(coords),
-            enteredSim: vehicle.updated_at_sim ?? 0,
-            durationSim,
-            baseProgress: (pos.segment_progress_pct ?? 0) / 100
+            motion: {
+              kind: 'path',
+              points: projectPath(coords),
+              enteredSim: vehicle.updated_at_sim ?? 0,
+              durationSim,
+              baseProgress: (pos.segment_progress_pct ?? 0) / 100
+            },
+            bbox: coordsBbox(coords)
           }
         }
       }
@@ -335,59 +372,28 @@ export function createWorldBridge(deps: WorldBridgeDeps): WorldStateBridge {
 
     // Fallback: el gateway ya deriva `location` para render.
     if (pos.location !== undefined) {
-      const [lon, lat] = pos.location.coordinates
-      const { x, y } = project(lon, lat)
-      return { kind: 'fixed', x, y }
+      const coords = pos.location.coordinates
+      const { x, y } = project(coords[0], coords[1])
+      return { motion: { kind: 'fixed', x, y }, bbox: coordsBbox([coords]) }
     }
     return null
-  }
-
-  function motionBboxVisible(vehicle: Vehicle, motion: VehicleMotion): boolean {
-    if (culled === null) return true
-    if (motion.kind === 'fixed') {
-      // Culling en coords de mundo: usa la posición cruda del DTO si existe.
-      const loc = vehicle.position.location?.coordinates
-      if (loc !== undefined) return containsPoint(culled, loc[0], loc[1])
-      // Sin lon/lat cruda (at_node): compara en px proyectando el viewport.
-      return screenVisible(motion.x, motion.y)
-    }
-    // Path: bbox del LineString en px contra el viewport proyectado.
-    let minX = Infinity
-    let minY = Infinity
-    let maxX = -Infinity
-    let maxY = -Infinity
-    for (const p of motion.points) {
-      if (p.x < minX) minX = p.x
-      if (p.x > maxX) maxX = p.x
-      if (p.y < minY) minY = p.y
-      if (p.y > maxY) maxY = p.y
-    }
-    const tl = project(culled.minLon, culled.maxLat)
-    const br = project(culled.maxLon, culled.minLat)
-    return maxX >= tl.x && minX <= br.x && maxY >= tl.y && minY <= br.y
-  }
-
-  function screenVisible(x: number, y: number): boolean {
-    if (culled === null) return true
-    const tl = project(culled.minLon, culled.maxLat)
-    const br = project(culled.maxLon, culled.minLat)
-    return x >= tl.x && x <= br.x && y >= tl.y && y <= br.y
   }
 
   function deriveVehicles(network: WorldNetwork, out: Map<string, { vm: VehicleVM; src: unknown }>): void {
     const own = deps.ownAccountId?.() ?? null
     for (const vehicle of deps.stores.fleet.list) {
-      const motion = vehicleMotion(vehicle, network)
-      if (motion === null) continue
-      if (!motionBboxVisible(vehicle, motion)) continue
+      const result = vehicleMotion(vehicle, network)
+      if (result === null) continue
+      // Culling 100 % en coords de MUNDO (la iso no mapea rects px ↔ lon/lat).
+      if (!intersects(culled, result.bbox)) continue
       const owned = own !== null && vehicle.owner_account_id === own
       out.set(vehicle.id, {
         src: vehicle,
         vm: {
           id: vehicle.id,
-          color: owned ? palette.vehicleOwned : palette.vehicle,
+          frameBase: VEHICLE_FRAME_BASE,
           owned,
-          motion
+          motion: result.motion
         }
       })
     }

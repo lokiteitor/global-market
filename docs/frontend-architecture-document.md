@@ -17,6 +17,7 @@
 
 **Changelog**
 
+- **v1.2** (2026-07-16) — "Vista isométrica v1 (FE-6 parcial, ADR-IMPL-15)": `IsoProjection` afín 2:1 real en el kernel (lon/lat → tiles a 32 tiles/grado → px con rombo 128×64, §16.2); pipeline mínimo `npm run build:assets` sobre el pakset **pak128 de Simutrans** (`app/assets/pak128/`, Artistic License 2.0) → atlas + manifiesto de anclajes en `public/game/pak128/` (§14.7); `PreloadScene` real (§11.4); terreno tileado por región con Blitter, carreteras rasterizadas (supercover + máscara NSEW), sprites con depth iso y vehículos de 8 direcciones. Sin chunks/streaming/LOD (§16.3+ sigue pendiente); frames diagonales de carretera pendientes (las diagonales se pintan como escalera de curvas, como Simutrans sin gráficos diagonales).
 - **v1.1** (2026-07-15) — "Implementado v1 con simplificaciones": alineado con la implementación real de `frontend/` (npm sin workspaces, árbol real en §10); protocolo WS resuelto y normativo en `specs/ws-protocol.md` (§4.4, ADR-FE-004, §27.5); IDs pasan de ULID con prefijos a **UUIDv7** y los branded types de `Ulid<T>` a `Id<T>` (C12, §20.6, ADR-IMPL-01); pipeline real (§23: npm, vitest 94 tests, vue-tsc, nuxt build); estado del roadmap FE (§26: FE-1..FE-5 cubiertas por la v1 con simplificaciones, FE-6..FE-10 pendientes).
 - **v1.0** (2026-07-15) — versión inicial propuesta (pre-desarrollo).
 
@@ -58,7 +59,7 @@
 
 ## 1. Resumen ejecutivo
 
-Imperio Industrial es un MMO de simulación económica, industrial y logística sobre un **mundo único, isométrico, persistente y compartido** *(v1: render top-down; la vista isométrica queda para FE-6 — ver `frontend/README.md`)*. El servidor es la **única fuente de verdad** (authoritative server): simula la economía event-driven, mueve dinero y stock en un ledger ACID de doble entrada, y particiona el mundo en shards espaciales. El cliente **no ejecuta lógica de negocio**: envía intenciones, recibe eventos y renderiza estado.
+Imperio Industrial es un MMO de simulación económica, industrial y logística sobre un **mundo único, isométrico, persistente y compartido** *(desde v1.2 el render es isométrico 2:1 con assets pak128 — ADR-IMPL-15; chunks/LOD del mapa a escala siguen en FE-6)*. El servidor es la **única fuente de verdad** (authoritative server): simula la economía event-driven, mueve dinero y stock en un ledger ACID de doble entrada, y particiona el mundo en shards espaciales. El cliente **no ejecuta lógica de negocio**: envía intenciones, recibe eventos y renderiza estado.
 
 Este documento define la arquitectura del **cliente web** que materializa ese contrato. Sus tesis centrales son:
 
@@ -744,7 +745,7 @@ frontend/
 │   │   ├── simtime.ts              #   ratio 24×, formato AÑO-DDD-HH:MM
 │   │   ├── ids.ts                  #   Id<T> branded sobre uuid (§20.6)
 │   │   ├── result.ts               #   Result<T,E> + taxonomía de errores
-│   │   ├── projection.ts           #   proyección lon/lat→px (v1 top-down; iso en FE-6)
+│   │   ├── projection.ts           #   IsoProjection lon/lat→tiles→px (iso 2:1, ADR-IMPL-15)
 │   │   └── event-bus.ts            #   AppEventBus tipado (§19)
 │   │
 │   ├── lib/api/                    # ← INFRASTRUCTURE LAYER (contrato REST — §12.8)
@@ -1502,7 +1503,7 @@ Estos cuatro estados son de primera clase en el modelo de vista (§20.7) y se pi
 
 Los assets del cliente se dividen en dos universos que **no deben mezclarse**: (a) **assets de UI** (fuentes, iconos SVG, imágenes de portal) procesados por el build de Nuxt/Vite; y (b) **assets de juego** (spritesheets, atlases, tilemaps, audio) cargados en runtime por el **Loader de Phaser**. Esta sección cubre spritesheets, tilemaps, audio, fuentes, lazy loading, caché y versionado.
 
-> *(v1 implementada: el mundo se dibuja con **gráficos procedurales** de Phaser — `Graphics`/`generateTexture` — sin atlases ni assets binarios, ver `frontend/README.md`. Todo el pipeline de assets de esta sección — atlases, tilesets, audio, manifiesto con hash — es diseño objetivo para cuando exista arte; llega con FE-6+.)*
+> *(v1.2: existe una versión **mínima** del pipeline — `npm run build:assets` (`scripts/build-game-assets.mjs`) recorta frames curados del pakset pak128 de Simutrans (`app/assets/pak128/`, color clave RGB 231,255,255 → alpha, edificios multi-tile compuestos offline) y emite `public/game/pak128/{atlas.png,atlas.json,meta.json,ATTRIBUTION.txt}`, que carga la PreloadScene. El resto de esta sección — audio, tilemaps Tiled, hashing, presupuestos en CI — sigue siendo diseño objetivo.)*
 
 ### 14.1 Taxonomía de assets
 
@@ -1589,7 +1590,7 @@ flowchart LR
     MAN --> PHL
 ```
 
-- El empaquetado (texture packing, audio sprite, export de tilemaps) es un **paso de build reproducible** (script npm `build:assets`, pendiente en v1: no hay assets binarios aún), versionado en el repo o en un pipeline de arte. El resultado (atlases + manifiesto) es lo que consume el runtime, nunca el arte crudo.
+- El empaquetado (texture packing, audio sprite, export de tilemaps) es un **paso de build reproducible** (script npm `build:assets`; v1.2 implementa la versión mínima: pngjs, determinista, output commiteado en `public/game/pak128/`), versionado en el repo o en un pipeline de arte. El resultado (atlases + manifiesto) es lo que consume el runtime, nunca el arte crudo.
 - **Validación en CI**: presupuestos de tamaño de atlas y de peso total de assets críticos se verifican en CI; un atlas que exceda el presupuesto rompe el build (§21.6, §23.6).
 ---
 
@@ -1737,7 +1738,7 @@ El mundo es un **único mapa isométrico persistente, enorme y compartido** (GDD
 
 ### 16.2 Proyección isométrica
 
-- Proyección **isométrica 2:1** (o dimétrica según arte), con un `IsoProjection` en el kernel que convierte **coordenadas de mundo (celda) ↔ coordenadas de pantalla** de forma centralizada. Toda conversión pasa por ahí (no hay math iso disperso). *(v1: la proyección implementada es **top-down** — lon/lat → px con escala lineal, `app/lib/kernel/projection.ts` —, igualmente centralizada; la isométrica llega con FE-6 — ver `frontend/README.md`.)*
+- Proyección **isométrica 2:1** (o dimétrica según arte), con un `IsoProjection` en el kernel que convierte **coordenadas de mundo (celda) ↔ coordenadas de pantalla** de forma centralizada. Toda conversión pasa por ahí (no hay math iso disperso). *(v1.2: implementada — `IsoProjection` en `app/lib/kernel/projection.ts`, afín lon/lat → tiles continuos (32 tiles/grado) → px con rombo 128×64; `worldToTile`/`tileToScreen` centralizan todo el math de tiles y el depth iso es `ISO_BASE + y` del pie del rombo.)*
 - **Orden de dibujo (depth sorting)**: por `y` isométrico (y `z` para altura de edificios/relieve), para que lo "delante" tape lo "detrás". Phaser ordena por `depth`; el renderer asigna `depth` derivado de la posición iso (§16.4).
 - **Footprints** de edificios ocupan varias celdas; su anclaje y su depth se calculan desde la celda base.
 
@@ -2598,7 +2599,8 @@ Estas son **fases de construcción del frontend** (entregables internos del equi
 | Fases | Estado |
 |---|---|
 | **FE 1–5** | **Cubiertas por la v1**, con las simplificaciones aceptadas de `frontend/README.md`: proyección **top-down** en vez de isométrica (la iso llega con FE-6); **gráficos Phaser procedurales** (`Graphics`/`generateTexture`), sin atlases ni assets binarios; **token en memoria + `sessionStorage`** (solo dev); **panel de gestión en posición fija** sobre el canvas, sin WindowManager; **OHLC solo tabla** (sin gráfico Canvas). Además: tipos del contrato manual-fieles sin codegen (§10.1), sin linter de fronteras ni CI montada (§23), sin stores `logistics`/`cadastre`/`diagnostics` (§20.2), cinemática de vehículos derivada del DTO v1.1.0 y parcela por inputs numéricos en BuildPanel. Verificación: 94/94 tests, typecheck y build verdes (`docs/desarrollo.md` §6). |
-| **FE 6–10** | **Pendientes**: mapa a escala (chunks/LOD/overlays/minimapa e iso), gameplay ampliado, optimización con presupuestos, endurecimiento de testing (contract/E2E/perf/chaos) y release. |
+| **FE 6** | **Parcialmente cubierta (v1.2, ADR-IMPL-15)**: proyección isométrica 2:1 real, atlas pak128 + PreloadScene, terreno tileado por región, carreteras rasterizadas y vehículos de 8 direcciones. **Pendiente de FE-6**: chunks/streaming, LOD por zoom, overlays de datos, minimapa, frames diagonales de carretera. |
+| **FE 7–10** | **Pendientes**: gameplay ampliado, optimización con presupuestos, endurecimiento de testing (contract/E2E/perf/chaos) y release. |
 
 > **Nota de secuencia sobre Networking (Fase FE 4).** Aunque Networking es la Fase FE 4, la **validación con el equipo de backend de ADR-FE-004** (§4.4) debe ocurrir *antes*, idealmente durante la Fase FE 1: es la dependencia inter-equipo de mayor riesgo. Las Fases FE 3–4 pueden desarrollarse contra el **mock server** (§23.8) en paralelo, pero no se consideran "hechas" hasta pasar los contract-tests (§22.6) contra el protocolo real. *(v1: la validación se cumplió — el protocolo quedó fijado en `specs/ws-protocol.md` y gateway y cliente lo implementan 1:1; el flujo completo contra el gateway real se ejercita en `make verify`.)*
 

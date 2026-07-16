@@ -19,8 +19,9 @@
   'ui:notify' → notifications.push.
 -->
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, type Component } from 'vue'
+import { computed, onBeforeUnmount, onMounted, shallowRef, type Component } from 'vue'
 import { appBus } from '~/lib/kernel/event-bus'
+import type { NetworkLink, NetworkNode } from '~/lib/api/types'
 import type { ViewportBBox } from '~/lib/net/transport'
 import { useApi } from '~/composables/useApi'
 import { useConnection } from '~/composables/useConnection'
@@ -83,6 +84,9 @@ function onJoinViewport(bbox: ViewportBBox): void {
  * mundo lo hace GameCanvasHost cuando el catálogo de regiones está cargado;
  * las ciudades llegan por la room viewport: al asentarse la cámara.
  */
+/** Red logística (nodos/enlaces) para el render de carreteras del canvas. */
+const network = shallowRef<{ nodes: NetworkNode[]; links: NetworkLink[] } | null>(null)
+
 async function bootstrapWorldMap(): Promise<void> {
   const tasks: Array<Promise<void>> = []
   if (!world.loaded.regions) {
@@ -99,6 +103,12 @@ async function bootstrapWorldMap(): Promise<void> {
       })
     )
   }
+  // Red logística (catálogo estático v1): carreteras del mapa iso.
+  tasks.push(
+    Promise.all([api.listNetworkNodes(), api.listNetworkLinks()]).then(([nodes, links]) => {
+      if (nodes.ok && links.ok) network.value = { nodes: nodes.value.data, links: links.value.data }
+    })
+  )
   await Promise.all(tasks)
 }
 
@@ -169,7 +179,7 @@ async function onLoggedOut(): Promise<void> {
 
     <ClientOnly>
       <!-- Host del lienzo Phaser: único punto components/ ↔ game/ (bridge). -->
-      <GameCanvasHost :join-viewport="onJoinViewport" />
+      <GameCanvasHost :join-viewport="onJoinViewport" :network="network" />
 
       <!-- Panel de gestión activo, superpuesto al canvas (FAD §15.3/§15.4). -->
       <section v-if="activePanelComponent !== null" class="play__panel" aria-label="Panel de gestión">

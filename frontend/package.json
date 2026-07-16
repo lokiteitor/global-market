@@ -8,6 +8,7 @@
     "generate": "nuxt generate",
     "preview": "nuxt preview",
     "postinstall": "nuxt prepare",
+    "build:assets": "node scripts/build-game-assets.mjs",
     "test": "vitest run",
     "typecheck": "nuxt typecheck"
   },
@@ -23,6 +24,7 @@
     "@vitejs/plugin-vue": "^6.0.8",
     "@vue/test-utils": "^2.4.11",
     "happy-dom": "^20.10.6",
+    "pngjs": "^7.0.0",
     "typescript": "^5.8.0",
     "vitest": "^3.2.0",
     "vue-tsc": "^3.0.0"
