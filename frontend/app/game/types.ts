@@ -129,6 +129,8 @@ export interface WorldRenderer {
   remove(kind: EntityKind, id: string): void
   /** Viaje de cámara a una coordenada de mundo (intent 'camera:flyTo'). */
   flyTo(lon: number, lat: number): void
+  /** Encuadra la cámara para abarcar un bbox de mundo (lon/lat): centra + zoom-para-ajustar. */
+  frameWorld(bbox: WorldBbox): void
 }
 
 // ─── Paleta del mundo (config; espejo de settings/_tokens.scss) ─────────────

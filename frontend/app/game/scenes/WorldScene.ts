@@ -112,6 +112,15 @@ export class WorldScene extends Phaser.Scene implements WorldRenderer {
   private drag: DragState | null = null
   private keys: Record<'up' | 'down' | 'left' | 'right' | 'w' | 'a' | 's' | 'd', Phaser.Input.Keyboard.Key> | null = null
 
+  /**
+   * Señal de "create() ya corrió" que boot.ts espera. NO se puede usar
+   * `world.events`/`world.sys.events` desde fuera para esto: Phaser los crea
+   * durante `sys.init()`, que ocurre en el arranque ASÍNCRONO del juego —
+   * después de `new Phaser.Game()`— así que engancharlos justo tras construir
+   * el juego lee `undefined` y revienta. La escena avisa ella misma.
+   */
+  onReady?: () => void
+
   /** Bbox (px) acumulado de las regiones: límites de cámara del mundo. */
   private worldPxBounds: Phaser.Geom.Rectangle | null = null
 
@@ -130,6 +139,8 @@ export class WorldScene extends Phaser.Scene implements WorldRenderer {
     this.scene.launch(OVERLAY_SCENE_KEY)
     this.cameras.main.setZoom(1)
     this.setupInput()
+    // El renderer ya está operativo: desbloquea el await de createGame().
+    this.onReady?.()
   }
 
   override update(_time: number, delta: number): void {
@@ -187,6 +198,22 @@ export class WorldScene extends Phaser.Scene implements WorldRenderer {
   flyTo(lon: number, lat: number): void {
     const { x, y } = this.deps.projection.worldToScreen(lon, lat)
     this.cameras.main.pan(x, y, 600, 'Sine.easeInOut')
+  }
+
+  frameWorld(bbox: WorldBbox): void {
+    // Proyecta las esquinas del bbox de mundo a px (y crece hacia el sur, de
+    // ahí que maxLat mapee al borde superior). Centra la cámara y ajusta el
+    // zoom para abarcar todo el mundo con un margen, dentro de los límites.
+    const tl = this.deps.projection.worldToScreen(bbox.minLon, bbox.maxLat)
+    const br = this.deps.projection.worldToScreen(bbox.maxLon, bbox.minLat)
+    const worldW = Math.abs(br.x - tl.x)
+    const worldH = Math.abs(br.y - tl.y)
+    if (worldW === 0 || worldH === 0) return
+    const cam = this.cameras.main
+    const margin = 1.12 // ~12 % de aire alrededor del mundo
+    const zoom = Phaser.Math.Clamp(Math.min(cam.width / (worldW * margin), cam.height / (worldH * margin)), ZOOM_MIN, ZOOM_MAX)
+    cam.setZoom(zoom)
+    cam.centerOn((tl.x + br.x) / 2, (tl.y + br.y) / 2)
   }
 
   /** Viewport actual en coordenadas de MUNDO (lon/lat) para interest management. */

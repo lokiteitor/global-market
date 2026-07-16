@@ -31,6 +31,16 @@ export async function createGame(canvasParent: HTMLElement, deps: GameDeps): Pro
   const overlay = new OverlayScene()
   overlay.setPalette(palette)
 
+  // El renderer está listo cuando la escena de mundo ha hecho create().
+  // Se engancha ANTES de construir el juego: Phaser arranca las escenas de
+  // forma asíncrona tras `new Phaser.Game()`, y hasta entonces `world.events`
+  // aún es undefined (se crea en sys.init). Por eso la escena avisa vía
+  // onReady en lugar de escuchar world.events.once(CREATE) —esto último
+  // reventaba con "can't access property once, events is undefined".
+  const ready = new Promise<void>((resolve) => {
+    world.onReady = resolve
+  })
+
   const game = new Phaser.Game({
     type: Phaser.AUTO,
     parent: canvasParent,
@@ -46,10 +56,7 @@ export async function createGame(canvasParent: HTMLElement, deps: GameDeps): Pro
     scene: [world, overlay]
   })
 
-  // El renderer está listo cuando la escena de mundo ha hecho create().
-  await new Promise<void>((resolve) => {
-    world.events.once(Phaser.Scenes.Events.CREATE, () => resolve())
-  })
+  await ready
 
   return { game, renderer: world as WorldScene }
 }

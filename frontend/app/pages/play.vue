@@ -22,10 +22,12 @@
 import { computed, onBeforeUnmount, onMounted, type Component } from 'vue'
 import { appBus } from '~/lib/kernel/event-bus'
 import type { ViewportBBox } from '~/lib/net/transport'
+import { useApi } from '~/composables/useApi'
 import { useConnection } from '~/composables/useConnection'
 import { useRooms } from '~/composables/useRooms'
 import { useNotificationsStore } from '~/stores/notifications.store'
 import { useUiStore, type PanelName } from '~/stores/ui.store'
+import { useWorldStore } from '~/stores/world.store'
 import GameCanvasHost from '~/components/game/GameCanvasHost.vue'
 import ToastHost from '~/components/base/ToastHost.vue'
 import TopBar from '~/components/hud/TopBar.vue'
@@ -49,6 +51,8 @@ const notifications = useNotificationsStore()
 // porque el plugin 02.network.client ya corrió.
 const rooms = useRooms()
 const connection = useConnection()
+const api = useApi()
+const world = useWorldStore()
 
 // ─── Panel de gestión activo (SideBar conmuta ui.store.activePanel) ─────────
 // 'fleet' y 'logistics' comparten FleetPanel (flota + rutas) en v1.
@@ -70,6 +74,34 @@ function onJoinViewport(bbox: ViewportBBox): void {
   rooms.joinViewport(bbox)
 }
 
+/**
+ * Bootstrap del MAPA base al entrar a /play: regiones (fondo del mundo) y
+ * yacimientos son catálogo ESTÁTICO que NO llega por WS — se pulsa por REST
+ * una vez por sesión (world.store). Sin esto el lienzo queda vacío al entrar
+ * (las regiones solo se cargaban al abrir Construcción/Mercado, y los
+ * yacimientos no se cargaban nunca). El encuadre inicial de cámara sobre el
+ * mundo lo hace GameCanvasHost cuando el catálogo de regiones está cargado;
+ * las ciudades llegan por la room viewport: al asentarse la cámara.
+ */
+async function bootstrapWorldMap(): Promise<void> {
+  const tasks: Array<Promise<void>> = []
+  if (!world.loaded.regions) {
+    tasks.push(
+      api.listRegions().then((r) => {
+        if (r.ok) world.setRegions(r.value.data)
+      })
+    )
+  }
+  if (!world.loaded.deposits) {
+    tasks.push(
+      api.listResourceDeposits().then((r) => {
+        if (r.ok) world.setDeposits(r.value.data)
+      })
+    )
+  }
+  await Promise.all(tasks)
+}
+
 const PANEL_NAMES: readonly PanelName[] = ['market', 'industry', 'fleet', 'logistics', 'city', 'concessions', 'finance', 'notifications', 'settings']
 
 const unsubscribes: Array<() => void> = []
@@ -80,6 +112,10 @@ onMounted(() => {
   // viewport llega después desde GameCanvasHost cuando la cámara se asienta.
   rooms.joinCorp()
   rooms.joinAlerts()
+
+  // Mapa base (regiones + yacimientos) por REST: no llega por WS. Sin bloquear
+  // el resto del arranque; al resolverse encuadra la cámara sobre el mundo.
+  void bootstrapWorldMap()
 
   // Intents del event bus → stores dueñas (game/ nunca escribe stores, O2).
   unsubscribes.push(appBus.on('world:select', ({ kind, id }) => ui.select(kind, id)))

@@ -54,6 +54,25 @@ export const useWorldStore = defineStore('world', () => {
   })
   const allLoaded = computed(() => Object.values(loaded.value).every(Boolean))
 
+  /** Bbox lon/lat (SRID 4326) que abarca todas las regiones; null si aún no hay catálogo. */
+  const worldBbox = computed<{ minLon: number; minLat: number; maxLon: number; maxLat: number } | null>(() => {
+    let minLon = Infinity
+    let minLat = Infinity
+    let maxLon = -Infinity
+    let maxLat = -Infinity
+    for (const region of Object.values(regions.value)) {
+      const ring = region.bounds?.coordinates[0]
+      if (ring === undefined) continue
+      for (const [lon, lat] of ring) {
+        if (lon < minLon) minLon = lon
+        if (lon > maxLon) maxLon = lon
+        if (lat < minLat) minLat = lat
+        if (lat > maxLat) maxLat = lat
+      }
+    }
+    return Number.isFinite(minLon) ? { minLon, minLat, maxLon, maxLat } : null
+  })
+
   // ── Acciones (reemplazo de catálogo completo; idempotentes) ──
   function setRegions(items: readonly Region[]): void {
     regions.value = indexById(items)
@@ -99,6 +118,7 @@ export const useWorldStore = defineStore('world', () => {
     recipesByBuildingType,
     depositsByRegion,
     allLoaded,
+    worldBbox,
     setRegions,
     setProducts,
     setBuildingTypes,

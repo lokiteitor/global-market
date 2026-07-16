@@ -12,7 +12,7 @@
   provide('rooms') — quien integre la red lo cablea sin tocar este flujo.
 -->
 <script setup lang="ts">
-import { inject, onBeforeUnmount, onMounted, ref } from 'vue'
+import { inject, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { appBus } from '~/lib/kernel/event-bus'
 import { createProjection } from '~/lib/kernel/projection'
 import { useBuildingsStore } from '~/stores/buildings.store'
@@ -46,6 +46,7 @@ const fleetStore = useFleetStore()
 let created: CreatedGame | null = null
 let bridge: WorldStateBridge | null = null
 let joinTimer: ReturnType<typeof setTimeout> | null = null
+let stopFrameWatch: (() => void) | null = null
 let destroyed = false
 
 function emitViewport(bbox: WorldBbox): void {
@@ -98,10 +99,27 @@ onMounted(async () => {
   bridge.setViewport(initial)
   bridge.flush()
   emitViewport(initial)
+
+  // Encuadre inicial de la cámara sobre el mundo: en cuanto el catálogo de
+  // regiones esté cargado (lo pulsa play.vue por REST), ajusta zoom+centro
+  // para abarcarlo. Determinista —el renderer ya existe— y se auto-desengancha
+  // tras encuadrar una vez; evita la carrera del event bus con el boot de Phaser.
+  stopFrameWatch = watch(
+    () => worldStore.worldBbox,
+    (bbox) => {
+      if (bbox === null || created === null || destroyed) return
+      created.renderer.frameWorld(bbox)
+      stopFrameWatch?.()
+      stopFrameWatch = null
+    },
+    { immediate: true }
+  )
 })
 
 onBeforeUnmount(() => {
   destroyed = true
+  stopFrameWatch?.()
+  stopFrameWatch = null
   if (joinTimer !== null) clearTimeout(joinTimer)
   bridge?.dispose()
   bridge = null

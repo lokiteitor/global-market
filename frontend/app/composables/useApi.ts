@@ -25,6 +25,7 @@ import type {
   Publication,
   Recipe,
   Region,
+  ResourceDeposit,
   Route,
   RoutePlan,
   SessionCreated,
@@ -78,6 +79,7 @@ export interface Api {
   }): Promise<ApiResult<OhlcCandle[]>>
   // world: catálogos
   listRegions(): Promise<ApiResult<Region[]>>
+  listResourceDeposits(): Promise<ApiResult<ResourceDeposit[]>>
   listProducts(): Promise<ApiResult<Product[]>>
   listBuildingTypes(): Promise<ApiResult<BuildingType[]>>
   listRecipes(): Promise<ApiResult<Recipe[]>>
@@ -131,6 +133,7 @@ export function createApi(client: ApiClient): Api {
     getMarketOhlc: (query) => client.request<OhlcCandle[]>('GET', '/market/ohlc', { query: { ...query } }),
 
     listRegions: () => client.request<Region[]>('GET', '/world/regions', { query: { limit: CATALOG_LIMIT } }),
+    listResourceDeposits: () => client.request<ResourceDeposit[]>('GET', '/world/resource-deposits', { query: { limit: CATALOG_LIMIT } }),
     listProducts: () => client.request<Product[]>('GET', '/world/products', { query: { limit: CATALOG_LIMIT } }),
     listBuildingTypes: () => client.request<BuildingType[]>('GET', '/world/building-types', { query: { limit: CATALOG_LIMIT } }),
     listRecipes: () => client.request<Recipe[]>('GET', '/world/recipes', { query: { limit: CATALOG_LIMIT } }),
