@@ -2,7 +2,9 @@
 
 ## MMO de simulación económica, industrial y logística en un mundo único persistente. Decenas de miles de jugadores humanos y una población permanente de bots comparten el mismo mapa, el mismo mercado (tablón global de contratos CCRI) y las mismas reglas, sobre un servidor autoritativo.
 
-**Versión:** 1.1 · **Fecha:** 2026-07-16 · **Fuentes normativas:** GDD/SAD v1.3 (`gdd.md`) y Arquitectura v1.1 (`arquitectura_imperio_industrial.md`), con los ADR-016 a ADR-021. Ante discrepancia, prevalece el GDD.
+**Versión:** 1.2 · **Fecha:** 2026-07-16 · **Fuentes normativas:** GDD/SAD v1.3 (`gdd.md`), Arquitectura v1.1 (`arquitectura_imperio_industrial.md`) y contrato OpenAPI v1.2.0 (`api/openapi.yaml`), con los ADR-016 a ADR-022. Ante discrepancia, prevalece el GDD.
+
+> **Cambios de v1.2 (Incremento 1 — núcleo CCRI, Fase 0):** ADR-022 (`ledger.account_kind` = `world_source`, contrapartida física de `production_output`/`consumption`); nueva tabla `public.idempotency_keys` (cabecera `Idempotency-Key` del contrato v1.2.0); migración `0008_ccri_support`; e **interpretaciones operativas del CCRI** (entrega in situ de las ventas, `origin_node_id` del aceptante en las compras, TTL de publicaciones abiertas, reparto de garantía, OHLC por región de destino) — todas en las secciones marcadas *v1.2* más abajo.
 
 ---
 
@@ -16,6 +18,7 @@
   - `ledger` — dinero, stock comprometible, tablón y contratos CCRI, con ACID estricta (propiedad del Contract Service).
   - `analytics` — agregados permanentes: velas OHLC, indicadores macro (job Analytics).
   - `outbox` — mensajería asíncrona entre módulos (outbox table + polling).
+  - `public` — **infraestructura transversal de la API**, no ligada a ningún dominio: la tabla `idempotency_keys` (cabecera `Idempotency-Key` del contrato v1.2.0, propiedad del gateway) y `schema_migrations` (runner de migraciones). Mismo criterio que da PostgreSQL a `public` por defecto.
 - **Bases de datos auxiliares**: ninguna. Instancias separadas solo si la escala medida lo exige (GDD 17.1).
 - **Cache / Search / Otros**: **explícitamente ausentes en Fases 0–1** (se adoptan solo contra medición, ADR-008): sin Redis, sin Meilisearch, sin Kafka, sin etcd. El tablón global se sirve desde PostgreSQL con índices apropiados; TimescaleDB solo si el volumen de series lo justifica.
 
@@ -30,7 +33,7 @@
 - **Host**: definido en `infra/docker-compose.yml` (hosts administrados manualmente, ADR-009)
 - **Puerto**: 5432
 - **Usuario**: credenciales **por servicio/esquema** (mínimo privilegio, Arquitectura §9). La migración de roles crea **roles de grupo `NOLOGIN`** con sus GRANTs — `ii_gateway` (escribe `auth`), `ii_engine` (escribe `world`/`ledger`/`outbox`), `ii_analytics` (escribe `analytics` y solo lee `ledger`); los usuarios `LOGIN` por entorno los crea la infraestructura (en dev, el init de Docker) y heredan del rol de grupo correspondiente
-- **Schema**: `auth`, `world`, `ledger`, `analytics`, `outbox`
+- **Schema**: `auth`, `world`, `ledger`, `analytics`, `outbox`, y `public` (transversal: `idempotency_keys`, `schema_migrations`)
 - **Estrategia de IDs**: **UUIDv7 nativo, plano y sin prefijo** (ADR-018): `uuid PRIMARY KEY DEFAULT uuidv7()` en todas las tablas de entidad, únicos globalmente e independientes del esquema donde residan. Cuando la aplicación necesita el ID **antes** del INSERT (partidas pre-generadas de las funciones todo-o-nada, claves de idempotencia) lo genera con UUIDv7 en Go. En la API viajan como `type: string, format: uuid`, conservando los schemas nominales (`AccountId`, `ContractId`, …) para que el codegen produzca tipos distinguibles. Excepción: `outbox.events.seq` usa `IDENTITY` porque el polling exige un orden total barato.
 
 **Nombre de base de datos**:
@@ -73,14 +76,14 @@ No aplica en Fases 0–1. Disparadores de adopción registrados (deben pasar por
 ## 📊 Estadísticas Generales
 
 ```
-Total de Tablas:            43   (auth 4 · world 25 · ledger 8 · analytics 4 · outbox 2)
-Total de Enums:             21
+Total de Tablas:            44   (auth 4 · world 25 · ledger 8 · analytics 4 · outbox 2 · public 1)
+Total de Enums:             21   (v1.2 no añade enums: world_source es un VALUE nuevo de ledger.account_kind, no un enum)
 Dominios de tipo:            3   (sim_time, money_amount, stock_qty)
 Triggers de invariante:      4   (balance por cuenta, doble entrada diferida, inmutabilidad ×2)
 Funciones todo-o-nada:       2 documentadas (confirm_contract, settle_contract_prorata)
 ```
 
-*(v1.1 añade `auth.account_credentials` y `world.sim_clock` a las 41 tablas de v1.0. La fuente de verdad de todos los conteos —tablas, índices, FKs, CHECKs— son las migraciones de `/backend/db/migrations`, aplicadas contra PostgreSQL 18 + PostGIS 3.6.)*
+*(v1.2 añade `public.idempotency_keys` a las 43 tablas de v1.1 —que a su vez había añadido `auth.account_credentials` y `world.sim_clock` a las 41 de v1.0— y el `ledger.account_kind` `world_source` (ADR-022). La fuente de verdad de todos los conteos —tablas, índices, FKs, CHECKs— son las migraciones de `/backend/db/migrations`, aplicadas contra PostgreSQL 18 + PostGIS 3.6.)*
 
 ---
 
@@ -95,13 +98,17 @@ Funciones todo-o-nada:       2 documentadas (confirm_contract, settle_contract_p
 Orden lógico de las migraciones iniciales (en `/backend/db/migrations`):
 
 ```
-0001_init       → extensiones, esquemas, dominios de tipos, roles de grupo NOLOGIN
-0002_auth       → identidad, credenciales y sesiones
-0003_world      → mundo físico (PostGIS, SRID 0) y reloj de simulación
-0004_ledger     → ledger, tablón, contratos + FKs cross-schema world↔ledger
-0005_analytics  → agregados
-0006_outbox     → mensajería
+0001_init         → extensiones, esquemas, dominios de tipos
+0002_auth         → identidad, credenciales y sesiones
+0003_world        → mundo físico (PostGIS, SRID 0) y reloj de simulación
+0004_ledger       → ledger, tablón, contratos + FKs cross-schema world↔ledger
+0005_analytics    → agregados
+0006_outbox       → mensajería
+0007_roles        → roles de grupo NOLOGIN (ii_gateway/ii_engine/ii_analytics) y GRANTs por esquema (mínimo privilegio)
+0008_ccri_support → ADR-022 (kind world_source) + public.idempotency_keys — soporte del núcleo CCRI (Incremento 1)
 ```
+
+> **Migración `0008_ccri_support` (Incremento 1).** Se aplica con la directiva `-- migrate:no-transaction`: `ALTER TYPE ... ADD VALUE 'world_source'` no puede usarse en la misma transacción que lo referencia, así que cada sentencia va en autocommit y **todas son re-ejecutables** (`IF EXISTS`/`IF NOT EXISTS` o drop+add emparejados). Los dos CHECK de `ledger.accounts` (`ck_accounts_non_negative`, `ck_accounts_asset`) se recrean con `NOT VALID` + `VALIDATE` para no escanear la tabla bajo `ACCESS EXCLUSIVE`; la nueva condición es estrictamente más permisiva, así que `VALIDATE` no puede fallar sobre datos existentes. El `down` **falla explícitamente** si existen filas `world_source` (su saldo negativo violaría los CHECK originales) y no puede eliminar el VALUE del enum (límite de PostgreSQL: no hay `ALTER TYPE ... DROP VALUE`), que queda inerte al restaurarse los CHECK.
 
 ---
 
@@ -643,7 +650,7 @@ CREATE INDEX ix_batches_building ON world.production_batches (building_id, queue
 
 #### Reglas de Negocio
 
-- Al completarse un lote, el motor asienta `production_output` en el ledger (alta de stock) y descuenta insumos con `consumption` — el plano físico y el contable se mueven juntos por eventos.
+- Al completarse un lote, el motor asienta `production_output` en el ledger (alta de stock) y descuenta insumos con `consumption` — el plano físico y el contable se mueven juntos por eventos. La contrapartida de ambos asientos es la cuenta `world_source` del producto (ADR-022, v1.2).
 - `paused_no_fuel` / `paused_no_workers` materializan la cascada de insolvencia (GDD 5.9): la producción pausa, nunca genera deuda.
 
 ---
@@ -925,8 +932,9 @@ El inventario comprometible se modela como **cuentas del mismo ledger que el din
 **Descripción**: cuentas del ledger de doble entrada. Cada cuenta contiene **un activo**: dinero (`product_id IS NULL`) o stock de un producto.
 
 ```sql
+-- El VALUE 'world_source' se añade en 0008_ccri_support (ADR-022); 0004 crea el resto.
 CREATE TYPE ledger.account_kind AS ENUM
-    ('cash','escrow','guarantee','stock_free','stock_reserved','custody','sink','emission');
+    ('cash','escrow','guarantee','stock_free','stock_reserved','custody','sink','emission','world_source');
 
 CREATE TABLE ledger.accounts (
     id                     uuid PRIMARY KEY DEFAULT uuidv7(),
@@ -938,12 +946,16 @@ CREATE TABLE ledger.accounts (
     balance                BIGINT NOT NULL DEFAULT 0,
     created_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
-    CONSTRAINT ck_accounts_non_negative CHECK (balance >= 0 OR kind = 'emission'),
+    -- v1.2 (0008/ADR-022): 'emission' (dinero) y 'world_source' (stock) son las
+    -- dos únicas cuentas fiat del banco central que pueden quedar en negativo.
+    CONSTRAINT ck_accounts_non_negative CHECK (balance >= 0 OR kind IN ('emission','world_source')),
     CONSTRAINT ck_accounts_asset CHECK (
         (kind IN ('cash','escrow','guarantee','sink','emission')
              AND product_id IS NULL AND warehouse_building_id IS NULL)
         OR
-        (kind IN ('stock_free','stock_reserved','custody') AND product_id IS NOT NULL)
+        -- v1.2 (0008/ADR-022): world_source es cuenta de STOCK (product_id NOT NULL);
+        -- al ser la contrapartida global del mundo no está ligada a almacén.
+        (kind IN ('stock_free','stock_reserved','custody','world_source') AND product_id IS NOT NULL)
     )
 );
 
@@ -967,13 +979,28 @@ CREATE INDEX ix_accounts_reference ON ledger.accounts (reference_id) WHERE refer
 | `stock_reserved` | Stock congelado por una publicación o contrato (cuenta espejo) |
 | `custody` | Mercancía en custodia de un CCRI-Flete: el transportista la lleva físicamente pero **no puede venderla** — el ledger lo impide contablemente |
 | `sink` | Destrucción de valor: sanciones, impuestos, canon, mantenimiento (GDD 5.5) |
-| `emission` | Contrapartida de emisión del banco central. **Única cuenta que puede ser negativa**: su saldo negativo es exactamente la masa monetaria emitida, visible para el Economy Balancer |
+| `emission` | Contrapartida de emisión **monetaria** del banco central. Puede ser negativa: su saldo negativo es exactamente la masa monetaria emitida, visible para el Economy Balancer |
+| `world_source` | **Contrapartida física del mundo** (ADR-022, v1.2): cuenta de stock (una por producto, titular: banco central) contra la que se asientan alta (`production_output`) y baja (`consumption`) de mercancía. **Única cuenta de stock que puede ser negativa**: su saldo negativo es exactamente el **stock neto emitido al mundo** de ese producto —masa física emitida—, simétrico a `emission` para el dinero. Al ser global no está ligada a almacén (`warehouse_building_id IS NULL`) |
 
 #### Reglas de Negocio
 
 - `balance` es **derivado y protegido**: solo lo mueve el trigger de partidas; el CHECK de no-negatividad aborta la transacción entera si un saldo quedara < 0.
 - Índices parciales garantizan una sola cuenta `cash` por corporación y una sola `stock_free` por (dueño, producto, almacén).
 - `reference_id` enlaza las cuentas espejo con su publicación/contrato (auditoría cruzada por UUID en un espacio global único).
+
+#### ADR-022 — Contrapartida física `world_source` y asientos canónicos de stock (v1.2)
+
+La doble entrada exige que cada asiento **sume cero por activo** (dinero, o cada producto — trigger `assert_transaction_balanced`). Producir/extraer o consumir stock no tenía cuenta de contrapartida posible: todas las cuentas de stock exigían saldo `>= 0` y la única negativa (`emission`) era exclusivamente monetaria. `world_source` cierra ese hueco (ADR-022, migración `0008_ccri_support`):
+
+| Asiento (transaction_kind) | Partidas | Lectura |
+|---|---|---|
+| **Alta de stock** `production_output` (producción/extracción) | `+N stock_free(corporación, producto, almacén)` / `−N world_source(producto)` | La mercancía "sale del mundo" hacia la corporación; `world_source` se hace más negativa = más masa física emitida |
+| **Baja de stock** `consumption` (insumos, combustible, consumo final de ciudades) | `+N world_source(producto)` / `−N stock_free(...)` | El stock "vuelve al mundo"/se destruye; `world_source` se recupera hacia 0 |
+
+- La doble entrada por activo se mantiene **estricta** (suma cero siempre); producción y consumo quedan asentables sin excepciones al trigger.
+- Simetría conceptual dinero↔stock: `emission`/`world_source` son las dos únicas cuentas *fiat*, ambas del banco central, ambas legibles como masa emitida. El agregado de `world_source` por producto (stock total emitido vs. consumido) se convierte en una métrica más del Economy Balancer, junto a la masa monetaria.
+- La coherencia física sigue intacta: el plano físico (yacimientos `remaining_amount`, `world.building_inventories`) y el contable se mueven juntos por eventos, con la reconciliación periódica ya diseñada (ADR-004). El GDD no cambia: la mecánica de juego es idéntica, esto es contabilidad interna.
+- El **seed** del mundo mínimo (Incremento 1) fondea inventarios exactamente con este asiento; falla de forma explícita si el VALUE `world_source` no está presente (recordatorio de ejecutar `make migrate-up`).
 
 ### 31. `ledger.transactions` y 32. `ledger.entries`
 
@@ -1053,6 +1080,7 @@ CREATE TRIGGER trg_transactions_immutable
 
 - Cualquier duplicación o pérdida de valor es una **violación contable detectable de inmediato**, no un bug silencioso (invariante nº 1 de la arquitectura).
 - `transaction_kind` clasifica faucets (`seed_capital`, `bot_capitalization`) y sinks (`tax`, `canon`, `maintenance`, sanciones de liquidación) — la política monetaria y la densidad de bots comparten libro (ADR-010).
+- `production_output`/`consumption` son los movimientos de **stock** contra la cuenta `world_source` (ADR-022, v1.2): faucet y sink físicos del inventario, análogos a `emission`/absorción para el dinero.
 
 ### 33. `ledger.publications`
 
@@ -1313,13 +1341,67 @@ CREATE INDEX ix_freight_carrier ON ledger.freight_contracts (carrier_account_id,
 
 ---
 
+## ⚖️ Interpretaciones operativas del CCRI (v1.2 — Incremento 1)
+
+Decisiones de diseño **vinculantes** con las que el Incremento 1 (núcleo CCRI, Fase 0: loop económico completo) materializa el ciclo de vida del contrato sobre el esquema anterior. No cambian el modelo de datos; fijan cómo lo opera el Contract Service hasta que existan las mecánicas de fases posteriores (logística en el Incremento 3, CCRI-Flete en la Fase 2). Son coherentes con el contrato OpenAPI v1.2.0 y con la función SQL `settle_contract_prorata`.
+
+### Garantía del vendedor y reparto en fallo
+
+- **Garantía del vendedor: 10% fijo** del valor de la publicación (coincide con la función SQL y con la decisión #27 — sin reputación).
+- **Reparto de garantía cuando el contrato falla** (`fill_bp = 0` al vencer): parámetro `II_COMPENSATION_BP` (default **5000** = 50%). La mitad compensa al comprador y la mitad va al `sink` — es el `p_compensation_bp` de `settle_contract_prorata`. El residuo de la división entera se asigna siempre al `sink` (regla de redondeo del banco central), y las partidas de importe 0 (compensación redondeada a 0) se omiten del asiento (`entries.amount <> 0`).
+
+### Ventanas en tiempo real — siempre con `now()` de la BD
+
+Las tres ventanas wall-clock se evalúan **con el reloj de la base de datos** (`now()`), nunca con el del proceso, para que el sorteo sea insensible a la latencia y al reloj de cada nodo (ADR-011). Configurables por entorno:
+
+| Parámetro | Default | Significado |
+|---|---|---|
+| `II_DRAW_WINDOW_SECONDS` | 45 | Duración de la ventana de sorteo inicial (`draw_window`) |
+| `II_MICRO_WINDOW_SECONDS` | 20 | Micro-ventana que abre una aceptación sobre una publicación ya `open` |
+| `II_CANCEL_COOLDOWN_SECONDS` | 10 | Cooldown anti-parpadeo antes de poder cancelar |
+
+### TTL de publicaciones abiertas — interpretación del estado `expired`
+
+- Una publicación que madura a `open` sin agotarse **caduca por TTL de sim-time**: `II_PUBLICATION_TTL_SIM_SECONDS` (default **604800** = 7 días de sim) desde `published_at_sim`. Al vencer, el sweep de expiración la pasa a `expired` y **libera la garantía restante** (stock congelado + garantía monetaria del vendedor, o escrow del comprador). Es un plazo de dominio, en sim-time, distinto de las ventanas wall-clock de arriba.
+
+### Semántica de entrega por tipo de publicación
+
+- **Contratos SELL — entrega in situ** (`destination_node_id = origin_node_id`): retirada en el almacén de origen. El comprador recibe el stock como `stock_free` **suyo en el almacén de origen** y lo transportará él mismo cuando exista logística. Por eso estos contratos se **entregan y liquidan al confirmarse** (fill 100%: entrega `on_time` + `settle` inmediato); no esperan a un sweep de vencimiento.
+- **Contratos BUY — exigen `origin_node_id` del aceptante** (campo nuevo `AcceptanceCreate.origin_node_id`, contrato v1.2.0): el `origin` lo aporta el aceptante (vendedor) al aceptar; el `destination` es el de la publicación. Si `origin = destination`, liquidan al confirmar. Si difieren, requieren **tránsito** (Incremento 3): al vencer `deadline_sim`, el sweep liquida **pro-rata**; con fill 0 el contrato queda `failed`, escrow íntegro al comprador, garantía repartida compensación/sink y stock liberado **in situ en el origen** (nada se teletransporta, decisión #9).
+
+### Aceptación, lote mínimo y cancelación
+
+- **`min_lot`**: la cantidad aceptada debe cumplir `min(min_lot, quantity_remaining) <= qty <= quantity_remaining`; si no, **422 `BELOW_MIN_LOT`**.
+- **Cancelar una publicación con aceptaciones `pending_draw`**: **permitido** (aún no son contratos). La cancelación libera también las garantías de los aceptantes pendientes (sus `stock_reserve`/`guarantee`/`escrow` espejo).
+- **Canal `private`**: solo visible y aceptable por `counterparty_account_id`; no aparece en el tablón (`ix_publications_board` filtra `channel = 'board'`).
+- **Overflow**: `qty × unit_price` se valida con `math/big` antes de operar; si excede `int64`, **422 `VALIDATION_ERROR`** (jamás se desborda un `money_amount`).
+- **`kind = 'freight'`**: **422 `VALIDATION_ERROR`** con mensaje «CCRI-Flete se activa en Fase 2»; `GET /contracts/freight-contracts` devuelve lista vacía.
+
+### OHLC por región de destino
+
+- Las velas `analytics.market_ohlc` se agregan **por producto y región de destino** del contrato liquidado: el payload de `contract.settled` lleva `destination_region_id`, y el consumidor `ohlc_aggregator` (patrón outbox, ver módulo Outbox) hace el UPSERT de la vela en la misma transacción en que avanza su cursor. Solo cuentan contratos **efectivamente liquidados** con entrega > 0, nunca órdenes vivas.
+
+### Eventos de outbox del incremento
+
+Payload JSON documentado (los emite el Contract Service en la misma transacción que el cambio de estado):
+
+| Evento | Momento |
+|---|---|
+| `publication.created` / `publication.cancelled` / `publication.expired` | Alta, cancelación y caducidad por TTL de una publicación |
+| `acceptance.registered` / `acceptance.resolved` | Registro de una aceptación y su resolución (servida o liberada) en el sorteo |
+| `contract.confirmed` | Bloqueo triple asentado (nace el contrato) |
+| `contract.delivered` | Llegada (parcial o total) verificada al destino |
+| `contract.settled` | Liquidación — payload: `{"contract_id","product_id","destination_region_id","unit_price":"str","quantity_agreed":"str","quantity_delivered":"str","fill_bp":N,"settled_at_sim":N,"status":"settled\|failed"}` |
+
+---
+
 ## 📈 Módulo Analítica (esquema `analytics`)
 
 Escrito por el job **Analytics** (batch de baja prioridad, deliberadamente separado de Persistence). Son los **agregados permanentes** del mundo que nunca se resetea: crecen lento y se conservan para siempre (GDD 17.2).
 
 ### 38. `analytics.market_ohlc`
 
-**Descripción**: velas OHLC por producto y región construidas a partir de **contratos efectivamente liquidados** (no de órdenes vivas) — la referencia de precio de mercado visible para todos (GDD 5.2/5.4).
+**Descripción**: velas OHLC por producto y **región de destino** construidas a partir de **contratos efectivamente liquidados** con entrega > 0 (no de órdenes vivas) — la referencia de precio de mercado visible para todos (GDD 5.2/5.4). `region_id` es la región del `destination_node_id` del contrato: el precio se imputa donde la mercancía se entrega (o se retira, en las ventas in situ).
 
 ```sql
 CREATE TABLE analytics.market_ohlc (
@@ -1341,6 +1423,10 @@ CREATE TABLE analytics.market_ohlc (
 
 CREATE INDEX ix_ohlc_region_time ON analytics.market_ohlc (region_id, bucket_start_sim DESC);
 ```
+
+#### Reglas de Negocio
+
+- Escrita por el consumidor **`ohlc_aggregator`** (patrón outbox, ver módulo Outbox), no por el Contract Service: al recibir un `contract.settled` con `status = 'settled'` y entrega > 0, hace el **UPSERT de la vela dentro de la misma transacción en que avanza su cursor** — exactly-once, reejecutar no duplica volumen. `GET /market/ohlc` es lectura pura de esta tabla, no re-agrega.
 
 ### 39. `analytics.city_snapshots`, 40. `analytics.region_stats`, 41. `analytics.economy_indicators`
 
@@ -1420,9 +1506,43 @@ CREATE TABLE outbox.consumer_cursors (
 #### Reglas de Negocio
 
 - `seq` (`IDENTITY`) da el orden total de polling — la única PK no-UUID del sistema, por diseño; `event_id` conserva la identidad UUID global del evento.
-- Eventos típicos: `contract.settled`, `vehicle.arrived`, `batch.completed`, `city.level_up` — los hitos del motor event-driven.
+- Eventos típicos: `contract.settled`, `vehicle.arrived`, `batch.completed`, `city.level_up` — los hitos del motor event-driven. El Incremento 1 emite el ciclo del CCRI (`publication.*`, `acceptance.*`, `contract.confirmed/delivered/settled`; ver «Interpretaciones operativas del CCRI»).
+- **API del módulo (v1.2, materializada en el Incremento 1):** `outbox.Emit(ctx, tx, simTime, aggregateType, aggregateID, eventType, payload)` inserta el evento **en la misma transacción** que el cambio de estado que lo causa; `outbox.NewConsumer(pool, name, eventTypes)` con `Run(ctx, interval, handler)` procesa los eventos **en orden de `seq`** y **avanza el cursor en la misma transacción del handler** — de ahí el *exactly-once por consumidor*: reejecutar un lote no duplica su efecto. Cada consumidor lógico tiene su propia fila en `consumer_cursors`.
+- **Primer consumidor real: `ohlc_aggregator`** (módulo `market`), suscrito a `contract.settled`, que construye las velas `analytics.market_ohlc`.
 - Los eventos consumidos por todos los cursores se purgan en la ventana de mantenimiento diaria.
 - Sustitución por Kafka (con schema registry obligatorio) solo en Fase 2+ y solo si el volumen medido lo exige.
+
+---
+
+## 🔑 Infraestructura transversal (esquema `public`)
+
+Tablas que no pertenecen a ningún dominio: son infraestructura de la plataforma, del mismo modo que `schema_migrations` (registro del runner de migraciones, ADR-020). Viven en `public` porque PostgreSQL ya le concede `USAGE` a `PUBLIC` por defecto.
+
+### 44. `public.idempotency_keys`
+
+**Descripción**: almacén de respuestas para la cabecera **`Idempotency-Key`** del contrato v1.2.0 (**nueva en v1.2**, migración `0008_ccri_support`). Hace **reintentables con seguridad** los comandos que mueven valor: misma clave ⇒ misma respuesta reproducida, nunca doble ejecución. Propiedad del gateway (`ii_gateway` la lee, inserta y purga).
+
+```sql
+CREATE TABLE public.idempotency_keys (
+    key             uuid        NOT NULL,   -- la aporta el cliente (uuid)
+    account_id      uuid        NOT NULL REFERENCES auth.accounts(id),
+    method          text        NOT NULL,   -- método y ruta del primer intento
+    path            text        NOT NULL,   --   (observabilidad y auditoría)
+    response_status int         NOT NULL,
+    content_type    text        NOT NULL,
+    response_body   bytea       NOT NULL,
+    created_at      timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (key, account_id)
+);
+
+CREATE INDEX ix_idempotency_keys_created_at ON public.idempotency_keys (created_at);
+```
+
+#### Reglas de Negocio
+
+- **Acotación por cuenta autenticada**: la PK compuesta `(key, account_id)` garantiza que dos cuentas no colisionen ni puedan leerse las respuestas entre sí, aunque reutilicen el mismo `uuid` de clave.
+- **Solo se persisten respuestas con `status < 500`**: un error interno debe poder reintentarse de verdad; nunca se «congela» un 5xx.
+- **Retención por antigüedad (purga en la ventana de mantenimiento)**: las claves son útiles solo durante la ventana de reintento del cliente. Un job de limpieza en la ventana de mantenimiento diaria (ADR-003) borra por `created_at` —mismo criterio de retención que `outbox.events`—, y el índice `ix_idempotency_keys_created_at` sirve ese `DELETE` por rango.
 
 ---
 
@@ -1438,6 +1558,7 @@ erDiagram
     ACCOUNTS ||--o{ LAND_CONCESSIONS : "concesionario"
     ACCOUNTS ||--o{ LEDGER_ACCOUNTS : "titular"
     ACCOUNTS ||--o| CITIES : "cuenta de mercado"
+    ACCOUNTS ||--o{ IDEMPOTENCY_KEYS : "respuestas idempotentes"
 
     REGIONS ||--o{ CITIES : "FK"
     REGIONS ||--o{ BUILDINGS : "FK"
@@ -1491,6 +1612,7 @@ Estimaciones para el techo de capacidad asumido (decenas de miles de agentes act
 | `ledger.entries` | 1–5 M (cada hito económico asienta) | ~1 año de juego en caliente → archivo frío consultable | 100–500 GB | Acotado por archivado |
 | `ledger.transactions` | 0,3–1,5 M | Igual que entries | 30–150 GB | Acotado por archivado |
 | `outbox.events` | 1–10 M | Días (purga tras consumo total) | < 10 GB estable | ~0 (cola, no histórico) |
+| `public.idempotency_keys` | 1 por comando mutante | Días (purga por `created_at`) | < 1 GB estable | ~0 (ventana de reintento) |
 | `ledger.contracts` | 50–200 k | Vivos + liquidados ~1 año en caliente → frío | 10–40 GB | Acotado por archivado |
 | `ledger.publications` | 100–400 k | Activas + histórico corto | 10–30 GB | Acotado |
 | `world.shipments` | 100–500 k | Entregados/liberados archivables | 10–50 GB | Acotado |
@@ -1518,6 +1640,7 @@ Notas:
 - **Agregados permanentes** (OHLC, snapshots de ciudades, indicadores): para siempre — crecen lento.
 - **Detalle archivable**: contratos liquidados y movimientos raw del ledger → almacenamiento frío tras ~1 año de juego (~15 días reales × 24; calibrar con volumen real), conservando en caliente saldos, agregados y todo contrato/garantía vivo. El frío sigue siendo consultable para auditoría.
 - **Outbox**: purga de eventos ya consumidos por todos los cursores (job en la ventana de mantenimiento).
+- **Claves de idempotencia** (`public.idempotency_keys`): purga por antigüedad (`created_at`) en la ventana de mantenimiento — útiles solo durante la ventana de reintento del cliente; mismo criterio que la outbox.
 - **Snapshots**: retención escalonada (todos los del día / uno por día un mes / uno por mes después).
 
 ### Consideraciones de Performance
@@ -1543,6 +1666,8 @@ Notas:
 - **UUIDv7 plano como PK universal** (ADR-018): generación nativa en BD (`DEFAULT uuidv7()`) y en Go cuando el ID se necesita antes del INSERT, orden temporal amigable con los índices B-tree, auditoría cruzada entre esquemas y preparado para la migración futura de entidades entre shards. Excepción única: `outbox.events.seq` (IDENTITY) porque el polling exige orden total.
 - **Una garantía íntegra por publicación** (ADR-014): la invariante "todo lo visible en el tablón es ejecutable al 100%" se cumple por construcción, sin contabilidad N:M ni cancelaciones en cascada en la ruta crítica de aceptación. La reserva compartida queda como expansión.
 - **Garantía fija del 10%, sin reputación** (decisión #27): se elimina el premio en lugar de vigilar al tramposo — sin fill-rate no hay incentivo al wash-trading ni maquinaria anti-manipulación.
+- **Contrapartida física del stock = `world_source`** (ADR-022, v1.2): `emission`/`world_source` son las dos únicas cuentas *fiat* del banco central que pueden ser negativas —masa monetaria y masa física emitidas—; con ellas producción y consumo se asientan sin excepción al trigger de doble entrada por activo.
+- **Idempotencia de comandos que mueven valor** (contrato v1.2.0): la cabecera `Idempotency-Key` se persiste por `(key, account_id)` en `public.idempotency_keys`; misma clave ⇒ misma respuesta reproducida (solo `status < 500`), reintentos seguros sin doble ejecución.
 - **El esquema físico no impone la topología**: las cajas lógicas (shards, Contract Service, Balancer) comparten instancia con fronteras por esquema y credenciales por servicio; la extracción a procesos/instancias separadas es una decisión medida posterior (ADR-008), y este modelo de datos no la bloquea.
 - **Casos borde conocidos** (a resolver en la capa de orquestación, documentados aquí deliberadamente):
   - `ledger.entries` prohíbe partidas de importe 0: en liquidaciones pro-rata con garantías ínfimas (compensación redondeada a 0), la aplicación debe omitir esa partida en el asiento.

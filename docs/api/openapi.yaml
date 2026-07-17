@@ -3,7 +3,7 @@ $self: https://play.imperio-industrial.example/api/v1/openapi.yaml
 
 info:
   title: Imperio Industrial — API pública
-  version: 1.1.0
+  version: 1.2.0
   summary: API REST del MMO de simulación económica, industrial y logística "Imperio Industrial".
   description: |
     API pública del servidor autoritativo de **Imperio Industrial** (GDD/SAD v1.2).
@@ -47,6 +47,14 @@ info:
 
     ## Changelog
 
+    - **v1.2.0** (2026-07-16): cabecera opcional `Idempotency-Key` en todas las
+      operaciones mutantes (reintentos seguros de comandos que mueven valor: misma
+      clave ⇒ misma respuesta reproducida, nunca doble ejecución); nuevo campo
+      opcional `AcceptanceCreate.origin_node_id` (requerido al aceptar publicaciones
+      `buy`); semántica de entrega documentada — en contratos `sell` la entrega es
+      **in situ** (`destination = origin`; el comprador recibe el stock en el almacén
+      de origen), en `buy` el destino es el de la solicitud y exige transporte
+      físico. Cambios aditivos retrocompatibles.
     - **v1.1.0** (2026-07-16): identificadores UUIDv7 planos, sin prefijo (ADR-018);
       geometría planar del mundo en metros, SRID 0 (ADR-019); backend unificado en Go
       (ADR-017). Sin cambios en rutas, verbos, envelopes ni semántica de endpoints.
@@ -367,6 +375,8 @@ paths:
         no hay contratos sobre producción futura). Con `channel = private` la publicación
         solo es visible para `counterparty_account_id`, con las mismas garantías y liquidación.
         Al publicarse abre su ventana de sorteo (30–60 s reales).
+      parameters:
+        - $ref: '#/components/parameters/idempotencyKey'
       requestBody:
         required: true
         content:
@@ -446,6 +456,8 @@ paths:
         Cancela la cantidad restante y libera su garantía, respetando el **cooldown
         anti-parpadeo** (409 `CANCEL_COOLDOWN_ACTIVE` durante los primeros segundos tras
         publicar). La parte ya convertida en contrato aceptado no es cancelable.
+      parameters:
+        - $ref: '#/components/parameters/idempotencyKey'
       responses:
         '200':
           description: Publicación cancelada; garantía restante liberada.
@@ -491,12 +503,22 @@ paths:
         divide la publicación (contrato por K con garantías proporcionales).
         La garantía del aceptante se bloquea al aceptar y se libera si no resulta servido.
         Sobre una publicación madura (`open`), la aceptación abre una micro-ventana (15–30 s).
+
+        **Semántica de entrega**: al aceptar una publicación `sell` la entrega es
+        **in situ** — el contrato nace con `destination = origin` y el comprador
+        recibe el stock como `stock_free` suyo en el propio almacén de origen
+        (retirada in situ: él mismo lo transportará cuando lo necesite). Al aceptar
+        una publicación `buy` el aceptante (vendedor) debe indicar `origin_node_id`
+        — el almacén propio del que sale el stock —; el destino es el de la
+        solicitud y la entrega exige transporte físico salvo que origen y destino
+        coincidan.
       parameters:
         - name: publicationId
           in: path
           required: true
           schema:
             $ref: '#/components/schemas/PublicationId'
+        - $ref: '#/components/parameters/idempotencyKey'
       requestBody:
         required: true
         content:
@@ -1181,6 +1203,8 @@ paths:
         de juego) — no existe propiedad perpetua del suelo (GDD 11.1). El canon periódico
         es un sink estructural; su cuantía deriva del `canon_base` regional ajustado por
         ubicación. El primer canon se cobra al conceder.
+      parameters:
+        - $ref: '#/components/parameters/idempotencyKey'
       requestBody:
         required: true
         content:
@@ -1256,6 +1280,7 @@ paths:
           required: true
           schema:
             $ref: '#/components/schemas/ConcessionId'
+        - $ref: '#/components/parameters/idempotencyKey'
       responses:
         '200':
           description: Concesión renovada.
@@ -1294,6 +1319,8 @@ paths:
       tags: [world]
       summary: Traspasar una concesión a otra corporación
       description: Mercado secundario de traspasos (GDD 11.1); el sistema cobra una tasa (`system_fee`).
+      parameters:
+        - $ref: '#/components/parameters/idempotencyKey'
       requestBody:
         required: true
         content:
@@ -1372,6 +1399,8 @@ paths:
         emplazamiento (espacio, acceso, recursos) contra las `placement_rules` del tipo
         y el grafo logístico — 422 `PLACEMENT_INVALID` si no se cumplen. El coste de
         construcción se asienta en el ledger.
+      parameters:
+        - $ref: '#/components/parameters/idempotencyKey'
       requestBody:
         required: true
         content:
@@ -1440,6 +1469,8 @@ paths:
       tags: [world, production]
       summary: Configurar un edificio
       description: Cambia la receta activa (con `changeover_seconds` de la receta) o inicia mantenimiento.
+      parameters:
+        - $ref: '#/components/parameters/idempotencyKey'
       requestBody:
         required: true
         content:
@@ -1488,6 +1519,7 @@ paths:
           required: true
           schema:
             $ref: '#/components/schemas/BuildingId'
+        - $ref: '#/components/parameters/idempotencyKey'
       responses:
         '200':
           description: Mejora iniciada.
@@ -1605,6 +1637,8 @@ paths:
         Encola uno o varios lotes de una receta soportada por el edificio. La producción
         pausa sin combustible (`paused_no_fuel`) o con salarios impagados
         (`paused_no_workers`) — cascada de insolvencia sin deuda (GDD 5.9).
+      parameters:
+        - $ref: '#/components/parameters/idempotencyKey'
       requestBody:
         required: true
         content:
@@ -1650,6 +1684,7 @@ paths:
           required: true
           schema:
             $ref: '#/components/schemas/BatchId'
+        - $ref: '#/components/parameters/idempotencyKey'
       responses:
         '200':
           description: Orden cancelada.
@@ -1750,6 +1785,8 @@ paths:
       tags: [world, fleet]
       summary: Comprar un vehículo
       description: Compra a precio de catálogo con entrega en un nodo propio o terminal accesible. El mercado secundario entre jugadores usa el CCRI estándar.
+      parameters:
+        - $ref: '#/components/parameters/idempotencyKey'
       requestBody:
         required: true
         content:
@@ -1821,6 +1858,8 @@ paths:
         Asigna/retira una ruta o programa mantenimiento. Un vehículo `sealed`
         (SELLADO durante un handoff entre shards) es visible pero **no comandable**:
         responde 403 `VEHICLE_SEALED` (solo aplica tras la extracción multi-proceso).
+      parameters:
+        - $ref: '#/components/parameters/idempotencyKey'
       requestBody:
         required: true
         content:
@@ -2012,6 +2051,7 @@ paths:
           required: true
           schema:
             $ref: '#/components/schemas/SlotId'
+        - $ref: '#/components/parameters/idempotencyKey'
       responses:
         '200':
           description: Slot adquirido.
@@ -2135,6 +2175,8 @@ paths:
         publicada por los shards. Las ETAs devueltas son **estimaciones informativas,
         no garantías**: el riesgo de que la congestión real supere la prevista lo asume
         quien pacta el plazo. Operación de solo cálculo — no persiste nada.
+      parameters:
+        - $ref: '#/components/parameters/idempotencyKey'
       requestBody:
         required: true
         content:
@@ -2207,6 +2249,8 @@ paths:
       tags: [logistics]
       summary: Crear una ruta
       description: Define una línea regular fija o un servicio bajo demanda como secuencia de enlaces (potencialmente multimodal, con transbordos en terminales).
+      parameters:
+        - $ref: '#/components/parameters/idempotencyKey'
       requestBody:
         required: true
         content:
@@ -2272,6 +2316,8 @@ paths:
       operationId: updateRoute
       tags: [logistics]
       summary: Modificar una ruta
+      parameters:
+        - $ref: '#/components/parameters/idempotencyKey'
       requestBody:
         required: true
         content:
@@ -2304,6 +2350,8 @@ paths:
       tags: [logistics]
       summary: Eliminar una ruta
       description: Los vehículos asignados quedan sin ruta (`idle` al completar su tramo actual).
+      parameters:
+        - $ref: '#/components/parameters/idempotencyKey'
       responses:
         '204':
           description: Ruta eliminada.
@@ -2326,6 +2374,17 @@ components:
         acceden por un camino de red interno multiplexado con la misma superficie de API.
 
   parameters:
+    idempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: |
+        Clave de idempotencia para **reintentos seguros de comandos que mueven
+        valor**: si el cliente reintenta con la misma clave, el servidor reproduce
+        la misma respuesta del primer intento — nunca hay doble ejecución.
+      schema:
+        type: string
+        format: uuid
     cursor:
       name: cursor
       in: query
@@ -2864,7 +2923,15 @@ components:
     # ── Contratos ──
     Publication:
       type: object
-      description: Publicación del tablón. Toda publicación visible es ejecutable al 100% — su garantía íntegra quedó bloqueada al publicar.
+      description: |
+        Publicación del tablón. Toda publicación visible es ejecutable al 100% —
+        su garantía íntegra quedó bloqueada al publicar.
+
+        **Semántica de entrega**: en `sell` los contratos resultantes se entregan
+        **in situ** (`destination = origin`): el comprador recibe el stock en el
+        almacén de origen y lo transporta él mismo. En `buy` el destino es el
+        `destination_node_id` de la solicitud y la entrega exige transporte físico
+        desde el `origin_node_id` que aporta el aceptante.
       required:
         - id
         - kind
@@ -2976,6 +3043,12 @@ components:
         quantity:
           $ref: '#/components/schemas/StockQty'
           description: Cantidad aceptada (K de N; ≥ `min_lot` de la publicación).
+        origin_node_id:
+          $ref: '#/components/schemas/NodeId'
+          description: |
+            Requerido al aceptar publicaciones `buy`: almacén propio del vendedor
+            (aceptante) del que sale el stock ofrecido. Ignorado en `sell`, donde
+            el origen es el de la publicación y la entrega es in situ.
     Acceptance:
       type: object
       required: [id, publication_id, acceptor_account_id, quantity, quantity_served, status, accepted_at]
@@ -3011,7 +3084,17 @@ components:
           format: date-time
     Contract:
       type: object
-      description: CCRI de bienes — la unidad económica atómica del juego. Nace con el bloqueo triple ya asentado (una única transacción ACID).
+      description: |
+        CCRI de bienes — la unidad económica atómica del juego. Nace con el bloqueo
+        triple ya asentado (una única transacción ACID).
+
+        **Semántica de entrega**: si `destination_node_id = origin_node_id`
+        (siempre en contratos nacidos de `sell` — retirada in situ), el comprador
+        recibe el stock en el propio almacén de origen y el contrato se entrega y
+        liquida al confirmarse (fill 100%). Si difieren (contratos nacidos de
+        `buy`), la entrega exige transporte físico al destino antes de
+        `deadline_sim`; al vencer, la liquidación es pro-rata por lo entregado a
+        tiempo.
       required:
         - id
         - channel

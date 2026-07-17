@@ -1,8 +1,9 @@
 // El binario gateway sirve la API pública del backend: la plataforma base
 // (healthz/readyz/metrics con la cadena de middlewares) y, bajo /api/v1, las
-// rutas del contrato OpenAPI v1.1.0 que compone internal/gateway (auth,
-// ledger y el lector del reloj de simulación). Este composition root es la
-// única capa que junta los bounded contexts: ellos no se importan entre sí.
+// rutas del contrato OpenAPI v1.2.0 que compone internal/gateway (auth,
+// ledger, contracts, market y el lector del reloj de simulación). Este
+// composition root es la única capa que junta los bounded contexts: ellos no
+// se importan entre sí.
 package main
 
 import (
@@ -14,6 +15,7 @@ import (
 	"syscall"
 
 	"github.com/lokiteitor/global-market/backend/internal/gateway"
+	"github.com/lokiteitor/global-market/backend/internal/outbox"
 	"github.com/lokiteitor/global-market/backend/internal/platform/config"
 	"github.com/lokiteitor/global-market/backend/internal/platform/metrics"
 	"github.com/lokiteitor/global-market/backend/internal/platform/service"
@@ -39,6 +41,11 @@ func run() error {
 		return err
 	}
 	defer app.Close()
+
+	// Métricas del outbox: el gateway emite eventos (publication.created,
+	// acceptance.registered, publication.cancelled) al publicar/aceptar/cancelar;
+	// el módulo registra sus contadores en el registry de este binario (outbox.go).
+	outbox.RegisterMetrics(app.Metrics().Registry())
 
 	opts, err := gateway.OptionsFromEnv()
 	if err != nil {

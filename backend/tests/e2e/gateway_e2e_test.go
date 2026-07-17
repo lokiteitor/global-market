@@ -28,8 +28,10 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/lokiteitor/global-market/backend/internal/auth"
+	"github.com/lokiteitor/global-market/backend/internal/contracts"
 	"github.com/lokiteitor/global-market/backend/internal/gateway"
 	"github.com/lokiteitor/global-market/backend/internal/ledger"
+	"github.com/lokiteitor/global-market/backend/internal/market"
 	"github.com/lokiteitor/global-market/backend/internal/platform/migrate"
 	"github.com/lokiteitor/global-market/backend/internal/seed"
 	"github.com/lokiteitor/global-market/backend/internal/sim/clock"
@@ -37,8 +39,10 @@ import (
 )
 
 const (
-	demoName   = "Demo"
-	demoSecret = "demo-secret-dev"
+	demoName     = "Demo"
+	demoSecret   = "demo-secret-dev"
+	traderName   = "Norte Trading"
+	traderSecret = "norte-secret-dev"
 )
 
 func TestGatewayE2E(t *testing.T) {
@@ -54,7 +58,11 @@ func TestGatewayE2E(t *testing.T) {
 
 	// ── Seed programático, dos veces: la segunda debe ser un no-op (nunca
 	//    re-emite capital ni duplica cuentas) ────────────────────────────────
-	seedOpts := seed.Options{DemoName: demoName, DemoSecret: demoSecret, Ledger: ledger.DefaultOptions()}
+	seedOpts := seed.Options{
+		DemoName: demoName, DemoSecret: demoSecret,
+		TraderName: traderName, TraderSecret: traderSecret,
+		Ledger: ledger.DefaultOptions(),
+	}
 	if err := seed.Run(ctx, pool, seedOpts, logger); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
@@ -74,6 +82,8 @@ func TestGatewayE2E(t *testing.T) {
 				APIBurst:    auth.DefaultRateAPIBurst,
 			},
 			Ledger:      ledger.DefaultOptions(),
+			Contracts:   contracts.DefaultOptions(),
+			Market:      market.DefaultOptions(),
 			ClockReader: clock.ReaderOptions{CacheTTL: 0}, // relectura del ancla por petición
 		},
 	})
@@ -116,14 +126,14 @@ func TestGatewayE2E(t *testing.T) {
 		t.Fatalf("sim_time_seconds retrocedió entre respuestas: %d < %d", meSimSecs, loginSimSecs)
 	}
 
-	// ── GET /ledger/accounts → caja con el capital semilla (string) ─────────
-	r = call(t, srv, http.MethodGet, "/api/v1/ledger/accounts", token, nil)
+	// ── GET /ledger/accounts?kind=cash → caja con el capital semilla ────────
+	r = call(t, srv, http.MethodGet, "/api/v1/ledger/accounts?kind=cash", token, nil)
 	if r.status != http.StatusOK {
 		t.Fatalf("ledger/accounts: status %d, esperado 200 (cuerpo: %s)", r.status, r.raw)
 	}
 	accounts, ok := r.body["data"].([]any)
 	if !ok || len(accounts) != 1 {
-		t.Fatalf("ledger/accounts: data inesperada (esperada solo la caja): %s", r.raw)
+		t.Fatalf("ledger/accounts?kind=cash: data inesperada (esperada solo la caja): %s", r.raw)
 	}
 	cash := asMap(t, accounts[0], "data[0]")
 	if cash["kind"] != "cash" || cash["balance"] != "1000000" {
@@ -134,6 +144,31 @@ func TestGatewayE2E(t *testing.T) {
 		t.Fatal("ledger/accounts: id de la caja ausente")
 	}
 	assertMeta(t, r.body, "ledger/accounts")
+
+	// ── GET /ledger/accounts?kind=stock_free → stock inicial del seed ───────
+	//    (5000 iron_ore y 3000 coal en el almacén de la demo, ADR-022)
+	r = call(t, srv, http.MethodGet, "/api/v1/ledger/accounts?kind=stock_free", token, nil)
+	if r.status != http.StatusOK {
+		t.Fatalf("ledger/accounts?kind=stock_free: status %d, esperado 200 (cuerpo: %s)", r.status, r.raw)
+	}
+	stockAccounts, ok := r.body["data"].([]any)
+	if !ok || len(stockAccounts) != 2 {
+		t.Fatalf("ledger/accounts?kind=stock_free: %d cuentas, esperadas 2: %s", len(stockAccounts), r.raw)
+	}
+	stockBalances := map[string]bool{}
+	for i, item := range stockAccounts {
+		acc := asMap(t, item, fmt.Sprintf("stock_free[%d]", i))
+		balance, _ := acc["balance"].(string)
+		productID, _ := acc["product_id"].(string)
+		warehouseID, _ := acc["warehouse_building_id"].(string)
+		if acc["kind"] != "stock_free" || productID == "" || warehouseID == "" {
+			t.Fatalf("cuenta stock_free incompleta: %v", acc)
+		}
+		stockBalances[balance] = true
+	}
+	if !stockBalances["5000"] || !stockBalances["3000"] {
+		t.Fatalf("saldos stock_free inesperados (esperados \"5000\" y \"3000\"): %v", stockBalances)
+	}
 
 	// ── Extracto de la caja → una única partida seed_capital de +1000000 ────
 	r = call(t, srv, http.MethodGet, "/api/v1/ledger/accounts/"+cashID+"/entries", token, nil)
@@ -250,6 +285,14 @@ type response struct {
 // respuesta se decodifica si no está vacío.
 func call(t *testing.T, srv *httptest.Server, method, path, token string, payload any) response {
 	t.Helper()
+	return doRequest(t, srv, buildRequest(t, srv, method, path, token, payload), method, path)
+}
+
+// buildRequest construye la petición HTTP del test: cuerpo JSON si payload no
+// es nil y bearer si token no está vacío. Otras cabeceras (p. ej.
+// Idempotency-Key) las añade el llamante sobre el *http.Request devuelto.
+func buildRequest(t *testing.T, srv *httptest.Server, method, path, token string, payload any) *http.Request {
+	t.Helper()
 	var body io.Reader
 	if payload != nil {
 		raw, err := json.Marshal(payload)
@@ -268,6 +311,13 @@ func call(t *testing.T, srv *httptest.Server, method, path, token string, payloa
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
+	return req
+}
+
+// doRequest ejecuta la petición y decodifica la respuesta (JSON si no está
+// vacía).
+func doRequest(t *testing.T, srv *httptest.Server, req *http.Request, method, path string) response {
+	t.Helper()
 	resp, err := srv.Client().Do(req)
 	if err != nil {
 		t.Fatalf("%s %s: %v", method, path, err)

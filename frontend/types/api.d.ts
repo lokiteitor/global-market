@@ -201,6 +201,15 @@ export interface paths {
          *     divide la publicación (contrato por K con garantías proporcionales).
          *     La garantía del aceptante se bloquea al aceptar y se libera si no resulta servido.
          *     Sobre una publicación madura (`open`), la aceptación abre una micro-ventana (15–30 s).
+         *
+         *     **Semántica de entrega**: al aceptar una publicación `sell` la entrega es
+         *     **in situ** — el contrato nace con `destination = origin` y el comprador
+         *     recibe el stock como `stock_free` suyo en el propio almacén de origen
+         *     (retirada in situ: él mismo lo transportará cuando lo necesite). Al aceptar
+         *     una publicación `buy` el aceptante (vendedor) debe indicar `origin_node_id`
+         *     — el almacén propio del que sale el stock —; el destino es el de la
+         *     solicitud y la entrega exige transporte físico salvo que origen y destino
+         *     coincidan.
          */
         post: operations["acceptPublication"];
         delete?: never;
@@ -1384,7 +1393,16 @@ export interface components {
             /** Format: date-time */
             created_at: string;
         };
-        /** @description Publicación del tablón. Toda publicación visible es ejecutable al 100% — su garantía íntegra quedó bloqueada al publicar. */
+        /**
+         * @description Publicación del tablón. Toda publicación visible es ejecutable al 100% —
+         *     su garantía íntegra quedó bloqueada al publicar.
+         *
+         *     **Semántica de entrega**: en `sell` los contratos resultantes se entregan
+         *     **in situ** (`destination = origin`): el comprador recibe el stock en el
+         *     almacén de origen y lo transporta él mismo. En `buy` el destino es el
+         *     `destination_node_id` de la solicitud y la entrega exige transporte físico
+         *     desde el `origin_node_id` que aporta el aceptante.
+         */
         Publication: {
             id: components["schemas"]["PublicationId"];
             kind: components["schemas"]["PublicationKind"];
@@ -1456,6 +1474,12 @@ export interface components {
         AcceptanceCreate: {
             /** @description Cantidad aceptada (K de N; ≥ `min_lot` de la publicación). */
             quantity: components["schemas"]["StockQty"];
+            /**
+             * @description Requerido al aceptar publicaciones `buy`: almacén propio del vendedor
+             *     (aceptante) del que sale el stock ofrecido. Ignorado en `sell`, donde
+             *     el origen es el de la publicación y la entrega es in situ.
+             */
+            origin_node_id?: components["schemas"]["NodeId"];
         };
         Acceptance: {
             id: components["schemas"]["AcceptanceId"];
@@ -1476,7 +1500,18 @@ export interface components {
             /** Format: date-time */
             resolved_at?: string;
         };
-        /** @description CCRI de bienes — la unidad económica atómica del juego. Nace con el bloqueo triple ya asentado (una única transacción ACID). */
+        /**
+         * @description CCRI de bienes — la unidad económica atómica del juego. Nace con el bloqueo
+         *     triple ya asentado (una única transacción ACID).
+         *
+         *     **Semántica de entrega**: si `destination_node_id = origin_node_id`
+         *     (siempre en contratos nacidos de `sell` — retirada in situ), el comprador
+         *     recibe el stock en el propio almacén de origen y el contrato se entrega y
+         *     liquida al confirmarse (fill 100%). Si difieren (contratos nacidos de
+         *     `buy`), la entrega exige transporte físico al destino antes de
+         *     `deadline_sim`; al vencer, la liquidación es pro-rata por lo entregado a
+         *     tiempo.
+         */
         Contract: {
             id: components["schemas"]["ContractId"];
             publication_id?: components["schemas"]["PublicationId"];
@@ -2018,6 +2053,12 @@ export interface components {
         };
     };
     parameters: {
+        /**
+         * @description Clave de idempotencia para **reintentos seguros de comandos que mueven
+         *     valor**: si el cliente reintenta con la misma clave, el servidor reproduce
+         *     la misma respuesta del primer intento — nunca hay doble ejecución.
+         */
+        idempotencyKey: string;
         /** @description Cursor opaco de paginación devuelto en `meta.next_cursor`. */
         cursor: string;
         /** @description Tamaño máximo de página. */
@@ -2234,7 +2275,14 @@ export interface operations {
     createPublication: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                /**
+                 * @description Clave de idempotencia para **reintentos seguros de comandos que mueven
+                 *     valor**: si el cliente reintenta con la misma clave, el servidor reproduce
+                 *     la misma respuesta del primer intento — nunca hay doble ejecución.
+                 */
+                "Idempotency-Key"?: components["parameters"]["idempotencyKey"];
+            };
             path?: never;
             cookie?: never;
         };
@@ -2308,7 +2356,14 @@ export interface operations {
     cancelPublication: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                /**
+                 * @description Clave de idempotencia para **reintentos seguros de comandos que mueven
+                 *     valor**: si el cliente reintenta con la misma clave, el servidor reproduce
+                 *     la misma respuesta del primer intento — nunca hay doble ejecución.
+                 */
+                "Idempotency-Key"?: components["parameters"]["idempotencyKey"];
+            };
             path: {
                 publicationId: components["schemas"]["PublicationId"];
             };
@@ -2348,7 +2403,14 @@ export interface operations {
     acceptPublication: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                /**
+                 * @description Clave de idempotencia para **reintentos seguros de comandos que mueven
+                 *     valor**: si el cliente reintenta con la misma clave, el servidor reproduce
+                 *     la misma respuesta del primer intento — nunca hay doble ejecución.
+                 */
+                "Idempotency-Key"?: components["parameters"]["idempotencyKey"];
+            };
             path: {
                 publicationId: components["schemas"]["PublicationId"];
             };
@@ -2963,7 +3025,14 @@ export interface operations {
     createConcession: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                /**
+                 * @description Clave de idempotencia para **reintentos seguros de comandos que mueven
+                 *     valor**: si el cliente reintenta con la misma clave, el servidor reproduce
+                 *     la misma respuesta del primer intento — nunca hay doble ejecución.
+                 */
+                "Idempotency-Key"?: components["parameters"]["idempotencyKey"];
+            };
             path?: never;
             cookie?: never;
         };
@@ -3036,7 +3105,14 @@ export interface operations {
     renewConcession: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                /**
+                 * @description Clave de idempotencia para **reintentos seguros de comandos que mueven
+                 *     valor**: si el cliente reintenta con la misma clave, el servidor reproduce
+                 *     la misma respuesta del primer intento — nunca hay doble ejecución.
+                 */
+                "Idempotency-Key"?: components["parameters"]["idempotencyKey"];
+            };
             path: {
                 concessionId: components["schemas"]["ConcessionId"];
             };
@@ -3085,7 +3161,14 @@ export interface operations {
     createConcessionTransfer: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                /**
+                 * @description Clave de idempotencia para **reintentos seguros de comandos que mueven
+                 *     valor**: si el cliente reintenta con la misma clave, el servidor reproduce
+                 *     la misma respuesta del primer intento — nunca hay doble ejecución.
+                 */
+                "Idempotency-Key"?: components["parameters"]["idempotencyKey"];
+            };
             path?: never;
             cookie?: never;
         };
@@ -3156,7 +3239,14 @@ export interface operations {
     createBuilding: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                /**
+                 * @description Clave de idempotencia para **reintentos seguros de comandos que mueven
+                 *     valor**: si el cliente reintenta con la misma clave, el servidor reproduce
+                 *     la misma respuesta del primer intento — nunca hay doble ejecución.
+                 */
+                "Idempotency-Key"?: components["parameters"]["idempotencyKey"];
+            };
             path?: never;
             cookie?: never;
         };
@@ -3230,7 +3320,14 @@ export interface operations {
     updateBuilding: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                /**
+                 * @description Clave de idempotencia para **reintentos seguros de comandos que mueven
+                 *     valor**: si el cliente reintenta con la misma clave, el servidor reproduce
+                 *     la misma respuesta del primer intento — nunca hay doble ejecución.
+                 */
+                "Idempotency-Key"?: components["parameters"]["idempotencyKey"];
+            };
             path: {
                 buildingId: components["schemas"]["BuildingId"];
             };
@@ -3275,7 +3372,14 @@ export interface operations {
     upgradeBuilding: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                /**
+                 * @description Clave de idempotencia para **reintentos seguros de comandos que mueven
+                 *     valor**: si el cliente reintenta con la misma clave, el servidor reproduce
+                 *     la misma respuesta del primer intento — nunca hay doble ejecución.
+                 */
+                "Idempotency-Key"?: components["parameters"]["idempotencyKey"];
+            };
             path: {
                 buildingId: components["schemas"]["BuildingId"];
             };
@@ -3392,7 +3496,14 @@ export interface operations {
     queueProductionBatches: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                /**
+                 * @description Clave de idempotencia para **reintentos seguros de comandos que mueven
+                 *     valor**: si el cliente reintenta con la misma clave, el servidor reproduce
+                 *     la misma respuesta del primer intento — nunca hay doble ejecución.
+                 */
+                "Idempotency-Key"?: components["parameters"]["idempotencyKey"];
+            };
             path: {
                 buildingId: components["schemas"]["BuildingId"];
             };
@@ -3437,7 +3548,14 @@ export interface operations {
     cancelProductionBatch: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                /**
+                 * @description Clave de idempotencia para **reintentos seguros de comandos que mueven
+                 *     valor**: si el cliente reintenta con la misma clave, el servidor reproduce
+                 *     la misma respuesta del primer intento — nunca hay doble ejecución.
+                 */
+                "Idempotency-Key"?: components["parameters"]["idempotencyKey"];
+            };
             path: {
                 batchId: components["schemas"]["BatchId"];
             };
@@ -3544,7 +3662,14 @@ export interface operations {
     purchaseVehicle: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                /**
+                 * @description Clave de idempotencia para **reintentos seguros de comandos que mueven
+                 *     valor**: si el cliente reintenta con la misma clave, el servidor reproduce
+                 *     la misma respuesta del primer intento — nunca hay doble ejecución.
+                 */
+                "Idempotency-Key"?: components["parameters"]["idempotencyKey"];
+            };
             path?: never;
             cookie?: never;
         };
@@ -3617,7 +3742,14 @@ export interface operations {
     updateVehicle: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                /**
+                 * @description Clave de idempotencia para **reintentos seguros de comandos que mueven
+                 *     valor**: si el cliente reintenta con la misma clave, el servidor reproduce
+                 *     la misma respuesta del primer intento — nunca hay doble ejecución.
+                 */
+                "Idempotency-Key"?: components["parameters"]["idempotencyKey"];
+            };
             path: {
                 vehicleId: components["schemas"]["VehicleId"];
             };
@@ -3792,7 +3924,14 @@ export interface operations {
     purchaseTerminalSlot: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                /**
+                 * @description Clave de idempotencia para **reintentos seguros de comandos que mueven
+                 *     valor**: si el cliente reintenta con la misma clave, el servidor reproduce
+                 *     la misma respuesta del primer intento — nunca hay doble ejecución.
+                 */
+                "Idempotency-Key"?: components["parameters"]["idempotencyKey"];
+            };
             path: {
                 slotId: components["schemas"]["SlotId"];
             };
@@ -3910,7 +4049,14 @@ export interface operations {
     createRoutePlan: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                /**
+                 * @description Clave de idempotencia para **reintentos seguros de comandos que mueven
+                 *     valor**: si el cliente reintenta con la misma clave, el servidor reproduce
+                 *     la misma respuesta del primer intento — nunca hay doble ejecución.
+                 */
+                "Idempotency-Key"?: components["parameters"]["idempotencyKey"];
+            };
             path?: never;
             cookie?: never;
         };
@@ -3986,7 +4132,14 @@ export interface operations {
     createRoute: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                /**
+                 * @description Clave de idempotencia para **reintentos seguros de comandos que mueven
+                 *     valor**: si el cliente reintenta con la misma clave, el servidor reproduce
+                 *     la misma respuesta del primer intento — nunca hay doble ejecución.
+                 */
+                "Idempotency-Key"?: components["parameters"]["idempotencyKey"];
+            };
             path?: never;
             cookie?: never;
         };
@@ -4058,7 +4211,14 @@ export interface operations {
     deleteRoute: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                /**
+                 * @description Clave de idempotencia para **reintentos seguros de comandos que mueven
+                 *     valor**: si el cliente reintenta con la misma clave, el servidor reproduce
+                 *     la misma respuesta del primer intento — nunca hay doble ejecución.
+                 */
+                "Idempotency-Key"?: components["parameters"]["idempotencyKey"];
+            };
             path: {
                 routeId: components["schemas"]["RouteId"];
             };
@@ -4084,7 +4244,14 @@ export interface operations {
     updateRoute: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                /**
+                 * @description Clave de idempotencia para **reintentos seguros de comandos que mueven
+                 *     valor**: si el cliente reintenta con la misma clave, el servidor reproduce
+                 *     la misma respuesta del primer intento — nunca hay doble ejecución.
+                 */
+                "Idempotency-Key"?: components["parameters"]["idempotencyKey"];
+            };
             path: {
                 routeId: components["schemas"]["RouteId"];
             };

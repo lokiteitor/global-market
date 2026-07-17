@@ -23,6 +23,7 @@ const (
 	LedgerAccountKindCustody       LedgerAccountKind = "custody"
 	LedgerAccountKindSink          LedgerAccountKind = "sink"
 	LedgerAccountKindEmission      LedgerAccountKind = "emission"
+	LedgerAccountKindWorldSource   LedgerAccountKind = "world_source"
 )
 
 func (e *LedgerAccountKind) Scan(src interface{}) error {

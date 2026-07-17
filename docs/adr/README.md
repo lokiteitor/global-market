@@ -18,6 +18,7 @@ Los quince primeros ADRs (motor event-driven, sim-time 24×, ventana de mantenim
 | [ADR-019](ADR-019-vista-top-down.md) | Vista top-down cenital (90°) y geometría planar | Aceptado | GDD §1 (isométrico), FAD §16.2 |
 | [ADR-020](ADR-020-migraciones-manuales.md) | Migraciones SQL manuales con runner propio; sqlc solo queries | Aceptado | Drizzle ORM (SAD §4.1/§6.1) |
 | [ADR-021](ADR-021-frontend-autonomo.md) | Frontend autónomo sin workspaces; tipos generados del contrato | Aceptado | FAD §10.1/§10.7/§23.1 |
+| [ADR-022](ADR-022-world-source-stock.md) | Cuentas `world_source`: contrapartida física del ledger para producción/consumo de stock | Aceptado | Modelo contable (DB doc, migración 0004/0008) |
 
 ## Formato
 

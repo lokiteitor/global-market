@@ -1,9 +1,9 @@
-// Package gateway compone la API pública del contrato OpenAPI v1.1.0 sobre
+// Package gateway compone la API pública del contrato OpenAPI v1.2.0 sobre
 // los bounded contexts del backend. Es la biblioteca del composition root de
-// cmd/gateway (SAD v1.1 §7): la ÚNICA pieza que conoce a la vez auth, ledger
-// y el reloj de simulación — los módulos nunca se importan entre sí. También
-// la reutilizan los tests E2E para levantar exactamente el mismo árbol de
-// rutas que producción sin duplicarlo.
+// cmd/gateway (SAD v1.1 §7): la ÚNICA pieza que conoce a la vez auth, ledger,
+// contracts, market y el reloj de simulación — los módulos nunca se importan
+// entre sí. También la reutilizan los tests E2E para levantar exactamente el
+// mismo árbol de rutas que producción sin duplicarlo.
 package gateway
 
 import (
@@ -19,8 +19,11 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/lokiteitor/global-market/backend/internal/auth"
+	"github.com/lokiteitor/global-market/backend/internal/contracts"
 	"github.com/lokiteitor/global-market/backend/internal/ledger"
+	"github.com/lokiteitor/global-market/backend/internal/market"
 	"github.com/lokiteitor/global-market/backend/internal/platform/httpx"
+	"github.com/lokiteitor/global-market/backend/internal/platform/idempotency"
 	"github.com/lokiteitor/global-market/backend/internal/sim/clock"
 	"github.com/lokiteitor/global-market/backend/internal/sim/simtime"
 )
@@ -36,6 +39,11 @@ type Options struct {
 	Auth auth.Options
 	// Ledger es la configuración del módulo ledger.
 	Ledger ledger.Options
+	// Contracts es la configuración del módulo contracts (ventanas de sorteo,
+	// cooldown, TTL y reparto de garantía del CCRI).
+	Contracts contracts.Options
+	// Market es la configuración del lado de lectura del módulo market (OHLC).
+	Market market.Options
 	// ClockReader es la caché del lector del reloj de simulación.
 	ClockReader clock.ReaderOptions
 }
@@ -52,11 +60,25 @@ func OptionsFromEnv() (Options, error) {
 	if err != nil {
 		return Options{}, err
 	}
+	contractsOpts, err := contracts.OptionsFromEnv()
+	if err != nil {
+		return Options{}, err
+	}
+	marketOpts, err := market.OptionsFromEnv()
+	if err != nil {
+		return Options{}, err
+	}
 	readerOpts, err := clock.ReaderOptionsFromEnv()
 	if err != nil {
 		return Options{}, err
 	}
-	return Options{Auth: authOpts, Ledger: ledgerOpts, ClockReader: readerOpts}, nil
+	return Options{
+		Auth:        authOpts,
+		Ledger:      ledgerOpts,
+		Contracts:   contractsOpts,
+		Market:      marketOpts,
+		ClockReader: readerOpts,
+	}, nil
 }
 
 // Deps son las dependencias de plataforma que BuildHandler compone.
@@ -109,6 +131,26 @@ func BuildHandler(deps Deps) (http.Handler, error) {
 	ledgerSvc := ledger.NewService(deps.Pool, deps.Options.Ledger, deps.Registry)
 	ledgerHandlers := ledger.NewHandlers(ledgerSvc, sessionIdentity{}, meta, deps.Logger)
 
+	// Módulo contracts: el ciclo CCRI del tablón (publicar, consultar, cancelar,
+	// aceptar) y la lectura de contratos/entregas. Su SimSource es el mismo
+	// lector del reloj que estampa el meta; su Identity, el Principal de auth.
+	contractsSvc, err := contracts.NewService(deps.Pool, meta.reader, deps.Options.Contracts, deps.Logger, deps.Registry)
+	if err != nil {
+		return nil, err
+	}
+	contractsHandlers := contracts.NewHandlers(contractsSvc, sessionIdentity{}, meta, deps.Logger)
+
+	// Módulo market: lado de lectura del historial OHLC (el agregador vive en el
+	// engine). Sin Identity propia: la autorización es la sesión del gateway.
+	marketSvc := market.NewService(deps.Pool, deps.Options.Market)
+	marketHandlers := market.NewHandlers(marketSvc, meta, deps.Logger)
+
+	// Idempotencia (Idempotency-Key del contrato v1.2.0): reintentos seguros de
+	// los comandos que mueven valor. Resuelve la cuenta con el mismo
+	// sessionIdentity; se monta por dentro de RequireAuth sobre los POST/DELETE
+	// de contracts.
+	idemMW := idempotency.NewMiddleware(deps.Pool, sessionIdentity{}, deps.Registry, deps.Logger)
+
 	api := http.NewServeMux()
 
 	// Auth (contrato: POST /auth/sessions es público con rate limit de login
@@ -125,7 +167,39 @@ func BuildHandler(deps Deps) (http.Handler, error) {
 	api.Handle(APIPrefix+"/ledger/",
 		http.StripPrefix(APIPrefix, authMW.RequireAuth(authMW.RateLimitAPI(ledgerMux))))
 
+	// Contracts: mismo patrón que ledger (sesión + rate limit), y además el
+	// protocolo de idempotencia SOLO sobre los comandos mutantes (POST/DELETE);
+	// las lecturas pasan intactas. La cadena queda RequireAuth → RateLimitAPI →
+	// idempotencia → mux, de modo que el resolver de cuenta ve el Principal.
+	contractsMux := http.NewServeMux()
+	contractsHandlers.Register(contractsMux)
+	api.Handle(APIPrefix+"/contracts/",
+		http.StripPrefix(APIPrefix, authMW.RequireAuth(authMW.RateLimitAPI(idempotentWrites(idemMW, contractsMux)))))
+
+	// Market: lectura protegida por sesión y rate limit (sin idempotencia: no
+	// muta estado).
+	marketMux := http.NewServeMux()
+	marketHandlers.Register(marketMux)
+	api.Handle(APIPrefix+"/market/",
+		http.StripPrefix(APIPrefix, authMW.RequireAuth(authMW.RateLimitAPI(marketMux))))
+
 	return contractErrors(api), nil
+}
+
+// idempotentWrites aplica el protocolo Idempotency-Key únicamente a los
+// comandos que mueven valor (POST/DELETE); las lecturas (GET) pasan sin coste.
+// Así una GET nunca queda cacheada por una clave de idempotencia, que solo
+// tiene sentido en mutaciones.
+func idempotentWrites(mw *idempotency.Middleware, next http.Handler) http.Handler {
+	guarded := mw.Wrap(next)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost, http.MethodDelete:
+			guarded.ServeHTTP(w, r)
+		default:
+			next.ServeHTTP(w, r)
+		}
+	})
 }
 
 // ─── Meta del contrato (reloj de simulación) ────────────────────────────────

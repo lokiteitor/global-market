@@ -1,8 +1,11 @@
 // El binario engine ejecuta el motor de simulación: la plataforma base
-// (healthz/readyz/metrics con la cadena de middlewares) y el reloj de
-// simulación (internal/sim/clock), único reloj lógico del dominio (GDD 1.1):
-// ancla persistida en world.sim_clock, ratio 24x y derivación analítica.
-// La cola de eventos se monta sobre esta base en la fase siguiente.
+// (healthz/readyz/metrics con la cadena de middlewares), el reloj de
+// simulación (internal/sim/clock) —único reloj lógico del dominio (GDD 1.1):
+// ancla persistida en world.sim_clock, ratio 24x y derivación analítica— y los
+// procesos en segundo plano del Incremento 1: los tres barridos del ciclo CCRI
+// (internal/contracts) y el agregador OHLC del historial de mercado
+// (internal/market), ambos guiados por el reloj de simulación y detenidos de
+// forma graceful al recibir la señal de apagado.
 package main
 
 import (
@@ -11,14 +14,30 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
+	"sync"
 	"syscall"
+	"time"
 
+	"github.com/lokiteitor/global-market/backend/internal/contracts"
+	"github.com/lokiteitor/global-market/backend/internal/market"
+	"github.com/lokiteitor/global-market/backend/internal/outbox"
 	"github.com/lokiteitor/global-market/backend/internal/platform/config"
 	"github.com/lokiteitor/global-market/backend/internal/platform/metrics"
 	"github.com/lokiteitor/global-market/backend/internal/platform/service"
 	"github.com/lokiteitor/global-market/backend/internal/sim/clock"
 	"github.com/lokiteitor/global-market/backend/internal/sim/simtime"
 )
+
+// EnvOhlcConsumerInterval es el periodo de polling del consumidor OHLC del
+// outbox, en formato time.ParseDuration. Default 1s. El drenaje encadena lotes
+// llenos sin esperar el intervalo, así que este valor solo acota la latencia
+// en reposo.
+const EnvOhlcConsumerInterval = "II_OHLC_CONSUMER_INTERVAL"
+
+// DefaultOhlcConsumerInterval es el periodo de polling por defecto del
+// consumidor OHLC.
+const DefaultOhlcConsumerInterval = time.Second
 
 func main() {
 	if err := run(); err != nil {
@@ -41,6 +60,11 @@ func run() error {
 	}
 	defer app.Close()
 
+	// Métricas del outbox (emisión desde los sweeps + procesado del consumidor
+	// OHLC): el módulo las registra en el registry de cada binario (outbox.go).
+	outbox.RegisterMetrics(app.Metrics().Registry())
+
+	// ── Reloj de simulación ──────────────────────────────────────────────────
 	clkOpts, err := clock.OptionsFromEnv()
 	if err != nil {
 		return err
@@ -59,5 +83,99 @@ func run() error {
 		slog.Duration("persist_interval", clkOpts.PersistInterval),
 		slog.Duration("refresh_interval", clkOpts.RefreshInterval))
 
-	return app.Run(ctx)
+	// ── Worker CCRI: los tres barridos (sorteo, TTL, liquidación) ─────────────
+	contractsOpts, err := contracts.OptionsFromEnv()
+	if err != nil {
+		return err
+	}
+	workerOpts, err := contracts.WorkerOptionsFromEnv()
+	if err != nil {
+		return err
+	}
+	contractsSvc, err := contracts.NewService(app.Pool(), clockSimSource{clk}, contractsOpts, app.Logger(), app.Metrics().Registry())
+	if err != nil {
+		return err
+	}
+	worker, err := contracts.NewWorker(contractsSvc, workerOpts, app.Logger(), app.Metrics().Registry())
+	if err != nil {
+		return err
+	}
+
+	// ── Agregador OHLC: consumidor del outbox de contract.settled ────────────
+	marketOpts, err := market.OptionsFromEnv()
+	if err != nil {
+		return err
+	}
+	consumerInterval, err := ohlcConsumerInterval()
+	if err != nil {
+		return err
+	}
+	aggregator, err := market.NewAggregator(marketOpts, market.NewMetrics(app.Metrics().Registry()), app.Logger())
+	if err != nil {
+		return err
+	}
+	ohlcConsumer := aggregator.NewConsumer(app.Pool(), outbox.WithLogger(app.Logger()))
+
+	// ── Arranque de los procesos en segundo plano ────────────────────────────
+	// Comparten el ctx de la señal: al apagar, ambos bucles observan ctx.Done()
+	// y retornan nil (parada limpia). wg los sincroniza antes de cerrar el pool.
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		if err := worker.Run(ctx); err != nil {
+			app.Logger().Error("contracts: el worker de barridos terminó con error", slog.Any("error", err))
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		if err := ohlcConsumer.Run(ctx, consumerInterval, aggregator.Handle); err != nil {
+			app.Logger().Error("market: el consumidor OHLC terminó con error", slog.Any("error", err))
+		}
+	}()
+
+	app.Logger().Info("procesos del Incremento 1 en marcha",
+		slog.Duration("contracts_sweep_interval", workerOpts.SweepInterval),
+		slog.Int("contracts_sweep_batch", workerOpts.BatchSize),
+		slog.Int64("draw_window_seconds", contractsOpts.DrawWindowSeconds),
+		slog.Int64("micro_window_seconds", contractsOpts.MicroWindowSeconds),
+		slog.Int64("publication_ttl_sim_seconds", contractsOpts.PublicationTTLSimSeconds),
+		slog.Int("compensation_bp", contractsOpts.CompensationBP),
+		slog.String("ohlc_consumer", market.ConsumerName),
+		slog.Duration("ohlc_consumer_interval", consumerInterval),
+		slog.Int64("ohlc_bucket_sim_seconds", marketOpts.OhlcBucketSimSeconds))
+
+	// Sirve HTTP (sondas/métricas) hasta la señal; entonces app.Run apaga el
+	// servidor de forma graceful. Al retornar, el ctx ya está cancelado y los
+	// procesos en segundo plano están parando: wg.Wait espera su cierre limpio.
+	runErr := app.Run(ctx)
+	wg.Wait()
+	app.Logger().Info("procesos del Incremento 1 detenidos")
+	return runErr
+}
+
+// clockSimSource adapta el reloj del motor (*clock.Clock, con Now() sin
+// contexto) a la interfaz contracts.SimSource (Now(ctx)). El worker deriva de
+// él los sim-time de dominio (published_at_sim, deadline_sim); las ventanas
+// wall-clock del sorteo usan now() de la BD, ajenas a este reloj.
+type clockSimSource struct{ clk *clock.Clock }
+
+func (c clockSimSource) Now(context.Context) simtime.SimTime { return c.clk.Now() }
+
+// ohlcConsumerInterval lee II_OHLC_CONSUMER_INTERVAL (time.ParseDuration) con
+// su default; un valor inválido o no positivo devuelve error (la configuración
+// rota debe impedir el arranque).
+func ohlcConsumerInterval() (time.Duration, error) {
+	v := strings.TrimSpace(os.Getenv(EnvOhlcConsumerInterval))
+	if v == "" {
+		return DefaultOhlcConsumerInterval, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return 0, fmt.Errorf("engine: %s inválido %q (formato de time.ParseDuration): %w", EnvOhlcConsumerInterval, v, err)
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("engine: %s debe ser una duración positiva (actual %s)", EnvOhlcConsumerInterval, d)
+	}
+	return d, nil
 }

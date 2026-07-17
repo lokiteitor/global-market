@@ -1,13 +1,20 @@
 // Package seed siembra el mundo mínimo de desarrollo (target `make seed`,
 // ADR-016): la fila única de world.sim_clock, la cuenta de sistema del banco
-// central con sus cuentas contables de emisión y sink, y una cuenta demo con
-// credencial argon2id, caja del ledger y capital semilla asentado como
-// emisión explícita del banco central (GDD 5.5, ADR-010).
+// central con sus cuentas contables de emisión y sink, dos corporaciones
+// humanas (Demo y Norte Trading) con credencial argon2id, caja del ledger y
+// capital semilla, y el mundo mínimo del Incremento 1 (GDD 5.3): la región
+// Askadia, el catálogo de productos (iron_ore, coal) y de edificación
+// (warehouse), una implantación completa por corporación (concesión de suelo
+// → almacén operativo → nodo del grafo logístico) y el stock inicial asentado
+// a la vez en el plano físico (world.building_inventories) y en el contable
+// (+N stock_free / -N world_source, ADR-022).
 //
 // Es una biblioteca de composición (como internal/gateway): la única capa que
-// conoce a la vez auth, ledger y el reloj — los módulos no se importan entre
-// sí (SAD v1.1 §7). La consumen cmd/seed y los tests E2E. Cada paso es
-// idempotente: re-ejecutar el seed nunca duplica datos ni re-emite capital.
+// conoce a la vez auth, ledger, world y el reloj — los módulos no se importan
+// entre sí (SAD v1.1 §7). La consumen cmd/seed y los tests E2E. Cada paso es
+// idempotente por clave natural (name/code): re-ejecutar el seed nunca
+// duplica datos, re-emite capital ni re-asienta stock, y los IDs sembrados
+// son estables entre ejecuciones.
 package seed
 
 import (
@@ -34,22 +41,30 @@ const (
 	// EnvDemoSecret es el secreto de la cuenta demo. Default "demo-secret-dev"
 	// (solo entornos de desarrollo: el seed rehúsa ejecutarse en prod).
 	EnvDemoSecret = "II_SEED_DEMO_SECRET"
+	// EnvTraderName es el nombre de la segunda corporación humana.
+	// Default "Norte Trading".
+	EnvTraderName = "II_SEED_TRADER_NAME"
+	// EnvTraderSecret es el secreto de la segunda corporación.
+	// Default "norte-secret-dev" (solo desarrollo).
+	EnvTraderSecret = "II_SEED_TRADER_SECRET"
 )
 
 // Valores por defecto documentados.
 const (
-	DefaultDemoName   = "Demo"
-	DefaultDemoSecret = "demo-secret-dev"
+	DefaultDemoName     = "Demo"
+	DefaultDemoSecret   = "demo-secret-dev"
+	DefaultTraderName   = "Norte Trading"
+	DefaultTraderSecret = "norte-secret-dev"
 )
 
 // CentralBankName es el nombre reservado de la cuenta de sistema del banco
 // central (único por lower(name): es la clave de idempotencia).
 const CentralBankName = "Banco Central"
 
-// DemoSeedCapital es el capital semilla de la cuenta demo, en unidades
-// menores de dinero (int64, nunca float). Se asienta UNA sola vez como
-// emisión balanceada: +capital caja demo / -capital emisión del banco.
-const DemoSeedCapital int64 = 1_000_000
+// CorpSeedCapital es el capital semilla de cada corporación humana, en
+// unidades menores de dinero (int64, nunca float). Se asienta UNA sola vez
+// por corporación como emisión balanceada: +capital caja / -capital emisión.
+const CorpSeedCapital int64 = 1_000_000
 
 // Options es la configuración del seed.
 type Options struct {
@@ -57,6 +72,11 @@ type Options struct {
 	DemoName string
 	// DemoSecret es el secreto de la cuenta demo (II_SEED_DEMO_SECRET).
 	DemoSecret string
+	// TraderName es el nombre de la segunda corporación (II_SEED_TRADER_NAME).
+	TraderName string
+	// TraderSecret es el secreto de la segunda corporación
+	// (II_SEED_TRADER_SECRET).
+	TraderSecret string
 	// Ledger es la configuración del módulo ledger que usa el seed.
 	Ledger ledger.Options
 }
@@ -68,21 +88,36 @@ func OptionsFromEnv() (Options, error) {
 	if err != nil {
 		return Options{}, err
 	}
-	name := strings.TrimSpace(os.Getenv(EnvDemoName))
-	if name == "" {
-		name = DefaultDemoName
+	return Options{
+		DemoName:     nameOrDefault(EnvDemoName, DefaultDemoName),
+		DemoSecret:   secretOrDefault(EnvDemoSecret, DefaultDemoSecret),
+		TraderName:   nameOrDefault(EnvTraderName, DefaultTraderName),
+		TraderSecret: secretOrDefault(EnvTraderSecret, DefaultTraderSecret),
+		Ledger:       ledgerOpts,
+	}, nil
+}
+
+// nameOrDefault lee un nombre del entorno (recortado); vacío = default.
+func nameOrDefault(key, def string) string {
+	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+		return v
 	}
-	secret := os.Getenv(EnvDemoSecret)
-	if secret == "" {
-		secret = DefaultDemoSecret
+	return def
+}
+
+// secretOrDefault lee un secreto del entorno tal cual (sin recortar: un
+// secreto puede contener espacios); vacío = default.
+func secretOrDefault(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
 	}
-	return Options{DemoName: name, DemoSecret: secret, Ledger: ledgerOpts}, nil
+	return def
 }
 
 // Run ejecuta el seed completo sobre el pool. Cada elemento se crea solo si
-// no existe; el capital semilla se emite únicamente cuando la caja demo acaba
-// de crearse. La guarda de entorno (rehusar en prod) es del composition root
-// (cmd/seed), que es quien conoce II_ENV.
+// no existe (clave natural: name/code); el capital semilla y el stock inicial
+// se asientan una única vez. La guarda de entorno (rehusar en prod) es del
+// composition root (cmd/seed), que es quien conoce II_ENV.
 func Run(ctx context.Context, pool *pgxpool.Pool, opts Options, logger *slog.Logger) error {
 	if pool == nil {
 		return errors.New("seed: el pool de BD es obligatorio")
@@ -93,23 +128,32 @@ func Run(ctx context.Context, pool *pgxpool.Pool, opts Options, logger *slog.Log
 	if opts.DemoName == "" || opts.DemoSecret == "" {
 		return errors.New("seed: DemoName y DemoSecret no pueden estar vacíos")
 	}
+	if opts.TraderName == "" || opts.TraderSecret == "" {
+		return errors.New("seed: TraderName y TraderSecret no pueden estar vacíos")
+	}
 	if err := checkSchema(ctx, pool); err != nil {
 		return err
 	}
 
-	// (a) Reloj de simulación: fila única en génesis si no existía.
+	// (a) Reloj de simulación: fila única en génesis si no existía. El resto
+	// del seed asienta con el sim-time derivado de este ancla.
 	store := clock.NewStore(pool)
 	if err := store.EnsureExists(ctx); err != nil {
 		return err
 	}
 	logger.Info("world.sim_clock garantizado (génesis si no existía, ratio 24x)")
+	simNow, err := currentSimTime(ctx, store)
+	if err != nil {
+		return err
+	}
 
 	repo := auth.NewPGRepository(pool)
 	ledgerSvc := ledger.NewService(pool, opts.Ledger, nil)
 
 	// (b) Banco central: cuenta de sistema sin canal privilegiado
-	// (Arquitectura §9) con sus cuentas de emisión (única que puede quedar
-	// negativa: es la masa emitida) y sink (destrucción de valor, GDD 5.5).
+	// (Arquitectura §9) con sus cuentas de emisión (única cuenta monetaria que
+	// puede quedar negativa: es la masa emitida) y sink (destrucción de valor,
+	// GDD 5.5). Las world_source por producto (ADR-022) se crean con el stock.
 	bank, _, err := ensureAuthAccount(ctx, repo, "system", CentralBankName, logger)
 	if err != nil {
 		return err
@@ -122,89 +166,151 @@ func Run(ctx context.Context, pool *pgxpool.Pool, opts Options, logger *slog.Log
 		return err
 	}
 
-	// (c) Cuenta humana demo con credencial argon2id (crypto de internal/auth,
-	// nunca duplicada aquí), caja del ledger y capital semilla.
-	demo, _, err := ensureAuthAccount(ctx, repo, "human", opts.DemoName, logger)
+	// (c) Corporaciones humanas jugables: credencial argon2id, caja del
+	// ledger y capital semilla (una emisión por corporación, jamás re-emitida).
+	demo, err := ensureCorporation(ctx, repo, ledgerSvc, emission, opts.DemoName, opts.DemoSecret, simNow, logger)
 	if err != nil {
 		return err
 	}
-	secretHash, err := auth.HashSecret(opts.DemoSecret)
+	trader, err := ensureCorporation(ctx, repo, ledgerSvc, emission, opts.TraderName, opts.TraderSecret, simNow, logger)
 	if err != nil {
 		return err
-	}
-	credCreated, err := repo.EnsureCredential(ctx, demo.ID, secretHash)
-	if err != nil {
-		return err
-	}
-	if credCreated {
-		logger.Info("credencial demo creada (argon2id)", slog.String("account", demo.Name))
-	} else {
-		logger.Info("credencial demo ya existía: omitida (no se sobrescribe)",
-			slog.String("account", demo.Name))
 	}
 
-	// La caja demo es la clave de idempotencia del capital semilla: si ya
-	// existía, el capital ya se emitió en un seed anterior y no se re-emite.
-	existing, _, err := ledgerSvc.ListAccounts(ctx, demo.ID, ledger.AccountFilter{
-		Kind: ledger.AccountKindCash, Limit: 1,
-	})
+	// (d) Mundo estático del Incremento 1: región, productos y tipo de almacén.
+	cat, err := ensureWorldCatalog(ctx, pool, logger)
 	if err != nil {
 		return err
-	}
-	if len(existing) > 0 {
-		logger.Info("caja demo ya existía: capital semilla omitido",
-			slog.String("account", demo.Name),
-			slog.String("ledger_account_id", existing[0].ID.String()),
-			slog.Int64("balance", existing[0].Balance))
-		logger.Info("seed completado")
-		return nil
 	}
 
-	cash, err := ledgerSvc.EnsureCashAccount(ctx, demo.ID)
-	if err != nil {
-		return err
+	// (e) Implantación física + stock inicial por corporación, en ubicaciones
+	// separadas dentro de Askadia para que los contratos BUY con tránsito
+	// (origen ≠ destino) sean posibles desde el primer día.
+	placements := []struct {
+		corp             auth.Account
+		centerX, centerY int64
+	}{
+		{demo, 10_000, 10_000},
+		{trader, 30_000, 30_000},
 	}
-	logger.Info("caja demo creada", slog.String("ledger_account_id", cash.ID.String()))
+	for _, p := range placements {
+		site, err := ensureCorpSite(ctx, pool, cat, p.corp, p.centerX, p.centerY, logger)
+		if err != nil {
+			return err
+		}
+		if err := ensureInitialStock(ctx, pool, ledgerSvc, bank, p.corp, site, cat, simNow, logger); err != nil {
+			return err
+		}
+	}
 
-	simNow, err := currentSimTime(ctx, store)
-	if err != nil {
-		return err
-	}
-	ref := demo.ID
-	txID, err := ledgerSvc.PostTransaction(ctx, ledger.TransactionKindSeedCapital, simNow, &ref,
-		"Capital semilla de la cuenta demo (emisión del banco central)",
-		[]ledger.EntryInput{
-			{AccountID: cash.ID, Amount: DemoSeedCapital},
-			{AccountID: emission.ID, Amount: -DemoSeedCapital},
-		})
-	if err != nil {
-		return err
-	}
-	logger.Info("capital semilla asentado",
-		slog.String("account", demo.Name),
-		slog.Int64("amount", DemoSeedCapital),
-		slog.String("transaction_id", txID.String()),
-		slog.Int64("sim_time_at", int64(simNow)))
 	logger.Info("seed completado")
 	return nil
 }
 
-// checkSchema comprueba que las migraciones ya crearon las tablas que el seed
-// escribe, para guiar al target correcto (`make migrate-up`) en lugar de
-// fallar con un error SQL críptico a mitad de siembra.
+// checkSchema comprueba que las migraciones ya crearon las tablas y tipos que
+// el seed escribe, para guiar al target correcto (`make migrate-up`) en lugar
+// de fallar con un error SQL críptico a mitad de siembra.
 func checkSchema(ctx context.Context, pool *pgxpool.Pool) error {
 	var ok bool
 	err := pool.QueryRow(ctx, `
-		SELECT to_regclass('auth.accounts')   IS NOT NULL
-		   AND to_regclass('ledger.accounts') IS NOT NULL
-		   AND to_regclass('world.sim_clock') IS NOT NULL`).Scan(&ok)
+		SELECT to_regclass('auth.accounts')              IS NOT NULL
+		   AND to_regclass('ledger.accounts')            IS NOT NULL
+		   AND to_regclass('world.sim_clock')            IS NOT NULL
+		   AND to_regclass('world.regions')              IS NOT NULL
+		   AND to_regclass('world.products')             IS NOT NULL
+		   AND to_regclass('world.building_types')       IS NOT NULL
+		   AND to_regclass('world.land_concessions')     IS NOT NULL
+		   AND to_regclass('world.buildings')            IS NOT NULL
+		   AND to_regclass('world.building_inventories') IS NOT NULL
+		   AND to_regclass('world.network_nodes')        IS NOT NULL`).Scan(&ok)
 	if err != nil {
 		return fmt.Errorf("seed: verificando el esquema: %w", err)
 	}
 	if !ok {
 		return errors.New("seed: esquema incompleto: ejecuta antes `make migrate-up`")
 	}
+	// El stock inicial exige la contrapartida física del ledger: el kind
+	// world_source del enum ledger.account_kind (ADR-022, migración 0008).
+	err = pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			  FROM pg_enum e
+			  JOIN pg_type t ON t.oid = e.enumtypid
+			  JOIN pg_namespace n ON n.oid = t.typnamespace
+			 WHERE n.nspname = 'ledger' AND t.typname = 'account_kind'
+			   AND e.enumlabel = 'world_source')`).Scan(&ok)
+	if err != nil {
+		return fmt.Errorf("seed: verificando ledger.account_kind: %w", err)
+	}
+	if !ok {
+		return errors.New("seed: falta el kind world_source en ledger.account_kind (ADR-022, migración 0008): ejecuta antes `make migrate-up`")
+	}
 	return nil
+}
+
+// ensureCorporation garantiza una corporación humana jugable completa: cuenta
+// de auth, credencial argon2id (crypto de internal/auth, nunca sobrescrita),
+// caja del ledger y capital semilla emitido por el banco central. La caja es
+// la clave de idempotencia del capital: si ya existía, el capital ya se
+// emitió en un seed anterior y no se re-emite.
+func ensureCorporation(ctx context.Context, repo *auth.PGRepository, ledgerSvc *ledger.Service, emission ledger.Account, name, secret string, simNow simtime.SimTime, logger *slog.Logger) (auth.Account, error) {
+	acc, _, err := ensureAuthAccount(ctx, repo, "human", name, logger)
+	if err != nil {
+		return auth.Account{}, err
+	}
+	secretHash, err := auth.HashSecret(secret)
+	if err != nil {
+		return auth.Account{}, err
+	}
+	credCreated, err := repo.EnsureCredential(ctx, acc.ID, secretHash)
+	if err != nil {
+		return auth.Account{}, err
+	}
+	if credCreated {
+		logger.Info("credencial creada (argon2id)", slog.String("account", acc.Name))
+	} else {
+		logger.Info("credencial ya existía: omitida (no se sobrescribe)",
+			slog.String("account", acc.Name))
+	}
+
+	existing, _, err := ledgerSvc.ListAccounts(ctx, acc.ID, ledger.AccountFilter{
+		Kind: ledger.AccountKindCash, Limit: 1,
+	})
+	if err != nil {
+		return auth.Account{}, err
+	}
+	if len(existing) > 0 {
+		logger.Info("caja ya existía: capital semilla omitido",
+			slog.String("account", acc.Name),
+			slog.String("ledger_account_id", existing[0].ID.String()),
+			slog.Int64("balance", existing[0].Balance))
+		return acc, nil
+	}
+
+	cash, err := ledgerSvc.EnsureCashAccount(ctx, acc.ID)
+	if err != nil {
+		return auth.Account{}, err
+	}
+	logger.Info("caja creada",
+		slog.String("account", acc.Name),
+		slog.String("ledger_account_id", cash.ID.String()))
+
+	ref := acc.ID
+	txID, err := ledgerSvc.PostTransaction(ctx, ledger.TransactionKindSeedCapital, simNow, &ref,
+		fmt.Sprintf("Capital semilla de %s (emisión del banco central)", acc.Name),
+		[]ledger.EntryInput{
+			{AccountID: cash.ID, Amount: CorpSeedCapital},
+			{AccountID: emission.ID, Amount: -CorpSeedCapital},
+		})
+	if err != nil {
+		return auth.Account{}, err
+	}
+	logger.Info("capital semilla asentado",
+		slog.String("account", acc.Name),
+		slog.Int64("amount", CorpSeedCapital),
+		slog.String("transaction_id", txID.String()),
+		slog.Int64("sim_time_at", int64(simNow)))
+	return acc, nil
 }
 
 // ensureAuthAccount devuelve la cuenta de auth con ese nombre, creándola con
