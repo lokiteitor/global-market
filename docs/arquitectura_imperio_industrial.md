@@ -4,9 +4,9 @@
 
 **Proyecto:** Imperio Industrial — Simulación Económica MMO
 
-**Versión del Documento:** 1.1 (derivada del GDD/SAD v1.3)
+**Versión del Documento:** 1.2 (derivada del GDD/SAD v1.3)
 
-**Fecha:** 2026-07-16
+**Fecha:** 2026-07-17
 
 **Responsables:** Equipo de Arquitectura / Backend
 
@@ -101,7 +101,7 @@ El sistema define **7 servicios lógicos y 2 jobs de plataforma** cuyas frontera
 | Componente lógico | Responsabilidad |
 |-----|-----------------|
 | Auth/Identity | Autenticación, sesiones, gestión de cuentas. Jugadores y bots comparten el mismo modelo de cuenta. |
-| World Simulation Service (por shard lógico) | Física de edificios, producción, recursos naturales y **simulación de tránsito completa** (movimiento, averías, congestión) de los vehículos dentro de su macro-región. Cola de prioridad de eventos y sim-time propios por shard. |
+| World Simulation Service (por shard lógico) | Física de edificios, producción, recursos naturales y **simulación de tránsito completa** (movimiento, averías, congestión) de los vehículos dentro de su macro-región. Cola de prioridad de eventos y sim-time propios por shard. **Materializado en el Incremento 2** como `internal/world` (subpaquetes `catalog`/`land`/`buildings`/`production`) en su parte industrial: catálogos, suelo, edificios y producción por lotes; el tránsito queda para un incremento posterior (ver §5.5). |
 | Contract Service | Tablón global de contratos, ventana de sorteo, bloqueo triple de garantías (stock reservado + garantía monetaria + escrow), verificación de entrega y liquidación pro-rata, para los dos tipos de contrato (CCRI de bienes y CCRI-Flete). Historial de contratos liquidados (OHLC). |
 | Logistics Service | Planificación **sin estado de tránsito**: topología del grafo global, pathfinding jerárquico (HPA*-style), ETAs a partir de la congestión suavizada (EMA) que publican los shards. No simula vehículos. |
 | Economy Balancer Service | Monitoreo macro (masa monetaria vs. PIB simulado), ajuste de impuestos/cánones dentro de rangos, curvas de demanda de ciudades, costo laboral regional por fórmula. Actúa como **agente decisor de las ciudades**, publicando sus solicitudes de compra por la API estándar del Contract Service (sin canal privilegiado). |
@@ -150,6 +150,15 @@ El primer incremento del backend hace explícitas dos consecuencias del monolito
 - **Rol dual del módulo `contracts` en runtime.** El Contract Service es un único módulo lógico (fronteras firmes, sin imports cruzados) pero se materializa en **dos superficies de ejecución** dentro del monolito: sus **handlers HTTP** los monta el proceso *gateway* (publicar, aceptar, consultar el tablón y los contratos propios), mientras que sus **barridos periódicos** —resolución de la ventana de sorteo, expiración de publicaciones por TTL de sim-time y liquidación de contratos al vencer— los ejecuta el proceso *engine* como un *worker* (`II_CONTRACTS_SWEEP_INTERVAL`). Ambos comparten el mismo esquema `ledger` y las mismas invariantes en SQL; la partición es de *dónde corre cada entrada*, no de propiedad. Es exactamente la disciplina que hace mecánica la extracción futura: el día que gateway y engine sean procesos separados, este reparto ya está hecho.
 - **Patrón outbox ya materializado.** La mensajería entre módulos deja de ser solo diseño: `outbox.Emit(ctx, tx, …)` inserta el evento **en la misma transacción** que el cambio de estado que lo causa (nunca divergen), y `outbox.NewConsumer(name, eventTypes).Run(…)` procesa los eventos **en orden de `seq` avanzando su cursor dentro de la misma transacción del handler** — *exactly-once por consumidor*, reejecutar un lote no duplica su efecto. El **primer consumidor real es `ohlc_aggregator`** (módulo `market`), suscrito a `contract.settled`, que construye las velas OHLC por región de destino. El resto de módulos (Notification Gateway, Balancer) se enganchan al mismo mecanismo sin tocar a los emisores.
 
+### 5.5 Nota de materialización (Incremento 2 — mundo y producción)
+
+El segundo incremento **materializa el World Simulation Service** como el bounded context `internal/world`, cerrando el lazo **construir→producir→vender** contra el ledger y el CCRI del Incremento 1. Confirma tres consecuencias del monolito modular:
+
+- **El World Simulation Service ya es código, no diagrama.** Se organiza en cuatro subpaquetes cohesivos que **comparten un único paquete sqlc del contexto** (`internal/world/sqlcgen`, una sola entrada en `sqlc.yaml`): `world/catalog` (lectura del mundo estático: regiones, productos, tipos de edificio, recetas, yacimientos, ciudades y demanda), `world/land` (concesiones y su mercado secundario de traspasos), `world/buildings` (construcción con validación de emplazamiento server-side, configuración, mejora e inventario físico) y `world/production` (cola de lotes, motor y reconciliación). La **física de tránsito** (vehículos, congestión, averías) del enunciado lógico del servicio **no** entra en este incremento (Fase 1 industrial); su especificación se conserva intacta.
+- **Rol dual gateway↔engine, igual que `contracts`.** El mismo módulo lógico se materializa en dos superficies de ejecución: sus **handlers HTTP** los monta el proceso *gateway* (catálogos, concesiones y traspasos, edificios/mejora/inventario, cola de producción con progreso analítico derivado por consulta), mientras que su **motor event-driven y la reconciliación** los ejecuta el proceso *engine* como *workers* — barrido de construcción diferida (`II_BUILD_SIM_SECONDS`), barrido de producción analítica (`II_PRODUCTION_SWEEP_INTERVAL`, `FOR UPDATE SKIP LOCKED`) y job de reconciliación física↔contable (`II_RECONCILE_INTERVAL`, gauge `ii_reconciliation_discrepancies`, esperado 0). La partición es de *dónde corre cada entrada*, no de propiedad del esquema.
+- **Fronteras firmes y consumo del ledger por el patrón existente.** `world` **no importa** `contracts`/`market`/`auth` ni viceversa (SAD §7); solo `platform` y `sim` son plataforma compartida. El substrato de valor (ledger) se consume **exactamente como en `contracts`**: queries sqlc propias del contexto contra las tablas `ledger.*` (la frontera de módulo es de código Go, no de esquema), con toda operación que mueve valor en `db.RunSerializable` + `outbox.Emit` **en la misma tx**. El dinero estructural va al `sink` del banco central (`build_cost`/`upgrade_cost` como `maintenance`, `canon`, `wage`; la `system_fee` del traspaso), y la producción asienta `production_output`/`consumption` contra `world_source` (ADR-022) moviendo el plano físico (`building_inventories`, `resource_deposits`) y el contable juntos.
+- **Nuevos eventos de dominio por la outbox del mundo:** `concession.granted` / `concession.renewed` / `concession.transferred`; `building.created` / `building.updated` / `building.upgraded` / `building.constructed`; `batch.queued` / `batch.completed` / `batch.paused` / `batch.cancelled`. Los consumidores (Notification Gateway, Balancer) se enganchan sin tocar a los emisores, como con el CCRI. El detalle contable y operativo vive en la sección *v1.3* de `documentacion_base_de_datos.md`.
+
 ---
 
 ## 6. Stack Tecnológico
@@ -190,8 +199,10 @@ global-market/
 │   │   └── seed/                # datos semilla (cmd/bots se añade en su fase — ADR-016/017)
 │   ├── internal/
 │   │   ├── auth/                # identidad y sesiones (humanos y bots); propietario del esquema auth
-│   │   ├── sim/                 # shards: cola de eventos, sim-time, producción, tránsito
+│   │   ├── sim/                 # simtime + reloj: cola de eventos y sim-time compartidos
+│   │   ├── world/               # World Simulation Service (Incremento 2): catalog/land/buildings/production + sqlcgen del contexto
 │   │   ├── contracts/           # Contract Service: tablón, sorteo, garantías, liquidación
+│   │   ├── market/              # consumidores de outbox del CCRI (ohlc_aggregator) — Incremento 1
 │   │   ├── logistics/           # pathfinding jerárquico, ETAs (sin estado de tránsito)
 │   │   ├── balancer/            # Economy Balancer + agente decisor de ciudades
 │   │   ├── ledger/              # acceso al esquema ledger (sqlc); invariantes en SQL
@@ -212,7 +223,7 @@ global-market/
 
 La antigua carpeta `specs/` se disuelve (ADR-016): el contrato OpenAPI vive en `docs/api/openapi.yaml` y los DDL de `specs/schemas/` se convierten en las migraciones reales de `backend/db/migrations` (fuente única de verdad del esquema).
 
-Regla estructural: dentro de `backend/internal/`, los módulos se comunican **solo por interfaces y por la outbox** — sin imports cruzados entre `sim`, `contracts`, `logistics` y `balancer`. Esta disciplina es lo que convierte la extracción futura a procesos separados en una operación mecánica, no en un rediseño.
+Regla estructural: dentro de `backend/internal/`, los módulos se comunican **solo por interfaces y por la outbox** — sin imports cruzados entre `world`, `contracts`, `market`, `logistics` y `balancer` (SAD §7: `world` no importa `contracts`/`market`/`auth` ni viceversa; solo `platform` y `sim` son plataforma compartida importable por todos). El substrato de valor (ledger) se consume con queries sqlc propias de cada contexto contra las tablas `ledger.*`, no por imports cruzados. Esta disciplina es lo que convierte la extracción futura a procesos separados en una operación mecánica, no en un rediseño.
 
 ---
 

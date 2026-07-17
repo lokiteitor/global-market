@@ -102,6 +102,17 @@ type worldCatalog struct {
 	Products        []seededProduct
 }
 
+// productID devuelve el ID del producto sembrado con ese code (false si no está
+// en el catálogo mínimo).
+func (c worldCatalog) productID(code string) (uuid.UUID, bool) {
+	for _, p := range c.Products {
+		if p.code == code {
+			return p.ID, true
+		}
+	}
+	return uuid.Nil, false
+}
+
 // corpSite es la implantación física de una corporación: concesión, almacén
 // operativo y nodo del grafo logístico.
 type corpSite struct {

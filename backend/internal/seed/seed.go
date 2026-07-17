@@ -79,6 +79,12 @@ type Options struct {
 	TraderSecret string
 	// Ledger es la configuración del módulo ledger que usa el seed.
 	Ledger ledger.Options
+	// SkipIndustrialWorld omite el mundo industrial del Incremento 2 (catálogo de
+	// producción, ciudad y yacimiento). Por defecto false: el seed lo incluye. Lo
+	// activan los tests de integración de los subpaquetes world, que aportan sus
+	// PROPIOS fixtures industriales (tipos/recetas/yacimientos con las mismas
+	// claves naturales) y no quieren la versión canónica del seed.
+	SkipIndustrialWorld bool
 }
 
 // OptionsFromEnv construye las Options desde el entorno con los defaults
@@ -203,6 +209,16 @@ func Run(ctx context.Context, pool *pgxpool.Pool, opts Options, logger *slog.Log
 		}
 	}
 
+	// (f) Mundo industrial del Incremento 2: catálogo de producción (steel_ingot,
+	// iron_mine, blast_furnace), recetas (mine_iron, smelt_steel), la ciudad
+	// consumidora Nueva Askadia con su demanda y el yacimiento finito de iron_ore
+	// en una parcela libre reservada para levantar una mina.
+	if !opts.SkipIndustrialWorld {
+		if err := ensureIndustrialWorld(ctx, pool, repo, cat, logger); err != nil {
+			return err
+		}
+	}
+
 	logger.Info("seed completado")
 	return nil
 }
@@ -222,7 +238,12 @@ func checkSchema(ctx context.Context, pool *pgxpool.Pool) error {
 		   AND to_regclass('world.land_concessions')     IS NOT NULL
 		   AND to_regclass('world.buildings')            IS NOT NULL
 		   AND to_regclass('world.building_inventories') IS NOT NULL
-		   AND to_regclass('world.network_nodes')        IS NOT NULL`).Scan(&ok)
+		   AND to_regclass('world.network_nodes')        IS NOT NULL
+		   AND to_regclass('world.recipes')              IS NOT NULL
+		   AND to_regclass('world.recipe_ingredients')   IS NOT NULL
+		   AND to_regclass('world.resource_deposits')    IS NOT NULL
+		   AND to_regclass('world.cities')               IS NOT NULL
+		   AND to_regclass('world.city_demand')          IS NOT NULL`).Scan(&ok)
 	if err != nil {
 		return fmt.Errorf("seed: verificando el esquema: %w", err)
 	}

@@ -75,7 +75,7 @@ func TestGatewayE2E(t *testing.T) {
 		Pool:     pool,
 		Logger:   logger,
 		Registry: prometheus.NewRegistry(),
-		Options: gateway.Options{
+		Options: withWorldDefaults(gateway.Options{
 			Auth: auth.Options{
 				LoginPerMin: auth.DefaultRateLoginPerMin,
 				APIRPS:      auth.DefaultRateAPIRPS,
@@ -85,7 +85,7 @@ func TestGatewayE2E(t *testing.T) {
 			Contracts:   contracts.DefaultOptions(),
 			Market:      market.DefaultOptions(),
 			ClockReader: clock.ReaderOptions{CacheTTL: 0}, // relectura del ancla por petición
-		},
+		}),
 	})
 	if err != nil {
 		t.Fatalf("BuildHandler: %v", err)

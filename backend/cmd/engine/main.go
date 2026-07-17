@@ -2,10 +2,12 @@
 // (healthz/readyz/metrics con la cadena de middlewares), el reloj de
 // simulación (internal/sim/clock) —único reloj lógico del dominio (GDD 1.1):
 // ancla persistida en world.sim_clock, ratio 24x y derivación analítica— y los
-// procesos en segundo plano del Incremento 1: los tres barridos del ciclo CCRI
-// (internal/contracts) y el agregador OHLC del historial de mercado
-// (internal/market), ambos guiados por el reloj de simulación y detenidos de
-// forma graceful al recibir la señal de apagado.
+// procesos en segundo plano: los tres barridos del ciclo CCRI
+// (internal/contracts), el agregador OHLC del historial de mercado
+// (internal/market) y el motor de producción del Incremento 2
+// (internal/world/production: construcción diferida, barrido analítico de lotes
+// y reconciliación física↔contable), todos guiados por el reloj de simulación y
+// detenidos de forma graceful al recibir la señal de apagado.
 package main
 
 import (
@@ -27,6 +29,7 @@ import (
 	"github.com/lokiteitor/global-market/backend/internal/platform/service"
 	"github.com/lokiteitor/global-market/backend/internal/sim/clock"
 	"github.com/lokiteitor/global-market/backend/internal/sim/simtime"
+	"github.com/lokiteitor/global-market/backend/internal/world/production"
 )
 
 // EnvOhlcConsumerInterval es el periodo de polling del consumidor OHLC del
@@ -116,11 +119,23 @@ func run() error {
 	}
 	ohlcConsumer := aggregator.NewConsumer(app.Pool(), outbox.WithLogger(app.Logger()))
 
+	// ── Motor de producción (Incremento 2): construcción diferida, barrido
+	//    analítico de lotes vencidos y reconciliación física↔contable (ADR-004),
+	//    todo con el mismo reloj de simulación que los barridos CCRI ──────────
+	productionWorkerOpts, err := production.WorkerOptionsFromEnv()
+	if err != nil {
+		return err
+	}
+	productionWorker, err := production.NewWorker(app.Pool(), clockSimSource{clk}, productionWorkerOpts, app.Logger(), app.Metrics().Registry())
+	if err != nil {
+		return err
+	}
+
 	// ── Arranque de los procesos en segundo plano ────────────────────────────
-	// Comparten el ctx de la señal: al apagar, ambos bucles observan ctx.Done()
-	// y retornan nil (parada limpia). wg los sincroniza antes de cerrar el pool.
+	// Comparten el ctx de la señal: al apagar, los bucles observan ctx.Done() y
+	// retornan nil (parada limpia). wg los sincroniza antes de cerrar el pool.
 	var wg sync.WaitGroup
-	wg.Add(2)
+	wg.Add(3)
 	go func() {
 		defer wg.Done()
 		if err := worker.Run(ctx); err != nil {
@@ -133,8 +148,14 @@ func run() error {
 			app.Logger().Error("market: el consumidor OHLC terminó con error", slog.Any("error", err))
 		}
 	}()
+	go func() {
+		defer wg.Done()
+		if err := productionWorker.Run(ctx); err != nil {
+			app.Logger().Error("world/production: el motor terminó con error", slog.Any("error", err))
+		}
+	}()
 
-	app.Logger().Info("procesos del Incremento 1 en marcha",
+	app.Logger().Info("procesos del motor en marcha",
 		slog.Duration("contracts_sweep_interval", workerOpts.SweepInterval),
 		slog.Int("contracts_sweep_batch", workerOpts.BatchSize),
 		slog.Int64("draw_window_seconds", contractsOpts.DrawWindowSeconds),
@@ -143,14 +164,18 @@ func run() error {
 		slog.Int("compensation_bp", contractsOpts.CompensationBP),
 		slog.String("ohlc_consumer", market.ConsumerName),
 		slog.Duration("ohlc_consumer_interval", consumerInterval),
-		slog.Int64("ohlc_bucket_sim_seconds", marketOpts.OhlcBucketSimSeconds))
+		slog.Int64("ohlc_bucket_sim_seconds", marketOpts.OhlcBucketSimSeconds),
+		slog.Duration("production_sweep_interval", productionWorkerOpts.SweepInterval),
+		slog.Int("production_sweep_batch", productionWorkerOpts.BatchSize),
+		slog.Int64("build_sim_seconds", productionWorkerOpts.BuildSimSeconds),
+		slog.Duration("reconcile_interval", productionWorkerOpts.ReconcileInterval))
 
 	// Sirve HTTP (sondas/métricas) hasta la señal; entonces app.Run apaga el
 	// servidor de forma graceful. Al retornar, el ctx ya está cancelado y los
 	// procesos en segundo plano están parando: wg.Wait espera su cierre limpio.
 	runErr := app.Run(ctx)
 	wg.Wait()
-	app.Logger().Info("procesos del Incremento 1 detenidos")
+	app.Logger().Info("procesos del motor detenidos")
 	return runErr
 }
 

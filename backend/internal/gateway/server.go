@@ -26,6 +26,10 @@ import (
 	"github.com/lokiteitor/global-market/backend/internal/platform/idempotency"
 	"github.com/lokiteitor/global-market/backend/internal/sim/clock"
 	"github.com/lokiteitor/global-market/backend/internal/sim/simtime"
+	"github.com/lokiteitor/global-market/backend/internal/world/buildings"
+	"github.com/lokiteitor/global-market/backend/internal/world/catalog"
+	"github.com/lokiteitor/global-market/backend/internal/world/land"
+	"github.com/lokiteitor/global-market/backend/internal/world/production"
 )
 
 // APIPrefix es el prefijo de todas las rutas del contrato (servers.url del
@@ -44,6 +48,19 @@ type Options struct {
 	Contracts contracts.Options
 	// Market es la configuración del lado de lectura del módulo market (OHLC).
 	Market market.Options
+	// Catalog es la configuración del subpaquete world/catalog (lectura de
+	// catálogos del mundo: regiones, productos, tipos, recetas, yacimientos,
+	// ciudades y demanda).
+	Catalog catalog.Options
+	// Land es la configuración del subpaquete world/land (concesiones y
+	// traspasos de suelo).
+	Land land.Options
+	// Buildings es la configuración del subpaquete world/buildings
+	// (construcción, mejora, configuración e inventario de edificios).
+	Buildings buildings.Options
+	// Production es la configuración del subpaquete world/production (cola de
+	// producción; el motor vive en el engine).
+	Production production.Options
 	// ClockReader es la caché del lector del reloj de simulación.
 	ClockReader clock.ReaderOptions
 }
@@ -68,6 +85,22 @@ func OptionsFromEnv() (Options, error) {
 	if err != nil {
 		return Options{}, err
 	}
+	catalogOpts, err := catalog.OptionsFromEnv()
+	if err != nil {
+		return Options{}, err
+	}
+	landOpts, err := land.OptionsFromEnv()
+	if err != nil {
+		return Options{}, err
+	}
+	buildingsOpts, err := buildings.OptionsFromEnv()
+	if err != nil {
+		return Options{}, err
+	}
+	productionOpts, err := production.OptionsFromEnv()
+	if err != nil {
+		return Options{}, err
+	}
 	readerOpts, err := clock.ReaderOptionsFromEnv()
 	if err != nil {
 		return Options{}, err
@@ -77,6 +110,10 @@ func OptionsFromEnv() (Options, error) {
 		Ledger:      ledgerOpts,
 		Contracts:   contractsOpts,
 		Market:      marketOpts,
+		Catalog:     catalogOpts,
+		Land:        landOpts,
+		Buildings:   buildingsOpts,
+		Production:  productionOpts,
 		ClockReader: readerOpts,
 	}, nil
 }
@@ -183,18 +220,57 @@ func BuildHandler(deps Deps) (http.Handler, error) {
 	api.Handle(APIPrefix+"/market/",
 		http.StripPrefix(APIPrefix, authMW.RequireAuth(authMW.RateLimitAPI(marketMux))))
 
+	// Contexto world (Incremento 2): catálogos (lectura), suelo (concesiones y
+	// traspasos), edificios (construcción/mejora/inventario/configuración) y la
+	// cola de producción. Los cuatro subpaquetes registran sus rutas world/* en
+	// UN único mux; su SimSource es el mismo lector del reloj que estampa el meta
+	// y su Identity/MetaSource, el Principal de auth y el reloj de simulación
+	// (los subpaquetes no se conocen entre sí: SAD §7). La cadena es idéntica a
+	// contracts — RequireAuth → RateLimitAPI → idempotencia (solo POST/PATCH/
+	// DELETE) → mux — de modo que los comandos que mueven valor (build_cost,
+	// canon, traspaso, encolar/cancelar lotes) son reintentables sin duplicar y
+	// las lecturas pasan sin coste.
+	catalogSvc := catalog.NewService(deps.Pool, deps.Options.Catalog)
+	catalogHandlers := catalog.NewHandlers(catalogSvc, meta, deps.Logger)
+
+	landSvc, err := land.NewService(deps.Pool, meta.reader, deps.Options.Land, deps.Logger, deps.Registry)
+	if err != nil {
+		return nil, err
+	}
+	landHandlers := land.NewHandlers(landSvc, sessionIdentity{}, meta, deps.Logger)
+
+	buildingsSvc, err := buildings.NewService(deps.Pool, meta.reader, deps.Options.Buildings, deps.Logger, deps.Registry)
+	if err != nil {
+		return nil, err
+	}
+	buildingsHandlers := buildings.NewHandlers(buildingsSvc, sessionIdentity{}, meta, deps.Logger)
+
+	productionSvc, err := production.NewService(deps.Pool, meta.reader, deps.Options.Production, deps.Logger, deps.Registry)
+	if err != nil {
+		return nil, err
+	}
+	productionHandlers := production.NewHandlers(productionSvc, sessionIdentity{}, meta, deps.Logger)
+
+	worldMux := http.NewServeMux()
+	catalogHandlers.Register(worldMux)
+	landHandlers.Register(worldMux)
+	buildingsHandlers.Register(worldMux)
+	productionHandlers.Register(worldMux)
+	api.Handle(APIPrefix+"/world/",
+		http.StripPrefix(APIPrefix, authMW.RequireAuth(authMW.RateLimitAPI(idempotentWrites(idemMW, worldMux)))))
+
 	return contractErrors(api), nil
 }
 
 // idempotentWrites aplica el protocolo Idempotency-Key únicamente a los
-// comandos que mueven valor (POST/DELETE); las lecturas (GET) pasan sin coste.
-// Así una GET nunca queda cacheada por una clave de idempotencia, que solo
-// tiene sentido en mutaciones.
+// comandos que mutan estado (POST/PATCH/DELETE); las lecturas (GET) pasan sin
+// coste. Así una GET nunca queda cacheada por una clave de idempotencia, que
+// solo tiene sentido en mutaciones.
 func idempotentWrites(mw *idempotency.Middleware, next http.Handler) http.Handler {
 	guarded := mw.Wrap(next)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
-		case http.MethodPost, http.MethodDelete:
+		case http.MethodPost, http.MethodPatch, http.MethodDelete:
 			guarded.ServeHTTP(w, r)
 		default:
 			next.ServeHTTP(w, r)

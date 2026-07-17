@@ -329,12 +329,16 @@ precio_pagado_por_ciudad(producto) =
 - El bucle ciudad↔industria se conserva en ambas direcciones: hacer crecer una ciudad (5.6) reduce el `salario_base` efectivo y eleva el techo de industria local; la cualificación que exigen ciertas recetas se liga al nivel de la ciudad cercana (una receta avanzada requiere una ciudad de nivel suficiente).
 - El **pool finito con asignación por prioridad salarial** (mercado laboral emergente, con plantillas sin cubrir y producción parada) queda como expansión futura (sección 22), a reintroducir si la fórmula resulta estratégicamente plana.
 
+> **Nota de implementación (Incremento 2):** el salario se cobra **por lote** al completarse (sink `wage`, GDD 5.5) con `workers_required × salario_base(ciudad más cercana) × factor_saturación(región)`; el `factor_saturación` sale de `analytics.region_stats.industrial_occupation` con **default 1.0** si no hay fila. Caso borde: si el edificio no tiene ninguna ciudad en radio (o la receta no requiere trabajadores), el salario del lote es **0** y no se pausa por ello (no hay salario que cobrar). Sin fondos para el salario → `paused_no_workers` (5.9).
+
 ### 5.8 Energía: combustible in situ en v1; red eléctrica pospuesta a Fase 3
 
 La v1 **no incluye red eléctrica** (decisión v1.2: era el mayor añadido de alcance de la v1, y su degradación acordada asciende a plan base):
 
 - **Combustible in situ**: cada edificio con consumo energético tiene un almacén de combustible local y **consume combustible físico (carbón/fuel) entregado por logística**, como cualquier otro insumo — la energía no rompe el pilar logístico. El "precio de la energía" de una región es el precio de mercado del combustible más su costo real de transporte hasta cada edificio.
 - **Sin combustible, la producción pausa**: la consecuencia visible para el jugador es la misma que la de un apagón, sin necesidad del subsistema de red.
+
+> **Nota de implementación (Incremento 2):** el "almacén de combustible local" **es** el propio inventario físico del edificio (`world.building_inventories`) de ese producto: el combustible se consume a la vez del inventario físico y del `stock_free` contable (asiento `consumption`), y la columna `buildings.fuel_stock` se mantiene como **espejo** de esa cantidad física (visibilidad), no como un depósito aparte. No hay endpoint de repostaje: el combustible llega como cualquier insumo. Sin combustible suficiente → `paused_no_fuel`. Sin cambio de mecánica.
 - **Red eléctrica regional (Fase 3)**: el diseño acotado de la red se conserva íntegro como especificación para su activación en Fase 3 — centrales construibles (térmicas a combustible físico, hidroeléctricas), líneas de transmisión con huella y mantenimiento, mercado spot regional por orden de mérito (el precio de cierre lo pagan todos los despachados) y recorte rotatorio por prioridad inversa de precio ante déficit. Sin flujos de potencia realistas, sin pérdidas por distancia, sin almacenamiento; interconexiones interregionales y baterías siguen siendo expansión futura (sección 22).
 
 ### 5.9 Insolvencia: parada progresiva, nunca deuda
@@ -350,6 +354,8 @@ saldo = 0
 ```
 
 El jugador que regresa tras una ausencia larga encuentra **menos imperio, nunca una deuda**: sus obligaciones se saldaron con su patrimonio vía el ciclo de embargo. Las garantías de contratos ya bloqueadas no se ven afectadas (ya estaban apartadas en el ledger — el CCRI nunca depende de la solvencia futura de las partes).
+
+> **Nota de implementación (Incremento 2):** de esta cascada, la Fase 1 materializa **los dos primeros escalones** como pausas de producción sin deuda: `paused_no_workers` (salario impagable, 1º) y `paused_no_fuel` (sin combustible, 2º). La degradación por mantenimiento (3º) y el ciclo canon→embargo→subasta (4º, 11.2) se materializan en el Incremento 6; la parte ya construida garantiza el invariante "producción parada, nunca deuda".
 
 ---
 
@@ -378,6 +384,8 @@ Maquinaria + Componentes → Vehículos (Ensambladora)
 - Capacidad de almacenamiento interno (buffer de insumos/productos).
 - Cola de producción (encolar múltiples lotes/recetas).
 - Nivel de mejora (1 a N), afectando líneas paralelas, velocidad y eficiencia.
+
+> **Nota de implementación (Incremento 2):** además del *tiempo de producción por lote* (propio de la receta), la construcción de un edificio consume un **tiempo de construcción fijo** (`II_BUILD_SIM_SECONDS`, default 3600 sim) antes de pasar de `under_construction` a `operational`. Es una simplificación consciente —no se deriva del coste ni del tamaño— y no altera la mecánica; se documenta en `documentacion_base_de_datos.md` (*v1.3*). La `level_curve` de cada tipo materializa la tabla de 6.3 (líneas, velocidad, eficiencia, almacén y coste de mejora por nivel), con defaults `2^(nivel−1)` cuando una clave falta.
 
 ### 6.3 Progresión por escala, no por desbloqueo
 
@@ -477,6 +485,8 @@ No existe propiedad perpetua del suelo. Todo terreno se obtiene como **concesió
 - El **canon de concesión** se paga periódicamente al sistema y es un **sink monetario** estructural (sección 5.5). Su precio varía por ubicación (cercanía a ciudades, recursos, infraestructura) y puede ajustarlo el Economy Balancer dentro de rangos predefinidos.
 - La concesión es **traspasable entre jugadores** (mercado secundario de traspasos, con el sistema cobrando una tasa), pero no acumulable pasivamente: el impago sostenido produce **reversión automática** al sistema.
 - Esto neutraliza el *land-banking* (acaparar suelo sin usarlo es un coste recurrente, no una inversión pasiva) y garantiza que el suelo liberado por jugadores inactivos **rota** hacia jugadores activos — condición necesaria en un mundo que nunca se resetea, y complemento del modelo de expansión territorial (sección 10): el territorio de las expansiones nuevas tampoco puede ser acaparado a perpetuidad por los primeros en llegar.
+
+> **Nota de implementación (Incremento 2):** el canon se cobra al conceder (canon inicial) y en **cada renovación** (canon vigente), siempre como sink `canon`. El traspaso (`POST /world/concession-transfers`) en v1 lo **inicia el titular actual** indicando el destinatario; el precio se debita de la caja del **comprador** (que debe tener fondos) hacia el vendedor (cash→cash) y la tasa del sistema va al sink (asiento `transfer`). Un flujo de oferta/aceptación con consentimiento explícito del comprador queda como mejora futura; la mecánica (traspaso con tasa, reversión por impago) no cambia.
 
 ### 11.2 Ciclo de abandono, embargo y subasta
 

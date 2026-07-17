@@ -78,7 +78,7 @@ func TestEconomicCycleE2E(t *testing.T) {
 		Pool:     pool,
 		Logger:   logger,
 		Registry: prometheus.NewRegistry(),
-		Options: gateway.Options{
+		Options: withWorldDefaults(gateway.Options{
 			Auth: auth.Options{
 				LoginPerMin: auth.DefaultRateLoginPerMin,
 				APIRPS:      auth.DefaultRateAPIRPS,
@@ -88,7 +88,7 @@ func TestEconomicCycleE2E(t *testing.T) {
 			Contracts:   contractsOpts,
 			Market:      market.DefaultOptions(),
 			ClockReader: clock.ReaderOptions{CacheTTL: 0},
-		},
+		}),
 	})
 	if err != nil {
 		t.Fatalf("BuildHandler: %v", err)

@@ -2,9 +2,11 @@
 
 ## MMO de simulación económica, industrial y logística en un mundo único persistente. Decenas de miles de jugadores humanos y una población permanente de bots comparten el mismo mapa, el mismo mercado (tablón global de contratos CCRI) y las mismas reglas, sobre un servidor autoritativo.
 
-**Versión:** 1.2 · **Fecha:** 2026-07-16 · **Fuentes normativas:** GDD/SAD v1.3 (`gdd.md`), Arquitectura v1.1 (`arquitectura_imperio_industrial.md`) y contrato OpenAPI v1.2.0 (`api/openapi.yaml`), con los ADR-016 a ADR-022. Ante discrepancia, prevalece el GDD.
+**Versión:** 1.3 · **Fecha:** 2026-07-17 · **Fuentes normativas:** GDD/SAD v1.3 (`gdd.md`), Arquitectura v1.2 (`arquitectura_imperio_industrial.md`) y contrato OpenAPI v1.2.0 (`api/openapi.yaml`), con los ADR-016 a ADR-022. Ante discrepancia, prevalece el GDD.
 
 > **Cambios de v1.2 (Incremento 1 — núcleo CCRI, Fase 0):** ADR-022 (`ledger.account_kind` = `world_source`, contrapartida física de `production_output`/`consumption`); nueva tabla `public.idempotency_keys` (cabecera `Idempotency-Key` del contrato v1.2.0); migración `0008_ccri_support`; e **interpretaciones operativas del CCRI** (entrega in situ de las ventas, `origin_node_id` del aceptante en las compras, TTL de publicaciones abiertas, reparto de garantía, OHLC por región de destino) — todas en las secciones marcadas *v1.2* más abajo.
+>
+> **Cambios de v1.3 (Incremento 2 — mundo y producción, Fase 1):** cierra el lazo construir→producir→vender sobre el esquema `world` que ya existía desde `0003_world` — **no añade tablas, enums ni migraciones** (el bounded context `internal/world` materializa la *operación* de las tablas ya definidas). Documenta las **interpretaciones operativas del mundo y la producción**: sinks de `build_cost`/`upgrade_cost`/`canon`/`wage` y el traspaso de concesión; asientos de producción/extracción (`production_output`/`consumption` con `world_source` y su gemelo físico `building_inventories` en la misma tx); extracción que decrementa `resource_deposits` (finito); progreso analítico no persistido; reconciliación física↔contable (job del engine, gauge); decisión de combustible (`fuel_stock` como columna espejo); pausas `paused_no_fuel`/`paused_no_workers` como cascada de insolvencia parcial; y tiempo de construcción fijo — todas en la sección *v1.3* más abajo.
 
 ---
 
@@ -83,7 +85,7 @@ Triggers de invariante:      4   (balance por cuenta, doble entrada diferida, in
 Funciones todo-o-nada:       2 documentadas (confirm_contract, settle_contract_prorata)
 ```
 
-*(v1.2 añade `public.idempotency_keys` a las 43 tablas de v1.1 —que a su vez había añadido `auth.account_credentials` y `world.sim_clock` a las 41 de v1.0— y el `ledger.account_kind` `world_source` (ADR-022). La fuente de verdad de todos los conteos —tablas, índices, FKs, CHECKs— son las migraciones de `/backend/db/migrations`, aplicadas contra PostgreSQL 18 + PostGIS 3.6.)*
+*(v1.2 añade `public.idempotency_keys` a las 43 tablas de v1.1 —que a su vez había añadido `auth.account_credentials` y `world.sim_clock` a las 41 de v1.0— y el `ledger.account_kind` `world_source` (ADR-022). **v1.3 (Incremento 2) no altera ningún conteo**: opera las tablas de `world` que ya existían desde `0003_world` sin migraciones nuevas. La fuente de verdad de todos los conteos —tablas, índices, FKs, CHECKs— son las migraciones de `/backend/db/migrations`, aplicadas contra PostgreSQL 18 + PostGIS 3.6.)*
 
 ---
 
@@ -421,6 +423,7 @@ CREATE INDEX ix_deposits_product ON world.resource_deposits (product_id) WHERE r
 
 - El agregado de `remaining_amount` alimenta la métrica de **ritmo de agotamiento global** del Economy Balancer (proyección 6–12 meses para planificar expansiones — métrica de primer nivel, no un añadido).
 - Regiones mineras que se agotan **declinan económicamente por diseño** (auge y decadencia como gameplay).
+- **Extracción (v1.3):** un lote de una mina decrementa `remaining_amount` del yacimiento más cercano del producto de salida dentro de su radio de influencia (`ST_DWithin`); el decremento es finito y se asienta en la misma tx que el alta de stock (`production_output`). Si el yacimiento no cubre el lote, este no avanza (`no_deposit`) — ver *v1.3*.
 
 ---
 
@@ -601,8 +604,9 @@ CREATE INDEX ix_buildings_footprint ON world.buildings USING GIST (footprint);
 
 #### Reglas de Negocio
 
-- Validación de emplazamiento (espacio, acceso, recursos) server-side contra `building_types.placement_rules` y el grafo logístico — error 422 si no se cumple.
-- `fuel_stock`: almacén de combustible local (GDD 5.8); sin combustible la producción pausa.
+- Validación de emplazamiento (espacio, acceso, recursos) server-side contra `building_types.placement_rules` y el grafo logístico — **422 `PLACEMENT_INVALID`** si no se cumple (las cuatro reglas se detallan en *v1.3*).
+- `fuel_stock`: almacén de combustible local (GDD 5.8); sin combustible la producción pausa. **En v1.3 es una columna espejo** del inventario físico (`building_inventories`) del producto combustible: el combustible se consume del propio inventario del edificio, no de un depósito aparte (ver *v1.3*).
+- El alta crea el edificio `under_construction` y su `network_node` (mina→`mine`, resto→`factory`) en el centroide del `footprint`; el coste se asienta al crear (sink `maintenance`). La transición `under_construction → operational` la ejecuta el motor tras un **tiempo fijo** `II_BUILD_SIM_SECONDS` (simplificación consciente — ver *v1.3*).
 - La autorización es por propiedad: una corporación solo comanda sus edificios (403 en caso contrario).
 
 ### 16. `world.building_inventories`
@@ -650,8 +654,10 @@ CREATE INDEX ix_batches_building ON world.production_batches (building_id, queue
 
 #### Reglas de Negocio
 
-- Al completarse un lote, el motor asienta `production_output` en el ledger (alta de stock) y descuenta insumos con `consumption` — el plano físico y el contable se mueven juntos por eventos. La contrapartida de ambos asientos es la cuenta `world_source` del producto (ADR-022, v1.2).
-- `paused_no_fuel` / `paused_no_workers` materializan la cascada de insolvencia (GDD 5.9): la producción pausa, nunca genera deuda.
+- Al completarse un lote, el motor asienta `production_output` en el ledger (alta de stock) y descuenta insumos y combustible con `consumption` — el plano físico (`building_inventories`, `resource_deposits`) y el contable se mueven **juntos en la misma tx** por eventos. La contrapartida de ambos asientos es la cuenta `world_source` del producto (ADR-022, v1.2).
+- El **progreso del lote en curso** (`progress_pct`, `eta_sim` del contrato) es **analítico y NO se persiste**: se deriva de `(started_at_sim, duración efectiva del nivel, simNow)` en el momento de la consulta (ADR-001). Solo `started_at_sim`, `batches_done` y `status` viven en la fila.
+- `paused_no_fuel` / `paused_no_workers` materializan la cascada de insolvencia (GDD 5.9): la producción pausa, nunca genera deuda. La falta de insumos/yacimiento o el almacén lleno **no cambian el enum** (el lote permanece `running` y se reintenta) — ver *v1.3*.
+- La operación completa del motor (barrido, sinks, extracción, reconciliación, combustible) se detalla en la sección **v1.3** más abajo.
 
 ---
 
@@ -978,7 +984,7 @@ CREATE INDEX ix_accounts_reference ON ledger.accounts (reference_id) WHERE refer
 | `stock_free` | Stock comprometible disponible, por (dueño, producto, almacén) |
 | `stock_reserved` | Stock congelado por una publicación o contrato (cuenta espejo) |
 | `custody` | Mercancía en custodia de un CCRI-Flete: el transportista la lleva físicamente pero **no puede venderla** — el ledger lo impide contablemente |
-| `sink` | Destrucción de valor: sanciones, impuestos, canon, mantenimiento (GDD 5.5) |
+| `sink` | Destrucción de valor: sanciones, impuestos, canon, mantenimiento, **coste de construcción/mejora**, **salarios** y la **tasa de traspaso** de concesiones (GDD 5.5). Titular: banco central (una fila `kind = 'sink'`, seed). Destino de las transacciones `maintenance`/`canon`/`wage`/`tax` y de la `system_fee` de `transfer` — ver *v1.3* |
 | `emission` | Contrapartida de emisión **monetaria** del banco central. Puede ser negativa: su saldo negativo es exactamente la masa monetaria emitida, visible para el Economy Balancer |
 | `world_source` | **Contrapartida física del mundo** (ADR-022, v1.2): cuenta de stock (una por producto, titular: banco central) contra la que se asientan alta (`production_output`) y baja (`consumption`) de mercancía. **Única cuenta de stock que puede ser negativa**: su saldo negativo es exactamente el **stock neto emitido al mundo** de ese producto —masa física emitida—, simétrico a `emission` para el dinero. Al ser global no está ligada a almacén (`warehouse_building_id IS NULL`) |
 
@@ -1392,6 +1398,102 @@ Payload JSON documentado (los emite el Contract Service en la misma transacción
 | `contract.confirmed` | Bloqueo triple asentado (nace el contrato) |
 | `contract.delivered` | Llegada (parcial o total) verificada al destino |
 | `contract.settled` | Liquidación — payload: `{"contract_id","product_id","destination_region_id","unit_price":"str","quantity_agreed":"str","quantity_delivered":"str","fill_bp":N,"settled_at_sim":N,"status":"settled\|failed"}` |
+
+---
+
+## ⚙️ Interpretaciones operativas del mundo y la producción (v1.3 — Incremento 2)
+
+Decisiones de diseño **vinculantes** con las que el Incremento 2 (mundo y producción, Fase 1) cierra el lazo **construir→producir→vender** sobre el esquema `world` (que ya existía desde `0003_world`) integrándolo con el ledger y el CCRI del Incremento 1. No cambian el modelo de datos: fijan cómo lo opera el bounded context `internal/world` (`catalog`/`land`/`buildings`/`production`) — sus handlers en el *gateway* y su motor y reconciliación en el *engine*. Son coherentes con el contrato OpenAPI v1.2.0 (sección `world/*`) y con las invariantes SQL del ledger (`0004_ledger`).
+
+### Todo movimiento de valor: `RunSerializable` + `outbox.Emit` en la misma tx
+
+Igual que `internal/contracts`, cada operación que mueve valor corre en **una única transacción `SERIALIZABLE`** (`platform/db.RunSerializable`) que asienta a la vez **el estado del mundo, las partidas del ledger y el evento del outbox**. El substrato de valor (ledger) se consume con queries sqlc propias del contexto (`internal/world/sqlcgen`) contra las tablas `ledger.*` — la frontera de módulo es de código Go, no de esquema. Dinero/stock son `int64` de punto fijo (string en el JSON, jamás float); `qty × price` se valida con `math/big` antes de operar. Las invariantes de dinero/stock (no-negatividad, doble entrada, inmutabilidad) las garantizan los triggers de `0004_ledger`.
+
+### Flujo de dinero: sinks estructurales y el traspaso de concesión
+
+Todo el gasto estructural del mundo es **destrucción de valor** hacia la cuenta `sink` del banco central (una fila `kind = 'sink'`, seed). El traspaso de concesión es la única operación cash→cash del incremento:
+
+| Operación | `transaction_kind` | Partidas | Fuente |
+|---|---|---|---|
+| Construir un edificio (`build_cost`) | `maintenance` | `−cost cash(dueño)` / `+cost sink` | `building_types.build_cost` |
+| Mejorar nivel (`upgrade_cost`) | `maintenance` | `−cost cash(dueño)` / `+cost sink` | `build_cost × factor` de `level_curve` (ver abajo) |
+| Canon de concesión (inicial y cada renovación) | `canon` | `−canon cash(titular)` / `+canon sink` | `land_concessions.canon_amount` |
+| Salario de producción (por lote) | `wage` | `−wage cash(dueño)` / `+wage sink` | fórmula GDD 5.7 (ver abajo) |
+| **Traspaso de concesión** | `transfer` | `−(price+fee) cash(comprador)` / `+price cash(vendedor)` / `+fee sink` | `II_CONCESSION_TRANSFER_FEE_BP` |
+
+- El **coste de construir/mejorar** usa el kind `maintenance` (no hay kind propio de "capex" en el enum; el efecto contable es idéntico: sink). Fondos insuficientes → **422 `INSUFFICIENT_FUNDS`** `{required, available}`; la verificación definitiva sigue siendo el CHECK de no-negatividad de `ledger.accounts`.
+- El **traspaso** (`POST /world/concession-transfers`) en v1 lo invoca el **titular actual (vendedor)** indicando el destinatario; el precio se debita de la caja del **comprador** (que debe tener fondos) y la `system_fee = price × II_CONCESSION_TRANSFER_FEE_BP / 10000` va al sink. Un flujo de oferta/aceptación con consentimiento explícito del comprador es mejora futura.
+
+### Emplazamiento server-side (422 `PLACEMENT_INVALID`)
+
+`POST /world/buildings` valida el `footprint` (Polygon SRID 0, ADR-019) contra cuatro reglas, en el servidor, dentro de la tx:
+
+1. La concesión es **del solicitante** y su `status = 'active'`.
+2. El footprint cae **dentro** de la parcela de la concesión (`ST_Within`).
+3. **No solapa** con footprints de edificios existentes (`ST_Intersects`).
+4. Las `building_types.placement_rules` (JSONB) se cumplen. Soportadas (extensible): `{"near_resource":"<product_code>","max_distance_m":N}` — debe existir un yacimiento de ese producto con `remaining_amount > 0` dentro del radio (`ST_DWithin`) — y `{"requires_node_kind":"mine|factory|…"}`. Una **regla desconocida se ignora con `warn`** (no bloquea; extensibilidad hacia delante).
+
+Al crear, el edificio nace `under_construction` y se le liga una `network_node` en el **centroide** del footprint, con `kind` derivado del tipo (mina→`mine`, resto→`factory`).
+
+### Construcción diferida — tiempo fijo (simplificación consciente)
+
+La transición `under_construction → operational` la ejecuta el **motor del engine** tras un tiempo **fijo** `II_BUILD_SIM_SECONDS` (default 3600 sim) contado desde el alta (`updated_at_sim` como marca), emitiendo `building.constructed`. **Simplificación explícita:** el tiempo de construcción **no** se deriva del coste ni del tamaño; es un parámetro global. Documentar aquí para no confundirlo con el "tiempo de producción por lote" (GDD 6.2), que sí es propio de la receta.
+
+### Mejora de nivel — curva no lineal desde `level_curve`
+
+`POST /world/buildings/{id}/upgrade` sube `level` (≤ `building_types.max_level`) con coste no lineal `cost = build_cost × factor`, donde `factor` sale del `level_curve` JSON del tipo (clave `upgrade_cost_factor` por nivel destino; si falta, `factor = 2^(nivel−1)`). El mismo `level_curve` da los efectos del nivel: `lines`, `speed_mult`, `efficiency_mult`, `storage_mult` (defaults: `lines = 2^(lvl−1)`, `speed_mult`/`storage_mult` crecientes) — coherente con la tabla de GDD 6.3. La **capacidad de almacén efectiva** es `base_storage × storage_mult(nivel)` y la **duración efectiva del lote** aplica `speed_mult`/`efficiency_mult` del nivel sobre `recipes.batch_sim_seconds`.
+
+### Combustible in situ: `fuel_stock` como columna espejo (decisión del módulo)
+
+El "almacén de combustible local" de GDD 5.8 se materializa **como el propio inventario físico del edificio**: el combustible (`recipes.fuel_product_id` / `fuel_per_batch`) se consume a la vez del **inventario físico** (`world.building_inventories`) y del **stock contable** (`stock_free` del dueño, ese producto, ese almacén = edificio), con el asiento `consumption`. `buildings.fuel_stock` se mantiene como **columna espejo** de la cantidad física del producto combustible (visibilidad), no como un depósito contable aparte. **No hay endpoint de repostaje** en el contrato: el combustible llega como cualquier insumo (producción propia o compra CCRI entregada al edificio). Sin combustible suficiente → `paused_no_fuel`.
+
+### Motor de producción (engine, event-driven, progreso analítico)
+
+**No hay tick por entidad.** Un barrido periódico (`II_PRODUCTION_SWEEP_INTERVAL`, default 2 s wall) toma los lotes activos con `FOR UPDATE SKIP LOCKED` (`II_PRODUCTION_SWEEP_BATCH_SIZE` por pasada) y **completa los que vencieron**: `started_at_sim + duración_efectiva ≤ simNow`. Cada lote se procesa en **su propia** tx serializable con `Emit`, de modo que varias instancias del motor pueden correr en paralelo sin pisarse. Al cerrar un batch vencido, en esa única tx y **en este orden de comprobación**:
+
+1. **Combustible físico** (GDD 5.8): si `fuel_per_batch > 0` y el inventario del edificio no lo cubre → `paused_no_fuel` (no produce, no cobra).
+2. **Fondos para el salario** (cash del dueño): si el salario > 0 y la caja no lo cubre → `paused_no_workers` (insolvencia sin deuda, GDD 5.9).
+3. **Insumos / yacimiento**: manufactura → consume inputs de `building_inventories`; extracción (mina) → bloquea y comprueba el yacimiento más cercano. Si faltan → el lote **no avanza** (`no_inputs` / `no_deposit`), permanece `running` y se reintenta.
+4. **Capacidad de almacén**: si `Σ inventario − consumido + producido > base_storage × storage_mult(nivel)` → el lote **no avanza** (`storage_full`), permanece `running`.
+5. Si todo pasa, **muta** (físico + contable juntos, GDD 15.3): consume combustible (`consumption` + `−físico` + refresca `fuel_stock`); consume insumos (`consumption`) o decrementa el yacimiento (`remaining_amount`, finito); produce salidas (`production_output`: `+stock_free` / `−world_source`, ADR-022) y `+building_inventories`; cobra el **salario** al sink (`wage`); `batches_done++` y arranca el reloj del siguiente batch (`started_at_sim = simNow`); si `batches_done == batches_queued` → `completed` y se promueve la siguiente cabeza `queued` a `running`.
+
+**Estados vs. paradas sin estado (ADR-020, sin migración nueva):** solo `paused_no_fuel` y `paused_no_workers` son estados persistidos del enum `world.batch_status` (bloqueos **económicos**, cascada de insolvencia parcial — GDD 5.9). Las carencias **materiales** (`no_inputs`, `no_deposit`) y el **almacén lleno** (`storage_full`) **no** inventan un estado nuevo: el lote se queda `running` y el barrido lo reintenta cuando haya material/hueco. Un lote pausado se **reanuda** cuando su bloqueo se resuelve (vuelve a `running` reiniciando el reloj del lote).
+
+**Salario (GDD 5.7):** `wage = workers_required × salario_base(ciudad más cercana) × factor_saturación(región)`. El `salario_base` es el de la ciudad más cercana en la región; el `factor_saturación` sale de `analytics.region_stats.industrial_occupation` (**default 1.0** si no hay fila). El producto `workers × base` se valida con `math/big` (overflow → error); la saturación se aplica en punto flotante con redondeo. **Sin ciudad cercana o sin trabajadores requeridos, el salario es 0** (no hay salario que cobrar — no se pausa por ello).
+
+### Reconciliación física↔contable (job del engine, ADR-004)
+
+Un job del engine (`II_RECONCILE_INTERVAL`, default 300 s wall) compara `Σ stock_free` por `(almacén, producto)` en el ledger contra `world.building_inventories.quantity` y publica el número de divergencias en el gauge **`ii_reconciliation_discrepancies`** (más un `log.Error` por cada una). El valor esperado es **0**, precisamente porque la producción mueve el plano físico y el contable **juntos en la misma tx**. Es un endpoint **interno**: no forma parte del contrato OpenAPI.
+
+### Progreso analítico en la API
+
+`GET /world/buildings/{id}/production-batches` (y el detalle `/world/production-batches/{id}`) devuelven `progress_pct` y `eta_sim` del lote en curso **derivados en el momento de la consulta** a partir de `(started_at_sim, duración efectiva del nivel, simNow)` — **nunca persistidos**, como exige el schema `ProductionBatch` del contrato (GDD 1.1). `POST` encola lotes de una receta soportada por el tipo (422 si el edificio no está operativo o la receta no pertenece al tipo); `DELETE` cancela lo aún **no** producido (409 si ya está `completed`/`cancelled`; lo ya producido queda asentado).
+
+### Métricas Prometheus del motor
+
+`ii_buildings_constructed_total`, `ii_production_batches_completed_total`, `ii_production_paused_total{reason}` (`no_fuel`/`no_workers`/`no_inputs`/`no_deposit`), `ii_production_storage_full_total`, `ii_production_output_total{product}`, `ii_resource_extracted_total{product}`, `ii_production_sweep_duration_seconds{sweep}` (histograma: `construction`/`production`/`reconcile`) y el gauge `ii_reconciliation_discrepancies`.
+
+### Parámetros de configuración del incremento
+
+| Parámetro | Default | Significado |
+|---|---|---|
+| `II_BUILD_SIM_SECONDS` | 3600 sim | Tiempo fijo de construcción (`under_construction → operational`) |
+| `II_PRODUCTION_SWEEP_INTERVAL` | 2 s wall | Periodo del barrido del motor de producción |
+| `II_PRODUCTION_SWEEP_BATCH_SIZE` | 100 | Máximo de lotes/edificios procesados por pasada (`FOR UPDATE SKIP LOCKED`) |
+| `II_RECONCILE_INTERVAL` | 300 s wall | Periodo del job de reconciliación física↔contable |
+| `II_CONCESSION_TRANSFER_FEE_BP` | 500 (5%) | Tasa del sistema (basis points) sobre el precio de traspaso, hacia el sink |
+| `II_WORLD_QUERY_TIMEOUT` | 10 s | Timeout de las queries de lectura de los handlers `world/*` |
+
+### Eventos de outbox del mundo (Incremento 2)
+
+Emitidos por `internal/world` en la **misma tx** que el cambio de estado (dinero/stock como string de punto fijo, sim-time como entero):
+
+| Evento | Agregado | Momento |
+|---|---|---|
+| `concession.granted` / `concession.renewed` / `concession.transferred` | `concession` | Alta (cobra el canon inicial), renovación (cobra el canon vigente) y traspaso (precio + `system_fee`) |
+| `building.created` / `building.updated` / `building.upgraded` | `building` | Alta (asienta `build_cost`), cambio de receta o inicio de mantenimiento, y mejora de nivel |
+| `building.constructed` | `building` | El motor completa la construcción diferida (tras `II_BUILD_SIM_SECONDS`) |
+| `batch.queued` / `batch.completed` / `batch.paused` / `batch.cancelled` | `production_batch` | Encolado, cierre de un batch (`running` si quedan, `completed` si fue el último), pausa (`reason` = `no_fuel`/`no_workers`) y cancelación |
 
 ---
 
