@@ -665,18 +665,35 @@ func (q *Queries) ListProductionBatches(ctx context.Context, arg ListProductionB
 
 const listStockDiscrepancies = `-- name: ListStockDiscrepancies :many
 
-SELECT COALESCE(bi.building_id, sf.warehouse_building_id) AS building_id,
-       COALESCE(bi.product_id, sf.product_id) AS product_id,
-       COALESCE(bi.quantity, 0)::bigint AS physical,
-       COALESCE(sf.total, 0)::bigint AS ledger
-FROM world.building_inventories bi
-FULL OUTER JOIN (
+WITH physical AS (
+    SELECT building_id, product_id, SUM(qty)::bigint AS qty
+    FROM (
+        SELECT building_id, product_id, quantity AS qty
+        FROM world.building_inventories
+        UNION ALL
+        SELECT a.warehouse_building_id AS building_id, a.product_id, sh.quantity AS qty
+        FROM world.shipments sh
+        JOIN ledger.contracts c ON c.id = sh.contract_id
+        JOIN ledger.accounts  a ON a.id = c.stock_reserve_account_id
+        WHERE sh.status IN ('in_warehouse', 'in_transit', 'at_terminal')
+          AND a.warehouse_building_id IS NOT NULL
+    ) parts
+    GROUP BY building_id, product_id
+),
+ledger_stock AS (
     SELECT warehouse_building_id, product_id, SUM(balance) AS total
     FROM ledger.accounts
     WHERE kind IN ('stock_free', 'stock_reserved') AND warehouse_building_id IS NOT NULL
     GROUP BY warehouse_building_id, product_id
-) sf ON sf.warehouse_building_id = bi.building_id AND sf.product_id = bi.product_id
-WHERE COALESCE(bi.quantity, 0) <> COALESCE(sf.total, 0)
+)
+SELECT COALESCE(p.building_id, l.warehouse_building_id) AS building_id,
+       COALESCE(p.product_id, l.product_id) AS product_id,
+       COALESCE(p.qty, 0)::bigint AS physical,
+       COALESCE(l.total, 0)::bigint AS ledger
+FROM physical p
+FULL OUTER JOIN ledger_stock l
+     ON l.warehouse_building_id = p.building_id AND l.product_id = p.product_id
+WHERE COALESCE(p.qty, 0) <> COALESCE(l.total, 0)
 LIMIT $1
 `
 
@@ -688,20 +705,29 @@ type ListStockDiscrepanciesRow struct {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// (4) Reconciliación física↔contable (ADR-004): el inventario físico de cada
+// (4) Reconciliación física↔contable (ADR-004): el stock físico de cada
 //
 //	(edificio, producto) debe igualar el stock COMPROMETIBLE contable de ese
-//	almacén — la suma de saldos stock_free + stock_reserved (ambos siguen
-//	físicamente en el almacén; el stock reservado por una publicación/contrato
-//	no se ha movido, solo cambió de custodia contable). Se EXCLUYE custody:
-//	esos bienes están en tránsito (flete), ya no en el almacén. La producción
-//	mueve ambos planos juntos, así que el resultado esperado es CERO filas.
+//	almacén — la suma de saldos stock_free + stock_reserved. El stock físico
+//	tiene DOS ubicaciones desde el Incremento 3 (logística física): el
+//	inventario del edificio (world.building_inventories) MÁS los cargamentos
+//	EN VUELO cuyo stock ya dejó el almacén (world.shipments): el
+//	shipment_creator descuenta building_inventories al crear el cargamento
+//	(in_warehouse), de modo que el stock reservado vive en el cargamento desde
+//	su creación —no sólo tras el despacho—. Cada cargamento se re-atribuye al
+//	almacén de ORIGEN (la cuenta stock_reserved del contrato conserva ahí su
+//	warehouse_building_id hasta la liquidación), cerrando el balance:
+//	físico(building_inventories) + físico(cargamentos in-vuelo) = free+reserved.
+//	Se cuentan los cargamentos in_warehouse/in_transit/at_terminal (los
+//	delivered ya están en building_inventories del destino; los
+//	released_in_situ nunca salieron del building_inventories de origen). Se
+//	EXCLUYE custody (flete, Fase 2). Resultado esperado en reposo: CERO filas.
 //
 // ═════════════════════════════════════════════════════════════════════════════
 // ListStockDiscrepancies lista las divergencias físico↔contable en ambos
-// sentidos (FULL OUTER JOIN): inventario físico sin respaldo contable y
-// viceversa. El agregado contable compara el físico contra el comprometible
-// (stock_free + stock_reserved) por (almacén, producto).
+// sentidos (FULL OUTER JOIN): el físico agrega inventario de edificio + stock de
+// cargamentos en vuelo por (almacén de origen, producto); el contable, el
+// comprometible (stock_free + stock_reserved).
 func (q *Queries) ListStockDiscrepancies(ctx context.Context, pageLimit int32) ([]ListStockDiscrepanciesRow, error) {
 	rows, err := q.db.Query(ctx, listStockDiscrepancies, pageLimit)
 	if err != nil {

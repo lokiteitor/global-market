@@ -3,7 +3,7 @@ $self: https://play.imperio-industrial.example/api/v1/openapi.yaml
 
 info:
   title: Imperio Industrial — API pública
-  version: 1.2.0
+  version: 1.3.0
   summary: API REST del MMO de simulación económica, industrial y logística "Imperio Industrial".
   description: |
     API pública del servidor autoritativo de **Imperio Industrial** (GDD/SAD v1.2).
@@ -47,6 +47,14 @@ info:
 
     ## Changelog
 
+    - **v1.3.0** (2026-07-17): nuevo endpoint `POST /world/shipments/{shipmentId}/dispatch`
+      — **ejecución logística del CCRI**: el vendedor carga un cargamento propio en un
+      vehículo propio `idle` situado en el nodo del cargamento y lo pone en ruta hasta el
+      destino del contrato. **Nada se teletransporta**: el cargamento viaja físicamente a
+      bordo (`in_transit`, etiquetado por su contrato, sin dejar de estar reservado) y su
+      **llegada física al nodo destino confirma la entrega** del contrato. La cabecera
+      `Idempotency-Key` queda uniformada en todos los mutantes de `logistics`/`fleet`.
+      Cambios aditivos retrocompatibles.
     - **v1.2.0** (2026-07-16): cabecera opcional `Idempotency-Key` en todas las
       operaciones mutantes (reintentos seguros de comandos que mueven valor: misma
       clave ⇒ misma respuesta reproducida, nunca doble ejecución); nuevo campo
@@ -1969,6 +1977,91 @@ paths:
         '500': { $ref: '#/components/responses/InternalError' }
         '503': { $ref: '#/components/responses/Maintenance' }
 
+  /world/shipments/{shipmentId}/dispatch:
+    parameters:
+      - name: shipmentId
+        in: path
+        required: true
+        schema:
+          $ref: '#/components/schemas/ShipmentId'
+    post:
+      operationId: dispatchShipment
+      tags: [world, fleet]
+      summary: Despachar un cargamento (ejecución logística del CCRI)
+      description: |
+        El **vendedor** carga un cargamento propio (`in_warehouse`, situado en un nodo) en
+        un vehículo propio `idle` que se encuentra en ese mismo nodo, y lo pone en ruta por
+        una ruta propia hasta el nodo destino del contrato.
+
+        **Nada se teletransporta.** Al despachar, el stock deja el almacén físico y pasa a
+        viajar **a bordo del vehículo** (`in_transit`, etiquetado por su `contract_id`, sin
+        dejar de estar reservado en el ledger — solo cambia su ubicación física). El motor
+        de tránsito simula el avance segmento a segmento de la ruta (congestión física,
+        consumo de combustible, desgaste y probabilidad de avería); **la llegada física del
+        cargamento a su nodo destino es lo que confirma la entrega del CCRI** (emite
+        `shipment.arrived`, que el Contract Service consume para liquidar lo entregado a
+        plazo). Tampoco en los fallos hay teletransporte: si el contrato vence en tránsito,
+        el stock se libera **en la ubicación física alcanzada** (`released_in_situ`).
+
+        La ruta debe **empezar en el nodo del cargamento** y **terminar en el nodo destino
+        del contrato**. Al despachar se valida —de una vez— que el vehículo tenga capacidad
+        de carga para el volumen del cargamento y autonomía/combustible suficientes para la
+        distancia completa de la ruta (de modo que una detención por falta de combustible en
+        tránsito sea un caso puramente defensivo).
+      parameters:
+        - $ref: '#/components/parameters/idempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ShipmentDispatch'
+      responses:
+        '200':
+          description: Cargamento despachado (`in_transit`, con `vehicle_id` asignado).
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: '#/components/schemas/Shipment'
+                  meta:
+                    $ref: '#/components/schemas/Meta'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: |
+            El cargamento o el vehículo pertenecen a otra corporación (autorización por
+            propiedad), o el vehículo está SELLADO durante un handoff (`VEHICLE_SEALED`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: |
+            El vehículo no está `idle`, o el cargamento ya no está `in_warehouse` (ya está
+            en tránsito, entregado o liberado in situ).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '422':
+          description: |
+            `VALIDATION_ERROR`: la ruta no empieza en el nodo del cargamento o no termina en
+            el nodo destino del contrato; la capacidad del vehículo es insuficiente para el
+            volumen del cargamento; o la autonomía/combustible no cubre la distancia de la
+            ruta.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/Maintenance' }
+
   # ───────────────────────── WORLD: TERMINALES (Fase 2) ─────────────────────────
   /world/terminals/{terminalId}:
     get:
@@ -3786,6 +3879,20 @@ components:
           $ref: '#/components/schemas/ShipmentStatus'
         updated_at_sim:
           $ref: '#/components/schemas/SimTime'
+    ShipmentDispatch:
+      type: object
+      description: |
+        Orden de despacho de un cargamento `in_warehouse`: lo carga en un vehículo propio
+        `idle` situado en el nodo del cargamento y lo pone en ruta hasta el destino del
+        contrato. El cargamento viaja físicamente; su llegada confirma la entrega del CCRI.
+      required: [vehicle_id, route_id]
+      properties:
+        vehicle_id:
+          $ref: '#/components/schemas/VehicleId'
+          description: Vehículo propio `idle` situado en el nodo del cargamento que transporta la carga.
+        route_id:
+          $ref: '#/components/schemas/RouteId'
+          description: Ruta propia que empieza en el nodo del cargamento y termina en el nodo destino del contrato.
     Terminal:
       type: object
       required: [id, node_id, owner_account_id, transshipment_per_hour, queue_length]

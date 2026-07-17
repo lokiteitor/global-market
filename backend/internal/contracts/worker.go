@@ -377,12 +377,13 @@ func (w *Worker) serveAcceptance(ctx context.Context, r *Repo, tx pgx.Tx, p Publ
 	}
 	if err := outbox.Emit(ctx, tx, int64(simNow), AggregateContract, contract.ID, EventContractConfirmed, ContractConfirmedPayload{
 		ContractID:        contract.ID.String(),
+		Kind:              string(p.Kind),
 		PublicationID:     uuidOrEmpty(contract.PublicationID),
 		Channel:           string(contract.Channel),
 		BuyerAccountID:    contract.BuyerAccountID.String(),
 		SellerAccountID:   contract.SellerAccountID.String(),
 		ProductID:         contract.ProductID.String(),
-		QuantityAgreed:    fixed(contract.QuantityAgreed),
+		Quantity:          fixed(contract.QuantityAgreed),
 		UnitPrice:         fixed(contract.UnitPrice),
 		OriginNodeID:      contract.OriginNodeID.String(),
 		DestinationNodeID: contract.DestinationNodeID.String(),
@@ -646,6 +647,24 @@ func (w *Worker) settleOneDue(ctx context.Context, id uuid.UUID, simNow simtime.
 		if err := w.settleContract(ctx, r, tx, contract, simNow, counts); err != nil {
 			return err
 		}
+		// Coordinación físico↔lógica (Opción A, contract.expired_undelivered): al vencer el plazo,
+		// contracts cierra la contabilidad (el settle pro-rata liberó en el ledger
+		// el stock reservado NO entregado); pero los cargamentos aún EN TRÁNSITO de
+		// este contrato deben detenerse y liberarse in situ en su ubicación física
+		// actual — eso es competencia de world (motor de tránsito), que NO se toca
+		// desde aquí. Se le avisa con contract.expired_undelivered (integración solo
+		// por outbox, SAD §7). Solo cuando quedó cantidad sin entregar: una entrega
+		// íntegra no dejó cargamentos vivos que detener.
+		undelivered := contract.QuantityAgreed - contract.QuantityDelivered
+		if undelivered > 0 {
+			if err := outbox.Emit(ctx, tx, int64(simNow), AggregateContract, contract.ID, EventContractExpiredUndelivered, ContractExpiredUndeliveredPayload{
+				ContractID:          contract.ID.String(),
+				UndeliveredQuantity: fixed(undelivered),
+				ExpiredAtSim:        int64(simNow),
+			}); err != nil {
+				return err
+			}
+		}
 		settled = true
 		return nil
 	})
@@ -655,88 +674,17 @@ func (w *Worker) settleOneDue(ctx context.Context, id uuid.UUID, simNow simtime.
 	return settled, err
 }
 
-// settleContract liquida un contrato pro-rata con ledger.settle_contract_prorata
-// (lo entregado a tiempo al comprador; lo faltante reembolsado y la garantía
-// repartida compensación/sink; el stock no entregado liberado in situ en el
-// origen). Emite contract.settled con el estado final. Reutilizada por la
-// entrega in situ (fill 100%) y por el sweep de vencimiento (fill pro-rata).
+// settleContract liquida un contrato pro-rata (delega en Service.settleAndEmit)
+// y contabiliza el resultado por estado en las métricas del worker. Reutilizada
+// por la entrega in situ (fill 100%) y por el sweep de vencimiento (fill
+// pro-rata).
 func (w *Worker) settleContract(ctx context.Context, r *Repo, tx pgx.Tx, contract Contract, simNow simtime.SimTime, counts *sweepCounts) error {
-	sellerCash, err := r.GetCashAccount(ctx, contract.SellerAccountID)
-	if err != nil {
-		return fmt.Errorf("contracts: caja del vendedor %s: %w", contract.SellerAccountID, err)
-	}
-	buyerCash, err := r.GetCashAccount(ctx, contract.BuyerAccountID)
-	if err != nil {
-		return fmt.Errorf("contracts: caja del comprador %s: %w", contract.BuyerAccountID, err)
-	}
-	sink, err := r.GetSinkAccount(ctx)
-	if err != nil {
-		return fmt.Errorf("contracts: cuenta sink del banco central: %w", err)
-	}
-
-	destNode, err := w.svc.warehouseNode(ctx, r, contract.DestinationNodeID, "destino")
+	settled, err := w.svc.settleAndEmit(ctx, r, tx, contract, simNow)
 	if err != nil {
 		return err
-	}
-	buyerStock, err := r.EnsureStockFreeAccount(ctx, contract.BuyerAccountID, contract.ProductID, *destNode.BuildingID)
-	if err != nil {
-		return err
-	}
-	originNode, err := w.svc.warehouseNode(ctx, r, contract.OriginNodeID, "origen")
-	if err != nil {
-		return err
-	}
-	sellerStockRelease, err := r.EnsureStockFreeAccount(ctx, contract.SellerAccountID, contract.ProductID, *originNode.BuildingID)
-	if err != nil {
-		return err
-	}
-
-	txID, err := newUUIDv7()
-	if err != nil {
-		return err
-	}
-	entryIDs, err := newUUIDv7Batch(maxSettleEntries)
-	if err != nil {
-		return err
-	}
-	if err := r.SettleContractProrata(ctx, settleContractArgs{
-		TxID:               txID,
-		ContractID:         contract.ID,
-		SimTime:            simNow,
-		SellerCash:         sellerCash.ID,
-		BuyerCash:          buyerCash.ID,
-		BuyerStock:         buyerStock.ID,
-		SinkAccount:        sink.ID,
-		SellerStockRelease: sellerStockRelease.ID,
-		CompensationBP:     int32(w.svc.opts.CompensationBP), //nolint:gosec // 0..10000 por Validate
-		EntryIDs:           entryIDs,
-	}); err != nil {
-		return mapLedgerError(err)
-	}
-
-	// Re-leer el contrato para el estado final (status/fill_bp los fija la
-	// función SQL) y emitir contract.settled con el shape exacto del contrato.
-	settled, err := r.GetContract(ctx, contract.ID)
-	if err != nil {
-		return fmt.Errorf("contracts: releyendo el contrato liquidado %s: %w", contract.ID, err)
-	}
-	fill := 0
-	if settled.FillBP != nil {
-		fill = int(*settled.FillBP)
 	}
 	counts.settled[string(settled.Status)]++
-
-	return outbox.Emit(ctx, tx, int64(simNow), AggregateContract, settled.ID, EventContractSettled, ContractSettledPayload{
-		ContractID:          settled.ID.String(),
-		ProductID:           settled.ProductID.String(),
-		DestinationRegionID: destNode.RegionID.String(),
-		UnitPrice:           fixed(settled.UnitPrice),
-		QuantityAgreed:      fixed(settled.QuantityAgreed),
-		QuantityDelivered:   fixed(settled.QuantityDelivered),
-		FillBP:              fill,
-		SettledAtSim:        int64(simNow),
-		Status:              string(settled.Status),
-	})
+	return nil
 }
 
 // ─── Utilidades ──────────────────────────────────────────────────────────────

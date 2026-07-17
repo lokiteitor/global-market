@@ -26,6 +26,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/lokiteitor/global-market/backend/internal/auth"
@@ -196,9 +197,10 @@ func Run(ctx context.Context, pool *pgxpool.Pool, opts Options, logger *slog.Log
 		corp             auth.Account
 		centerX, centerY int64
 	}{
-		{demo, 10_000, 10_000},
-		{trader, 30_000, 30_000},
+		{demo, demoCenterX, demoCenterY},
+		{trader, norteCenterX, norteCenterY},
 	}
+	sites := make(map[uuid.UUID]corpSite, len(placements))
 	for _, p := range placements {
 		site, err := ensureCorpSite(ctx, pool, cat, p.corp, p.centerX, p.centerY, logger)
 		if err != nil {
@@ -207,6 +209,7 @@ func Run(ctx context.Context, pool *pgxpool.Pool, opts Options, logger *slog.Log
 		if err := ensureInitialStock(ctx, pool, ledgerSvc, bank, p.corp, site, cat, simNow, logger); err != nil {
 			return err
 		}
+		sites[p.corp.ID] = site
 	}
 
 	// (f) Mundo industrial del Incremento 2: catálogo de producción (steel_ingot,
@@ -215,6 +218,16 @@ func Run(ctx context.Context, pool *pgxpool.Pool, opts Options, logger *slog.Log
 	// en una parcela libre reservada para levantar una mina.
 	if !opts.SkipIndustrialWorld {
 		if err := ensureIndustrialWorld(ctx, pool, repo, cat, logger); err != nil {
+			return err
+		}
+
+		// (g) Red vial de Askadia (Incremento 3, Fase 1: logística terrestre): un
+		// junction central y enlaces road bidireccionales warehouse(Demo) —
+		// junction — warehouse(Norte), cada uno con su segmento, más el catálogo de
+		// vehículos terrestres. Se omite junto al mundo industrial: los tests de
+		// integración de los subpaquetes world aportan sus propios fixtures de red
+		// y flota.
+		if err := ensureLogisticsNetwork(ctx, pool, cat, sites[demo.ID], sites[trader.ID], logger); err != nil {
 			return err
 		}
 	}

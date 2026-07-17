@@ -29,6 +29,7 @@ import (
 	"github.com/lokiteitor/global-market/backend/internal/platform/service"
 	"github.com/lokiteitor/global-market/backend/internal/sim/clock"
 	"github.com/lokiteitor/global-market/backend/internal/sim/simtime"
+	"github.com/lokiteitor/global-market/backend/internal/world/fleet"
 	"github.com/lokiteitor/global-market/backend/internal/world/production"
 )
 
@@ -103,6 +104,13 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	// Consumidor de entregas: confirma shipment.arrived (emitido por world) y
+	// liquida el CCRI al completar la cantidad a tiempo (GDD 5.3 pasos 5-6).
+	deliveryConfirmer, err := contracts.NewDeliveryConfirmer(contractsSvc, app.Logger(), app.Metrics().Registry())
+	if err != nil {
+		return err
+	}
+	deliveryConsumer := deliveryConfirmer.NewConsumer(app.Pool(), outbox.WithLogger(app.Logger()))
 
 	// ── Agregador OHLC: consumidor del outbox de contract.settled ────────────
 	marketOpts, err := market.OptionsFromEnv()
@@ -131,15 +139,42 @@ func run() error {
 		return err
 	}
 
+	// ── Motor de tránsito (Incremento 3): barrido de segmentos vencidos
+	//    (combustible, desgaste, avería, avance, llegada y entrega), reanudación
+	//    de averías/mantenimiento y job de congestión; más el consumidor
+	//    shipment_creator (contract.confirmed → cargamento en el origen) ────────
+	fleetWorkerOpts, err := fleet.WorkerOptionsFromEnv()
+	if err != nil {
+		return err
+	}
+	transitWorker, err := fleet.NewTransitWorker(app.Pool(), clockSimSource{clk}, fleetWorkerOpts, app.Logger(), app.Metrics().Registry())
+	if err != nil {
+		return err
+	}
+	shipmentCreator := fleet.NewShipmentCreator(app.Logger(), app.Metrics().Registry())
+	shipmentConsumer := shipmentCreator.NewConsumer(app.Pool(), outbox.WithLogger(app.Logger()))
+	// Liberación in situ: consume contract.expired_undelivered (emitido por el
+	// Contract Service al vencer un contrato con cantidad sin entregar) y detiene
+	// los cargamentos aún en tránsito de ese contrato, reintegrando su stock físico
+	// al almacén de origen (GDD 7.1/5.3: nada se teletransporta, tampoco en fallos).
+	shipmentReleaser := fleet.NewShipmentReleaser(app.Logger(), app.Metrics().Registry())
+	releaseConsumer := shipmentReleaser.NewConsumer(app.Pool(), outbox.WithLogger(app.Logger()))
+
 	// ── Arranque de los procesos en segundo plano ────────────────────────────
 	// Comparten el ctx de la señal: al apagar, los bucles observan ctx.Done() y
 	// retornan nil (parada limpia). wg los sincroniza antes de cerrar el pool.
 	var wg sync.WaitGroup
-	wg.Add(3)
+	wg.Add(7)
 	go func() {
 		defer wg.Done()
 		if err := worker.Run(ctx); err != nil {
 			app.Logger().Error("contracts: el worker de barridos terminó con error", slog.Any("error", err))
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		if err := deliveryConsumer.Run(ctx, consumerInterval, deliveryConfirmer.Handle); err != nil {
+			app.Logger().Error("contracts: el consumidor delivery_confirmer terminó con error", slog.Any("error", err))
 		}
 	}()
 	go func() {
@@ -152,6 +187,24 @@ func run() error {
 		defer wg.Done()
 		if err := productionWorker.Run(ctx); err != nil {
 			app.Logger().Error("world/production: el motor terminó con error", slog.Any("error", err))
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		if err := transitWorker.Run(ctx); err != nil {
+			app.Logger().Error("world/fleet: el motor de tránsito terminó con error", slog.Any("error", err))
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		if err := shipmentConsumer.Run(ctx, consumerInterval, shipmentCreator.Handle); err != nil {
+			app.Logger().Error("world/fleet: el consumidor shipment_creator terminó con error", slog.Any("error", err))
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		if err := releaseConsumer.Run(ctx, consumerInterval, shipmentReleaser.Handle); err != nil {
+			app.Logger().Error("world/fleet: el consumidor shipment_releaser terminó con error", slog.Any("error", err))
 		}
 	}()
 
@@ -168,7 +221,14 @@ func run() error {
 		slog.Duration("production_sweep_interval", productionWorkerOpts.SweepInterval),
 		slog.Int("production_sweep_batch", productionWorkerOpts.BatchSize),
 		slog.Int64("build_sim_seconds", productionWorkerOpts.BuildSimSeconds),
-		slog.Duration("reconcile_interval", productionWorkerOpts.ReconcileInterval))
+		slog.Duration("reconcile_interval", productionWorkerOpts.ReconcileInterval),
+		slog.Duration("transit_sweep_interval", fleetWorkerOpts.SweepInterval),
+		slog.Int("transit_sweep_batch", fleetWorkerOpts.BatchSize),
+		slog.Int64("repair_sim_seconds", fleetWorkerOpts.RepairSimSeconds),
+		slog.Duration("congestion_interval", fleetWorkerOpts.CongestionInterval),
+		slog.String("shipment_creator", fleet.ConsumerShipmentCreator),
+		slog.String("shipment_releaser", fleet.ConsumerShipmentReleaser),
+		slog.String("delivery_confirmer", contracts.ConsumerDeliveryConfirmer))
 
 	// Sirve HTTP (sondas/métricas) hasta la señal; entonces app.Run apaga el
 	// servidor de forma graceful. Al retornar, el ctx ya está cancelado y los

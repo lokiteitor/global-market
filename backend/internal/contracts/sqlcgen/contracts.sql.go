@@ -216,6 +216,43 @@ func (q *Queries) GetContractForAcceptance(ctx context.Context, arg GetContractF
 	return i, err
 }
 
+const getContractForUpdate = `-- name: GetContractForUpdate :one
+SELECT id, publication_id, channel, buyer_account_id, seller_account_id, product_id, quantity_agreed, quantity_delivered, unit_price, origin_node_id, destination_node_id, deadline_sim, status, fill_bp, stock_reserve_account_id, seller_guarantee_account_id, escrow_account_id, confirmed_at_sim, settled_at_sim, created_at, updated_at FROM ledger.contracts WHERE id = $1 FOR UPDATE
+`
+
+// GetContractForUpdate bloquea el contrato (SELECT FOR UPDATE) para el
+// consumidor de entregas: fija el estado (active/settled/failed) y el
+// quantity_delivered bajo el lock antes de acumular la entrega y liquidar,
+// serializándose con el barrido de vencimiento (que lo bloquea con SKIP LOCKED).
+func (q *Queries) GetContractForUpdate(ctx context.Context, id uuid.UUID) (LedgerContract, error) {
+	row := q.db.QueryRow(ctx, getContractForUpdate, id)
+	var i LedgerContract
+	err := row.Scan(
+		&i.ID,
+		&i.PublicationID,
+		&i.Channel,
+		&i.BuyerAccountID,
+		&i.SellerAccountID,
+		&i.ProductID,
+		&i.QuantityAgreed,
+		&i.QuantityDelivered,
+		&i.UnitPrice,
+		&i.OriginNodeID,
+		&i.DestinationNodeID,
+		&i.DeadlineSim,
+		&i.Status,
+		&i.FillBp,
+		&i.StockReserveAccountID,
+		&i.SellerGuaranteeAccountID,
+		&i.EscrowAccountID,
+		&i.ConfirmedAtSim,
+		&i.SettledAtSim,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const getLedgerAccount = `-- name: GetLedgerAccount :one
 SELECT id, kind, owner_account_id, product_id, warehouse_building_id, reference_id, balance, created_at, updated_at FROM ledger.accounts WHERE id = $1
 `
@@ -583,6 +620,53 @@ type InsertContractDeliveryParams struct {
 // contrato (verificación de entrega acumulativa, GDD 5.3 paso 5).
 func (q *Queries) InsertContractDelivery(ctx context.Context, arg InsertContractDeliveryParams) (LedgerContractDelivery, error) {
 	row := q.db.QueryRow(ctx, insertContractDelivery,
+		arg.ID,
+		arg.ContractID,
+		arg.ShipmentID,
+		arg.Quantity,
+		arg.DeliveredAtSim,
+		arg.OnTime,
+	)
+	var i LedgerContractDelivery
+	err := row.Scan(
+		&i.ID,
+		&i.ContractID,
+		&i.ShipmentID,
+		&i.Quantity,
+		&i.DeliveredAtSim,
+		&i.OnTime,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const insertContractDeliveryIfNew = `-- name: InsertContractDeliveryIfNew :one
+INSERT INTO ledger.contract_deliveries (
+    id, contract_id, shipment_id, quantity, delivered_at_sim, on_time)
+VALUES (
+    $1, $2, $3,
+    $4, $5, $6)
+ON CONFLICT (shipment_id) DO NOTHING
+RETURNING id, contract_id, shipment_id, quantity, delivered_at_sim, on_time, created_at
+`
+
+type InsertContractDeliveryIfNewParams struct {
+	ID             uuid.UUID
+	ContractID     uuid.UUID
+	ShipmentID     uuid.UUID
+	Quantity       int64
+	DeliveredAtSim int64
+	OnTime         bool
+}
+
+// InsertContractDeliveryIfNew registra la entrega de un cargamento de forma
+// IDEMPOTENTE: un cargamento (world.shipments) llega físicamente a su destino
+// una sola vez, luego su entrega se cuenta una sola vez. Si ya existe una
+// entrega para ese shipment_id (índice único ux_contract_deliveries_shipment,
+// 0010), no inserta nada y no devuelve fila (pgx.ErrNoRows): reprocesar el mismo
+// shipment.arrived no duplica la partida ni la cantidad entregada.
+func (q *Queries) InsertContractDeliveryIfNew(ctx context.Context, arg InsertContractDeliveryIfNewParams) (LedgerContractDelivery, error) {
+	row := q.db.QueryRow(ctx, insertContractDeliveryIfNew,
 		arg.ID,
 		arg.ContractID,
 		arg.ShipmentID,

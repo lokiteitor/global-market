@@ -1,0 +1,472 @@
+package fleet
+
+import (
+	"context"
+	crand "crypto/rand"
+	"errors"
+	"log/slog"
+	"math/big"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/prometheus/client_golang/prometheus"
+
+	"github.com/lokiteitor/global-market/backend/internal/outbox"
+	"github.com/lokiteitor/global-market/backend/internal/platform/db"
+	"github.com/lokiteitor/global-market/backend/internal/sim/simtime"
+	"github.com/lokiteitor/global-market/backend/internal/world/sqlcgen"
+)
+
+// Etiquetas de la métrica de duración por barrido.
+const (
+	sweepTransit    = "transit"
+	sweepRecovery   = "recovery"
+	sweepCongestion = "congestion"
+)
+
+// TransitWorker es el MOTOR DE TRÁNSITO event-driven (Incremento 3, Fase 1). Lo
+// arranca el engine. Barre los segmentos vencidos (combustible, desgaste, avería
+// probabilística, avance segmento/leg, llegada y entrega física), reanuda
+// averías/mantenimiento y recalcula la congestión por segmento. Cada vehículo se
+// procesa en SU transacción SERIALIZABLE, bloqueado con FOR UPDATE SKIP LOCKED,
+// de modo que varias instancias corren en paralelo sin pisarse.
+type TransitWorker struct {
+	pool   *pgxpool.Pool
+	repo   *Repo
+	sim    SimSource
+	opts   WorkerOptions
+	logger *slog.Logger
+	roll   func() float64
+
+	inTransit     prometheus.Gauge
+	delivered     prometheus.Counter
+	breakdowns    prometheus.Counter
+	arrivals      prometheus.Counter
+	stranded      prometheus.Counter
+	sweepDuration *prometheus.HistogramVec
+	congestion    *prometheus.GaugeVec
+}
+
+// NewTransitWorker construye el motor sobre el pool compartido. reg registra sus
+// métricas (nil las deja sin instrumentar: tests); logger nil usa slog.Default.
+func NewTransitWorker(pool *pgxpool.Pool, sim SimSource, opts WorkerOptions, logger *slog.Logger, reg prometheus.Registerer) (*TransitWorker, error) {
+	if pool == nil {
+		return nil, errors.New("world/fleet: el motor requiere un pool de BD")
+	}
+	if sim == nil {
+		return nil, errors.New("world/fleet: el motor requiere un SimSource")
+	}
+	if err := opts.Validate(); err != nil {
+		return nil, err
+	}
+	if logger == nil {
+		logger = slog.Default()
+	}
+	roll := opts.Roll
+	if roll == nil {
+		roll = cryptoRoll
+	}
+	w := &TransitWorker{
+		pool:   pool,
+		repo:   NewRepo(pool),
+		sim:    sim,
+		opts:   opts,
+		logger: logger,
+		roll:   roll,
+		inTransit: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "ii_vehicles_in_transit",
+			Help: "Vehículos actualmente en tránsito.",
+		}),
+		delivered: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "ii_shipments_delivered_total",
+			Help: "Total de cargamentos entregados físicamente en su nodo destino.",
+		}),
+		breakdowns: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "ii_vehicle_breakdowns_total",
+			Help: "Total de averías de vehículos en tránsito.",
+		}),
+		arrivals: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "ii_transit_arrivals_total",
+			Help: "Total de llegadas de vehículos a su nodo destino final.",
+		}),
+		stranded: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "ii_vehicles_stranded_total",
+			Help: "Total de vehículos detenidos por falta de combustible (defensivo).",
+		}),
+		sweepDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    "ii_transit_sweep_duration_seconds",
+			Help:    "Duración de cada barrido del motor de tránsito, por tipo.",
+			Buckets: prometheus.DefBuckets,
+		}, []string{"sweep"}),
+		congestion: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "ii_segment_congestion",
+			Help: "Factor de congestión (EMA) por segmento (1.0 = fluido).",
+		}, []string{"segment"}),
+	}
+	if reg != nil {
+		reg.MustRegister(w.inTransit, w.delivered, w.breakdowns, w.arrivals, w.stranded, w.sweepDuration, w.congestion)
+	}
+	return w, nil
+}
+
+// Run ejecuta el bucle del motor hasta que ctx se cancele (nil al apagado
+// limpio). Cada iteración barre tránsito y recuperación; la congestión se dispara
+// cuando su intervalo propio venció.
+func (w *TransitWorker) Run(ctx context.Context) error {
+	w.logger.Info("world/fleet: motor de tránsito iniciado",
+		slog.Duration("sweep_interval", w.opts.SweepInterval),
+		slog.Int("batch_size", w.opts.BatchSize),
+		slog.Int64("repair_sim_seconds", w.opts.RepairSimSeconds),
+		slog.Duration("congestion_interval", w.opts.CongestionInterval),
+		slog.Float64("congestion_capacity_ref", w.opts.CongestionCapacityRef))
+	lastCongestion := time.Now()
+	w.updateInTransitGauge(ctx)
+	for {
+		w.RunOnce(ctx)
+		if time.Since(lastCongestion) >= w.opts.CongestionInterval {
+			w.runSweep(ctx, sweepCongestion, func(ctx context.Context) (int, error) { return w.RunCongestionOnce(ctx) })
+			lastCongestion = time.Now()
+		}
+		w.updateInTransitGauge(ctx)
+		if !sleepJitter(ctx, w.opts.SweepInterval) {
+			w.logger.Info("world/fleet: motor de tránsito detenido")
+			return nil
+		}
+	}
+}
+
+// RunOnce ejecuta una pasada de los barridos de tránsito y recuperación. Aislado
+// para los tests, que controlan el disparo.
+func (w *TransitWorker) RunOnce(ctx context.Context) {
+	w.runSweep(ctx, sweepTransit, w.sweepTransit)
+	w.runSweep(ctx, sweepRecovery, w.sweepRecovery)
+}
+
+// runSweep cronometra un barrido y registra su duración y un error global.
+func (w *TransitWorker) runSweep(ctx context.Context, name string, fn func(context.Context) (int, error)) {
+	start := time.Now()
+	n, err := fn(ctx)
+	w.sweepDuration.WithLabelValues(name).Observe(time.Since(start).Seconds())
+	if err != nil {
+		w.logger.Warn("world/fleet: barrido con error al listar candidatos",
+			slog.String("sweep", name), slog.Any("error", err))
+		return
+	}
+	if n > 0 {
+		w.logger.Debug("world/fleet: barrido completado", slog.String("sweep", name), slog.Int("procesados", n))
+	}
+}
+
+// ─── (1) Barrido de segmentos vencidos ────────────────────────────────────────
+
+// sweepTransit procesa los vehículos in_transit cuyo segmento venció.
+func (w *TransitWorker) sweepTransit(ctx context.Context) (int, error) {
+	simNow := w.sim.Now(ctx)
+	ids, err := w.repo.ListDueTransitVehicleIDs(ctx, simNow, int32(w.opts.BatchSize)) //nolint:gosec // acotado por Validate
+	if err != nil {
+		return 0, err
+	}
+	processed := 0
+	for _, id := range ids {
+		if err := w.processTransitVehicle(ctx, id); err != nil {
+			w.logger.Warn("world/fleet: fallo procesando un vehículo en tránsito",
+				slog.String("vehicle_id", id.String()), slog.Any("error", err))
+			continue
+		}
+		processed++
+	}
+	return processed, nil
+}
+
+// transitOutcome acumula los efectos de procesar un vehículo para volcarlos a las
+// métricas UNA sola vez tras el COMMIT.
+type transitOutcome struct {
+	broke     bool
+	arrived   bool
+	stranded  bool
+	delivered int
+}
+
+// processTransitVehicle bloquea y procesa un vehículo en su propia transacción:
+// consume combustible/desgaste, decide avería/detención, y avanza al siguiente
+// segmento/leg o llega y entrega.
+func (w *TransitWorker) processTransitVehicle(ctx context.Context, id uuid.UUID) error {
+	var oc transitOutcome
+	err := db.RunSerializable(ctx, w.pool, func(tx pgx.Tx) error {
+		oc = transitOutcome{}
+		r := w.repo.WithTx(tx)
+		tv, err := r.LockTransitVehicle(ctx, id)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil // tomado por otra instancia o ya no in_transit
+			}
+			return err
+		}
+		simNow := w.sim.Now(ctx)
+
+		// (1) Combustible del segmento actual. Sin combustible: detención defensiva
+		//     en el nodo previo (el combustible se validó para toda la ruta al
+		//     despachar, GDD 7.3).
+		fuelNeeded := fuelForDistance(tv.FuelPer100km, int64(tv.SegmentLengthM))
+		if tv.Fuel < fuelNeeded {
+			if err := r.StrandVehicle(ctx, id, tv.FromNodeID, simNow); err != nil {
+				return err
+			}
+			oc.stranded = true
+			return outbox.Emit(ctx, tx, int64(simNow), AggregateVehicle, id, EventVehicleStranded, VehicleStrandedPayload{
+				VehicleID: id.String(), OwnerAccountID: tv.OwnerAccountID.String(), NodeID: tv.FromNodeID.String(), StrandedAtSim: int64(simNow),
+			})
+		}
+		newFuel := tv.Fuel - fuelNeeded
+
+		// (2) Desgaste (acotado a 100).
+		newWear := tv.WearPct + w.opts.WearPerSegment
+		if newWear > 100 {
+			newWear = 100
+		}
+
+		// (3) Avería probabilística (p = wear_pct/1000 por segmento). La carga
+		//     espera a bordo; el barrido reanuda al vencer la reparación (GDD 7.3).
+		if w.roll() < float64(newWear)/1000.0 {
+			repairUntil := simNow + simtime.SimTime(w.opts.RepairSimSeconds)
+			if err := r.BreakVehicle(ctx, id, repairUntil, newFuel, newWear, simNow); err != nil {
+				return err
+			}
+			oc.broke = true
+			segID := ""
+			if tv.OnSegmentID != nil {
+				segID = tv.OnSegmentID.String()
+			}
+			return outbox.Emit(ctx, tx, int64(simNow), AggregateVehicle, id, EventVehicleBroken, VehicleBrokenPayload{
+				VehicleID: id.String(), OwnerAccountID: tv.OwnerAccountID.String(), SegmentID: segID,
+				RepairUntilSim: int64(repairUntil), BrokenAtSim: int64(simNow),
+			})
+		}
+
+		// (4) Avance: siguiente segmento del mismo enlace, o del siguiente leg, o
+		//     llegada al nodo destino final.
+		if next, err := r.GetNextSegmentInLink(ctx, tv.LinkID, tv.SegmentSeq); err == nil {
+			return w.advance(ctx, r, id, next.SegmentID, legIndexOr0(tv.RouteLegIndex),
+				af(tv.SpeedKmh, next.BaseSpeedKmh, next.CongestionEma, next.LengthM), newFuel, newWear, simNow)
+		} else if !errors.Is(err, pgx.ErrNoRows) {
+			return err
+		}
+		if tv.RouteID != nil && tv.RouteLegIndex != nil {
+			if leg, err := r.GetNextLegFirstSegment(ctx, *tv.RouteID, *tv.RouteLegIndex+1); err == nil {
+				return w.advance(ctx, r, id, leg.SegmentID, leg.LegIndex,
+					af(tv.SpeedKmh, leg.BaseSpeedKmh, leg.CongestionEma, leg.LengthM), newFuel, newWear, simNow)
+			} else if !errors.Is(err, pgx.ErrNoRows) {
+				return err
+			}
+		}
+		return w.arriveAndDeliver(ctx, r, tx, tv, newFuel, newWear, simNow, &oc)
+	})
+	if err == nil {
+		w.flush(&oc)
+	}
+	return err
+}
+
+// advance mueve el vehículo al siguiente segmento (mismo leg o siguiente),
+// guardando combustible/desgaste.
+func (w *TransitWorker) advance(ctx context.Context, r *Repo, id, segment uuid.UUID, legIndex int32, a advanceFn, fuel int64, wear int32, simNow simtime.SimTime) error {
+	bytes, err := a.marshal()
+	if err != nil {
+		return err
+	}
+	return r.AdvanceVehicleToSegment(ctx, advanceParams{
+		ID: id, OnSegment: segment, LegIndex: legIndex, AdvanceFn: bytes, Fuel: fuel, WearPct: wear, SimNow: simNow,
+	})
+}
+
+// arriveAndDeliver asienta la llegada al nodo destino final, emite
+// vehicle.arrived y entrega los cargamentos a bordo con destino ese nodo
+// (integrando su stock físico en el almacén del destino y emitiendo
+// shipment.arrived, hito que el Contract Service consume).
+func (w *TransitWorker) arriveAndDeliver(ctx context.Context, r *Repo, tx pgx.Tx, tv transitVehicle, fuel int64, wear int32, simNow simtime.SimTime, oc *transitOutcome) error {
+	node := tv.ToNodeID
+	if err := r.ArriveVehicle(ctx, tv.ID, node, fuel, wear, simNow); err != nil {
+		return err
+	}
+	oc.arrived = true
+	if err := outbox.Emit(ctx, tx, int64(simNow), AggregateVehicle, tv.ID, EventVehicleArrived, VehicleArrivedPayload{
+		VehicleID: tv.ID.String(), OwnerAccountID: tv.OwnerAccountID.String(), NodeID: node.String(), ArrivedAtSim: int64(simNow),
+	}); err != nil {
+		return err
+	}
+
+	deliveries, err := r.ListVehicleShipmentsForNode(ctx, tv.ID, node)
+	if err != nil {
+		return err
+	}
+	if len(deliveries) == 0 {
+		return nil
+	}
+	// El almacén del nodo destino (network_nodes.building_id) recibe el stock
+	// físico entregado; la propiedad contable la resuelve el settle del CCRI.
+	nodeInfo, err := r.GetNode(ctx, node)
+	if err != nil {
+		return err
+	}
+	for _, sh := range deliveries {
+		if err := r.DeliverShipment(ctx, sh.ID, node, simNow); err != nil {
+			return err
+		}
+		if nodeInfo.BuildingID != nil {
+			if err := r.AddInventory(ctx, *nodeInfo.BuildingID, sh.ProductID, sh.Quantity, simNow); err != nil {
+				return err
+			}
+		} else {
+			w.logger.Warn("world/fleet: nodo destino sin almacén; entrega sin integrar inventario físico",
+				slog.String("node_id", node.String()), slog.String("shipment_id", sh.ID.String()))
+		}
+		if err := outbox.Emit(ctx, tx, int64(simNow), AggregateShipment, sh.ID, EventShipmentArrived, ShipmentArrivedPayload{
+			ShipmentID: sh.ID.String(), ContractID: uuidOrEmpty(sh.ContractID), Quantity: fixed(sh.Quantity),
+			DestinationNodeID: node.String(), ArrivedAtSim: int64(simNow),
+		}); err != nil {
+			return err
+		}
+		oc.delivered++
+	}
+	return nil
+}
+
+// flush vuelca los efectos acumulados a las métricas tras el COMMIT.
+func (w *TransitWorker) flush(oc *transitOutcome) {
+	if oc.broke {
+		w.breakdowns.Inc()
+	}
+	if oc.arrived {
+		w.arrivals.Inc()
+	}
+	if oc.stranded {
+		w.stranded.Inc()
+	}
+	if oc.delivered > 0 {
+		w.delivered.Add(float64(oc.delivered))
+	}
+}
+
+// ─── (2) Reanudación de averías y mantenimiento ───────────────────────────────
+
+// sweepRecovery reanuda los vehículos broken/in_maintenance cuya recuperación
+// venció.
+func (w *TransitWorker) sweepRecovery(ctx context.Context) (int, error) {
+	simNow := w.sim.Now(ctx)
+	rows, err := w.repo.ListDueRecoveryVehicleIDs(ctx, simNow, int32(w.opts.BatchSize)) //nolint:gosec // acotado por Validate
+	if err != nil {
+		return 0, err
+	}
+	processed := 0
+	for _, row := range rows {
+		if err := w.processRecovery(ctx, row.ID); err != nil {
+			w.logger.Warn("world/fleet: fallo reanudando un vehículo",
+				slog.String("vehicle_id", row.ID.String()), slog.Any("error", err))
+			continue
+		}
+		processed++
+	}
+	return processed, nil
+}
+
+// processRecovery reanuda un vehículo: broken → in_transit re-entrando al mismo
+// segmento; in_maintenance → idle.
+func (w *TransitWorker) processRecovery(ctx context.Context, id uuid.UUID) error {
+	return db.RunSerializable(ctx, w.pool, func(tx pgx.Tx) error {
+		r := w.repo.WithTx(tx)
+		rv, err := r.LockRecoveryVehicle(ctx, id)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil
+			}
+			return err
+		}
+		simNow := w.sim.Now(ctx)
+		switch rv.Status {
+		case string(sqlcgen.WorldVehicleStatusBroken):
+			return r.ResumeBrokenVehicle(ctx, id, simNow)
+		case string(sqlcgen.WorldVehicleStatusInMaintenance):
+			return r.FinishMaintenanceVehicle(ctx, id, simNow)
+		default:
+			return nil
+		}
+	})
+}
+
+// ─── (3) Congestión (job periódico) ───────────────────────────────────────────
+
+// RunCongestionOnce recalcula la EMA de congestión de todos los segmentos y
+// publica el gauge por segmento. Devuelve el número de segmentos actualizados.
+func (w *TransitWorker) RunCongestionOnce(ctx context.Context) (int, error) {
+	simNow := w.sim.Now(ctx)
+	rows, err := w.repo.RecomputeSegmentCongestion(ctx, w.opts.CongestionCapacityRef, simNow)
+	if err != nil {
+		return 0, err
+	}
+	for _, row := range rows {
+		w.congestion.WithLabelValues(row.ID.String()).Set(row.CongestionEma)
+	}
+	return len(rows), nil
+}
+
+// updateInTransitGauge publica el número de vehículos en tránsito.
+func (w *TransitWorker) updateInTransitGauge(ctx context.Context) {
+	n, err := w.repo.CountInTransitVehicles(ctx)
+	if err != nil {
+		w.logger.Debug("world/fleet: no se pudo contar vehículos en tránsito", slog.Any("error", err))
+		return
+	}
+	w.inTransit.Set(float64(n))
+}
+
+// ─── Utilidades ───────────────────────────────────────────────────────────────
+
+// af construye la advance_fn de un segmento: velocidad efectiva = min(velocidad
+// del vehículo, velocidad base del enlace); congestión snapshot; longitud; dir=1
+// (los legs recorren el enlace en su orientación from_node→to_node).
+func af(vehicleSpeed, linkSpeed int32, congestion float64, lengthM int32) advanceFn {
+	return advanceFn{BaseSpeedKmh: minInt32(vehicleSpeed, linkSpeed), CongestionEma: congestion, LengthM: lengthM, Dir: 1}
+}
+
+func legIndexOr0(idx *int32) int32 {
+	if idx == nil {
+		return 0
+	}
+	return *idx
+}
+
+// cryptoRoll produce un número uniforme en [0,1) con crypto/rand. Ante un fallo
+// de entropía falla cerrado (1.0 → nunca avería), preservando la carga.
+func cryptoRoll() float64 {
+	const scale = int64(1) << 53
+	n, err := crand.Int(crand.Reader, big.NewInt(scale))
+	if err != nil {
+		return 1.0
+	}
+	return float64(n.Int64()) / float64(scale)
+}
+
+// sleepJitter espera d ± hasta 25% de jitter y devuelve false si el contexto se
+// cancela antes (desincroniza instancias concurrentes del motor).
+func sleepJitter(ctx context.Context, d time.Duration) bool {
+	jitter := time.Duration(0)
+	if d > 0 {
+		span := int64(d / 4)
+		if span > 0 {
+			nBig, err := crand.Int(crand.Reader, big.NewInt(2*span+1))
+			if err == nil {
+				jitter = time.Duration(nBig.Int64() - span)
+			}
+		}
+	}
+	t := time.NewTimer(d + jitter)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
+	}
+}

@@ -864,6 +864,46 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/world/shipments/{shipmentId}/dispatch": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                shipmentId: components["schemas"]["ShipmentId"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Despachar un cargamento (ejecución logística del CCRI)
+         * @description El **vendedor** carga un cargamento propio (`in_warehouse`, situado en un nodo) en
+         *     un vehículo propio `idle` que se encuentra en ese mismo nodo, y lo pone en ruta por
+         *     una ruta propia hasta el nodo destino del contrato.
+         *
+         *     **Nada se teletransporta.** Al despachar, el stock deja el almacén físico y pasa a
+         *     viajar **a bordo del vehículo** (`in_transit`, etiquetado por su `contract_id`, sin
+         *     dejar de estar reservado en el ledger — solo cambia su ubicación física). El motor
+         *     de tránsito simula el avance segmento a segmento de la ruta (congestión física,
+         *     consumo de combustible, desgaste y probabilidad de avería); **la llegada física del
+         *     cargamento a su nodo destino es lo que confirma la entrega del CCRI** (emite
+         *     `shipment.arrived`, que el Contract Service consume para liquidar lo entregado a
+         *     plazo). Tampoco en los fallos hay teletransporte: si el contrato vence en tránsito,
+         *     el stock se libera **en la ubicación física alcanzada** (`released_in_situ`).
+         *
+         *     La ruta debe **empezar en el nodo del cargamento** y **terminar en el nodo destino
+         *     del contrato**. Al despachar se valida —de una vez— que el vehículo tenga capacidad
+         *     de carga para el volumen del cargamento y autonomía/combustible suficientes para la
+         *     distancia completa de la ruta (de modo que una detención por falta de combustible en
+         *     tránsito sea un caso puramente defensivo).
+         */
+        post: operations["dispatchShipment"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/world/terminals/{terminalId}": {
         parameters: {
             query?: never;
@@ -1858,6 +1898,17 @@ export interface components {
             at_node_id?: components["schemas"]["NodeId"];
             status: components["schemas"]["ShipmentStatus"];
             updated_at_sim?: components["schemas"]["SimTime"];
+        };
+        /**
+         * @description Orden de despacho de un cargamento `in_warehouse`: lo carga en un vehículo propio
+         *     `idle` situado en el nodo del cargamento y lo pone en ruta hasta el destino del
+         *     contrato. El cargamento viaja físicamente; su llegada confirma la entrega del CCRI.
+         */
+        ShipmentDispatch: {
+            /** @description Vehículo propio `idle` situado en el nodo del cargamento que transporta la carga. */
+            vehicle_id: components["schemas"]["VehicleId"];
+            /** @description Ruta propia que empieza en el nodo del cargamento y termina en el nodo destino del contrato. */
+            route_id: components["schemas"]["RouteId"];
         };
         Terminal: {
             id: components["schemas"]["TerminalId"];
@@ -3853,6 +3904,86 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
+            429: components["responses"]["TooManyRequests"];
+            500: components["responses"]["InternalError"];
+            503: components["responses"]["Maintenance"];
+        };
+    };
+    dispatchShipment: {
+        parameters: {
+            query?: never;
+            header?: {
+                /**
+                 * @description Clave de idempotencia para **reintentos seguros de comandos que mueven
+                 *     valor**: si el cliente reintenta con la misma clave, el servidor reproduce
+                 *     la misma respuesta del primer intento — nunca hay doble ejecución.
+                 */
+                "Idempotency-Key"?: components["parameters"]["idempotencyKey"];
+            };
+            path: {
+                shipmentId: components["schemas"]["ShipmentId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ShipmentDispatch"];
+            };
+        };
+        responses: {
+            /** @description Cargamento despachado (`in_transit`, con `vehicle_id` asignado). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        data: components["schemas"]["Shipment"];
+                        meta: components["schemas"]["Meta"];
+                    };
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            /**
+             * @description El cargamento o el vehículo pertenecen a otra corporación (autorización por
+             *     propiedad), o el vehículo está SELLADO durante un handoff (`VEHICLE_SEALED`).
+             */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            404: components["responses"]["NotFound"];
+            /**
+             * @description El vehículo no está `idle`, o el cargamento ya no está `in_warehouse` (ya está
+             *     en tránsito, entregado o liberado in situ).
+             */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /**
+             * @description `VALIDATION_ERROR`: la ruta no empieza en el nodo del cargamento o no termina en
+             *     el nodo destino del contrato; la capacidad del vehículo es insuficiente para el
+             *     volumen del cargamento; o la autonomía/combustible no cubre la distancia de la
+             *     ruta.
+             */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
             429: components["responses"]["TooManyRequests"];
             500: components["responses"]["InternalError"];
             503: components["responses"]["Maintenance"];

@@ -345,6 +345,13 @@ RETURNING *;
 -- name: GetContract :one
 SELECT * FROM ledger.contracts WHERE id = sqlc.arg(id);
 
+-- GetContractForUpdate bloquea el contrato (SELECT FOR UPDATE) para el
+-- consumidor de entregas: fija el estado (active/settled/failed) y el
+-- quantity_delivered bajo el lock antes de acumular la entrega y liquidar,
+-- serializándose con el barrido de vencimiento (que lo bloquea con SKIP LOCKED).
+-- name: GetContractForUpdate :one
+SELECT * FROM ledger.contracts WHERE id = sqlc.arg(id) FOR UPDATE;
+
 -- GetContractForAcceptance resuelve el contrato resultante de una aceptación
 -- servida. El esquema NO liga la aceptación al contrato con una FK: el vínculo
 -- es publication_id + el aceptante como comprador (venta) o vendedor (compra).
@@ -379,6 +386,21 @@ INSERT INTO ledger.contract_deliveries (
 VALUES (
     sqlc.arg(id), sqlc.arg(contract_id), sqlc.arg(shipment_id),
     sqlc.arg(quantity), sqlc.arg(delivered_at_sim), sqlc.arg(on_time))
+RETURNING *;
+
+-- InsertContractDeliveryIfNew registra la entrega de un cargamento de forma
+-- IDEMPOTENTE: un cargamento (world.shipments) llega físicamente a su destino
+-- una sola vez, luego su entrega se cuenta una sola vez. Si ya existe una
+-- entrega para ese shipment_id (índice único ux_contract_deliveries_shipment,
+-- 0010), no inserta nada y no devuelve fila (pgx.ErrNoRows): reprocesar el mismo
+-- shipment.arrived no duplica la partida ni la cantidad entregada.
+-- name: InsertContractDeliveryIfNew :one
+INSERT INTO ledger.contract_deliveries (
+    id, contract_id, shipment_id, quantity, delivered_at_sim, on_time)
+VALUES (
+    sqlc.arg(id), sqlc.arg(contract_id), sqlc.arg(shipment_id),
+    sqlc.arg(quantity), sqlc.arg(delivered_at_sim), sqlc.arg(on_time))
+ON CONFLICT (shipment_id) DO NOTHING
 RETURNING *;
 
 -- ListContractDeliveries devuelve las entregas confirmadas de un contrato, de

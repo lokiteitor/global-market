@@ -833,6 +833,97 @@ func (s *Service) ResolveAcceptanceContract(ctx context.Context, a Acceptance) (
 	return &id, nil
 }
 
+// ─── Liquidación pro-rata (compartida por el worker y el consumidor) ─────────
+
+// settleAndEmit liquida un contrato pro-rata con ledger.settle_contract_prorata
+// (lo entregado a tiempo al comprador en el destino; lo faltante reembolsado al
+// comprador y la garantía repartida compensación/sink; el stock no entregado
+// liberado in situ en el ledger del vendedor en su almacén de origen) y emite
+// contract.settled con el estado final (settled|failed). Corre DENTRO de la
+// transacción del llamante (tx) sobre un Repo ya ligado a ella (r), con el
+// contrato ya bloqueado FOR UPDATE. La comparte el barrido de vencimiento del
+// worker (fill pro-rata) y el consumidor de entregas (fill 100% al completar).
+// Devuelve el contrato ya liquidado (status/fill_bp los fija la función SQL).
+func (s *Service) settleAndEmit(ctx context.Context, r *Repo, tx pgx.Tx, contract Contract, simNow simtime.SimTime) (Contract, error) {
+	sellerCash, err := r.GetCashAccount(ctx, contract.SellerAccountID)
+	if err != nil {
+		return Contract{}, fmt.Errorf("contracts: caja del vendedor %s: %w", contract.SellerAccountID, err)
+	}
+	buyerCash, err := r.GetCashAccount(ctx, contract.BuyerAccountID)
+	if err != nil {
+		return Contract{}, fmt.Errorf("contracts: caja del comprador %s: %w", contract.BuyerAccountID, err)
+	}
+	sink, err := r.GetSinkAccount(ctx)
+	if err != nil {
+		return Contract{}, fmt.Errorf("contracts: cuenta sink del banco central: %w", err)
+	}
+
+	destNode, err := s.warehouseNode(ctx, r, contract.DestinationNodeID, "destino")
+	if err != nil {
+		return Contract{}, err
+	}
+	buyerStock, err := r.EnsureStockFreeAccount(ctx, contract.BuyerAccountID, contract.ProductID, *destNode.BuildingID)
+	if err != nil {
+		return Contract{}, err
+	}
+	originNode, err := s.warehouseNode(ctx, r, contract.OriginNodeID, "origen")
+	if err != nil {
+		return Contract{}, err
+	}
+	sellerStockRelease, err := r.EnsureStockFreeAccount(ctx, contract.SellerAccountID, contract.ProductID, *originNode.BuildingID)
+	if err != nil {
+		return Contract{}, err
+	}
+
+	txID, err := newUUIDv7()
+	if err != nil {
+		return Contract{}, err
+	}
+	entryIDs, err := newUUIDv7Batch(maxSettleEntries)
+	if err != nil {
+		return Contract{}, err
+	}
+	if err := r.SettleContractProrata(ctx, settleContractArgs{
+		TxID:               txID,
+		ContractID:         contract.ID,
+		SimTime:            simNow,
+		SellerCash:         sellerCash.ID,
+		BuyerCash:          buyerCash.ID,
+		BuyerStock:         buyerStock.ID,
+		SinkAccount:        sink.ID,
+		SellerStockRelease: sellerStockRelease.ID,
+		CompensationBP:     int32(s.opts.CompensationBP), //nolint:gosec // 0..10000 por Validate
+		EntryIDs:           entryIDs,
+	}); err != nil {
+		return Contract{}, mapLedgerError(err)
+	}
+
+	// Re-leer el contrato para el estado final (status/fill_bp los fija la
+	// función SQL) y emitir contract.settled con el shape exacto del contrato.
+	settled, err := r.GetContract(ctx, contract.ID)
+	if err != nil {
+		return Contract{}, fmt.Errorf("contracts: releyendo el contrato liquidado %s: %w", contract.ID, err)
+	}
+	fill := 0
+	if settled.FillBP != nil {
+		fill = int(*settled.FillBP)
+	}
+	if err := outbox.Emit(ctx, tx, int64(simNow), AggregateContract, settled.ID, EventContractSettled, ContractSettledPayload{
+		ContractID:          settled.ID.String(),
+		ProductID:           settled.ProductID.String(),
+		DestinationRegionID: destNode.RegionID.String(),
+		UnitPrice:           fixed(settled.UnitPrice),
+		QuantityAgreed:      fixed(settled.QuantityAgreed),
+		QuantityDelivered:   fixed(settled.QuantityDelivered),
+		FillBP:              fill,
+		SettledAtSim:        int64(simNow),
+		Status:              string(settled.Status),
+	}); err != nil {
+		return Contract{}, err
+	}
+	return settled, nil
+}
+
 // ─── Métricas del tablón ─────────────────────────────────────────────────────
 
 // UpdateBoardGauge recuenta las publicaciones visibles del tablón y actualiza

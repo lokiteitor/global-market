@@ -24,6 +24,13 @@ const (
 	EventContractConfirmed    = "contract.confirmed"
 	EventContractDelivered    = "contract.delivered"
 	EventContractSettled      = "contract.settled"
+	// EventContractExpiredUndelivered lo emite el barrido de vencimiento cuando
+	// un contrato vence con cantidad SIN entregar. Lo consume world (motor de
+	// tránsito) para DETENER los cargamentos aún en tránsito de ese contrato y
+	// liberarlos in situ en su ubicación física actual (GDD 7.1/5.3: nada se
+	// teletransporta). La contabilidad la cierra contracts (settle pro-rata); el
+	// movimiento físico lo hace world — integración SOLO por el outbox (SAD §7).
+	EventContractExpiredUndelivered = "contract.expired_undelivered"
 )
 
 // Payloads JSON de los eventos. Por el contrato de la API, dinero y stock
@@ -89,15 +96,22 @@ type AcceptanceResolvedPayload struct {
 }
 
 // ContractConfirmedPayload es el payload de contract.confirmed: el contrato
-// nace del sorteo con su bloqueo triple ya asentado.
+// nace del sorteo con su bloqueo triple ya asentado. Su forma es el contrato de
+// integración FIJO CCRI↔Logística (SAD §7): contract_id, kind (buy|sell),
+// buyer/seller, product_id, quantity, origin/destination_node_id, deadline_sim y
+// confirmed_at_sim — el consumidor world "shipment_creator" materializa el
+// cargamento a partir de ellos. publication_id, channel y unit_price son extras
+// informativos. Kind distingue las compras cross-node (generan cargamento) de
+// las ventas in situ (origin==destination, sin transporte).
 type ContractConfirmedPayload struct {
 	ContractID        string `json:"contract_id"`
+	Kind              string `json:"kind"` // buy | sell (kind de la publicación de origen)
 	PublicationID     string `json:"publication_id,omitempty"`
 	Channel           string `json:"channel"`
 	BuyerAccountID    string `json:"buyer_account_id"`
 	SellerAccountID   string `json:"seller_account_id"`
 	ProductID         string `json:"product_id"`
-	QuantityAgreed    string `json:"quantity_agreed"`
+	Quantity          string `json:"quantity"`
 	UnitPrice         string `json:"unit_price"`
 	OriginNodeID      string `json:"origin_node_id"`
 	DestinationNodeID string `json:"destination_node_id"`
@@ -129,6 +143,18 @@ type ContractSettledPayload struct {
 	FillBP              int    `json:"fill_bp"`
 	SettledAtSim        int64  `json:"settled_at_sim"`
 	Status              string `json:"status"` // settled | failed
+}
+
+// ContractExpiredUndeliveredPayload es el payload de contract.expired_undelivered:
+// el contrato venció con undelivered_quantity unidades sin entregar. Lo consume
+// world para detener y liberar in situ los cargamentos aún en tránsito de ese
+// contrato (su ubicación física actual). contracts ya cerró la contabilidad
+// (settle pro-rata liberó el stock reservado no entregado en el ledger); este
+// evento coordina el lado FÍSICO sin cruzar la frontera de contexto.
+type ContractExpiredUndeliveredPayload struct {
+	ContractID          string `json:"contract_id"`
+	UndeliveredQuantity string `json:"undelivered_quantity"`
+	ExpiredAtSim        int64  `json:"expired_at_sim"`
 }
 
 // fixed serializa un importe/cantidad de punto fijo como string del contrato.

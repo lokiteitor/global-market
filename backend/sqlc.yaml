@@ -286,3 +286,86 @@ sql:
             go_type:
               type: "string"
               pointer: true
+
+  # Bounded context logistics (Incremento 3: LOGÍSTICA FÍSICA). El Logistics
+  # Service es PLANIFICACIÓN SIN estado de tránsito (ADR-006, GDD 15.1): lee el
+  # grafo de world.* (network_nodes/links/segments, terminals, regions) para el
+  # pathfinding y ESCRIBE las rutas propietarias (world.routes/route_legs). El
+  # estado de tránsito (vehicles/shipments) es de internal/world, no de aquí.
+  # Paquete sqlc PROPIO del contexto (no comparte con world): la frontera entre
+  # bounded contexts es de código Go, no de esquema — sus queries pueden tocar
+  # world.* pero el paquete Go nunca importa internal/world. Mismo criterio y
+  # mismas overrides que ledger/contracts/market/world. Las geometrías
+  # (location/path/portion, SRID 0 planar, ADR-019) se proyectan con
+  # ST_AsGeoJSON(...)::text; los handlers las adaptan al schema GeoJSON-plano.
+  - engine: "postgresql"
+    schema: "db/migrations"
+    queries: "internal/logistics/queries"
+    gen:
+      go:
+        package: "sqlcgen"
+        out: "internal/logistics/sqlcgen"
+        sql_package: "pgx/v5"
+        emit_json_tags: false
+        omit_unused_structs: true
+        overrides:
+          - db_type: "uuid"
+            go_type: "github.com/google/uuid.UUID"
+          - db_type: "uuid"
+            nullable: true
+            go_type:
+              import: "github.com/google/uuid"
+              type: "UUID"
+              pointer: true
+          - db_type: "pg_catalog.timestamptz"
+            go_type: "time.Time"
+          - db_type: "pg_catalog.timestamptz"
+            nullable: true
+            go_type:
+              import: "time"
+              type: "Time"
+              pointer: true
+          - db_type: "timestamptz"
+            go_type: "time.Time"
+          - db_type: "timestamptz"
+            nullable: true
+            go_type:
+              import: "time"
+              type: "Time"
+              pointer: true
+          - db_type: "sim_time"
+            go_type: "int64"
+          - db_type: "sim_time"
+            nullable: true
+            go_type:
+              type: "int64"
+              pointer: true
+          - db_type: "money_amount"
+            go_type: "int64"
+          - db_type: "money_amount"
+            nullable: true
+            go_type:
+              type: "int64"
+              pointer: true
+          - db_type: "stock_qty"
+            go_type: "int64"
+          - db_type: "stock_qty"
+            nullable: true
+            go_type:
+              type: "int64"
+              pointer: true
+          - db_type: "pg_catalog.int8"
+            nullable: true
+            go_type:
+              type: "int64"
+              pointer: true
+          - db_type: "pg_catalog.int4"
+            nullable: true
+            go_type:
+              type: "int32"
+              pointer: true
+          - db_type: "text"
+            nullable: true
+            go_type:
+              type: "string"
+              pointer: true

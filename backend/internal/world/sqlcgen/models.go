@@ -294,6 +294,49 @@ func (ns NullWorldIngredientRole) Value() (driver.Value, error) {
 	return string(ns.WorldIngredientRole), nil
 }
 
+type WorldLinkMode string
+
+const (
+	WorldLinkModeRoad WorldLinkMode = "road"
+	WorldLinkModeRail WorldLinkMode = "rail"
+	WorldLinkModeSea  WorldLinkMode = "sea"
+)
+
+func (e *WorldLinkMode) Scan(src interface{}) error {
+	switch s := src.(type) {
+	case []byte:
+		*e = WorldLinkMode(s)
+	case string:
+		*e = WorldLinkMode(s)
+	default:
+		return fmt.Errorf("unsupported scan type for WorldLinkMode: %T", src)
+	}
+	return nil
+}
+
+type NullWorldLinkMode struct {
+	WorldLinkMode WorldLinkMode
+	Valid         bool // Valid is true if WorldLinkMode is not NULL
+}
+
+// Scan implements the Scanner interface.
+func (ns *NullWorldLinkMode) Scan(value interface{}) error {
+	if value == nil {
+		ns.WorldLinkMode, ns.Valid = "", false
+		return nil
+	}
+	ns.Valid = true
+	return ns.WorldLinkMode.Scan(value)
+}
+
+// Value implements the driver Valuer interface.
+func (ns NullWorldLinkMode) Value() (driver.Value, error) {
+	if !ns.Valid {
+		return nil, nil
+	}
+	return string(ns.WorldLinkMode), nil
+}
+
 type WorldNodeKind string
 
 const (
@@ -382,6 +425,98 @@ func (ns NullWorldProductClass) Value() (driver.Value, error) {
 		return nil, nil
 	}
 	return string(ns.WorldProductClass), nil
+}
+
+type WorldShipmentStatus string
+
+const (
+	WorldShipmentStatusInWarehouse    WorldShipmentStatus = "in_warehouse"
+	WorldShipmentStatusInTransit      WorldShipmentStatus = "in_transit"
+	WorldShipmentStatusAtTerminal     WorldShipmentStatus = "at_terminal"
+	WorldShipmentStatusDelivered      WorldShipmentStatus = "delivered"
+	WorldShipmentStatusReleasedInSitu WorldShipmentStatus = "released_in_situ"
+)
+
+func (e *WorldShipmentStatus) Scan(src interface{}) error {
+	switch s := src.(type) {
+	case []byte:
+		*e = WorldShipmentStatus(s)
+	case string:
+		*e = WorldShipmentStatus(s)
+	default:
+		return fmt.Errorf("unsupported scan type for WorldShipmentStatus: %T", src)
+	}
+	return nil
+}
+
+type NullWorldShipmentStatus struct {
+	WorldShipmentStatus WorldShipmentStatus
+	Valid               bool // Valid is true if WorldShipmentStatus is not NULL
+}
+
+// Scan implements the Scanner interface.
+func (ns *NullWorldShipmentStatus) Scan(value interface{}) error {
+	if value == nil {
+		ns.WorldShipmentStatus, ns.Valid = "", false
+		return nil
+	}
+	ns.Valid = true
+	return ns.WorldShipmentStatus.Scan(value)
+}
+
+// Value implements the driver Valuer interface.
+func (ns NullWorldShipmentStatus) Value() (driver.Value, error) {
+	if !ns.Valid {
+		return nil, nil
+	}
+	return string(ns.WorldShipmentStatus), nil
+}
+
+type WorldVehicleStatus string
+
+const (
+	WorldVehicleStatusIdle          WorldVehicleStatus = "idle"
+	WorldVehicleStatusLoading       WorldVehicleStatus = "loading"
+	WorldVehicleStatusInTransit     WorldVehicleStatus = "in_transit"
+	WorldVehicleStatusUnloading     WorldVehicleStatus = "unloading"
+	WorldVehicleStatusBroken        WorldVehicleStatus = "broken"
+	WorldVehicleStatusInMaintenance WorldVehicleStatus = "in_maintenance"
+	WorldVehicleStatusSealed        WorldVehicleStatus = "sealed"
+)
+
+func (e *WorldVehicleStatus) Scan(src interface{}) error {
+	switch s := src.(type) {
+	case []byte:
+		*e = WorldVehicleStatus(s)
+	case string:
+		*e = WorldVehicleStatus(s)
+	default:
+		return fmt.Errorf("unsupported scan type for WorldVehicleStatus: %T", src)
+	}
+	return nil
+}
+
+type NullWorldVehicleStatus struct {
+	WorldVehicleStatus WorldVehicleStatus
+	Valid              bool // Valid is true if WorldVehicleStatus is not NULL
+}
+
+// Scan implements the Scanner interface.
+func (ns *NullWorldVehicleStatus) Scan(value interface{}) error {
+	if value == nil {
+		ns.WorldVehicleStatus, ns.Valid = "", false
+		return nil
+	}
+	ns.Valid = true
+	return ns.WorldVehicleStatus.Scan(value)
+}
+
+// Value implements the driver Valuer interface.
+func (ns NullWorldVehicleStatus) Value() (driver.Value, error) {
+	if !ns.Valid {
+		return nil, nil
+	}
+	return string(ns.WorldVehicleStatus), nil
 }
 
 type WorldBuildingInventory struct {

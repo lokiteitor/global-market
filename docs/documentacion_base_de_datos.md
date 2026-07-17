@@ -2,11 +2,13 @@
 
 ## MMO de simulación económica, industrial y logística en un mundo único persistente. Decenas de miles de jugadores humanos y una población permanente de bots comparten el mismo mapa, el mismo mercado (tablón global de contratos CCRI) y las mismas reglas, sobre un servidor autoritativo.
 
-**Versión:** 1.3 · **Fecha:** 2026-07-17 · **Fuentes normativas:** GDD/SAD v1.3 (`gdd.md`), Arquitectura v1.2 (`arquitectura_imperio_industrial.md`) y contrato OpenAPI v1.2.0 (`api/openapi.yaml`), con los ADR-016 a ADR-022. Ante discrepancia, prevalece el GDD.
+**Versión:** 1.4 · **Fecha:** 2026-07-17 · **Fuentes normativas:** GDD/SAD v1.3 (`gdd.md`), Arquitectura v1.3 (`arquitectura_imperio_industrial.md`) y contrato OpenAPI v1.3.0 (`api/openapi.yaml`), con los ADR-016 a ADR-022. Ante discrepancia, prevalece el GDD.
 
 > **Cambios de v1.2 (Incremento 1 — núcleo CCRI, Fase 0):** ADR-022 (`ledger.account_kind` = `world_source`, contrapartida física de `production_output`/`consumption`); nueva tabla `public.idempotency_keys` (cabecera `Idempotency-Key` del contrato v1.2.0); migración `0008_ccri_support`; e **interpretaciones operativas del CCRI** (entrega in situ de las ventas, `origin_node_id` del aceptante en las compras, TTL de publicaciones abiertas, reparto de garantía, OHLC por región de destino) — todas en las secciones marcadas *v1.2* más abajo.
 >
 > **Cambios de v1.3 (Incremento 2 — mundo y producción, Fase 1):** cierra el lazo construir→producir→vender sobre el esquema `world` que ya existía desde `0003_world` — **no añade tablas, enums ni migraciones** (el bounded context `internal/world` materializa la *operación* de las tablas ya definidas). Documenta las **interpretaciones operativas del mundo y la producción**: sinks de `build_cost`/`upgrade_cost`/`canon`/`wage` y el traspaso de concesión; asientos de producción/extracción (`production_output`/`consumption` con `world_source` y su gemelo físico `building_inventories` en la misma tx); extracción que decrementa `resource_deposits` (finito); progreso analítico no persistido; reconciliación física↔contable (job del engine, gauge); decisión de combustible (`fuel_stock` como columna espejo); pausas `paused_no_fuel`/`paused_no_workers` como cascada de insolvencia parcial; y tiempo de construcción fijo — todas en la sección *v1.3* más abajo.
+>
+> **Cambios de v1.4 (Incremento 3 — logística física, Fase 1 terrestre):** materializa el pilar *ningún bien se mueve sin transporte físico; nada se teletransporta, tampoco en los fallos* (GDD 7.1/5.3) sobre el grafo, la flota y los cargamentos que ya existían desde `0003_world`. **Dos migraciones nuevas, sin tablas ni enums nuevos:** `0009_fleet_transit` (añade `world.shipments.destination_node_id`/`deadline_sim`, tres índices de barrido y la función SQL vinculante `world.segment_travel_seconds`) y `0010_delivery_idempotency` (índice único `ux_contract_deliveries_shipment`). Documenta las **interpretaciones operativas de la logística**: ciclo de vida del cargamento (`in_warehouse`→`in_transit`→`delivered`/`released_in_situ`) y la coherencia física↔contable ampliada (stock físico = `building_inventories` + cargamentos en vuelo); posición analítica de vehículos (segmento + `t_entrada` + `advance_fn`, derivada bajo demanda; solo los hitos escriben); congestión EMA por segmento; avería `broken` + reparación (la carga espera a bordo); y la integración CCRI↔Logística **solo por outbox** (`contract.confirmed` de compra cross-node → `shipment_creator`; `shipment.arrived` → `delivery_confirmer` → liquidación; `contract.expired_undelivered` → liberación in situ) — todas en la sección *v1.4* más abajo.
 
 ---
 
@@ -79,13 +81,14 @@ No aplica en Fases 0–1. Disparadores de adopción registrados (deben pasar por
 
 ```
 Total de Tablas:            44   (auth 4 · world 25 · ledger 8 · analytics 4 · outbox 2 · public 1)
-Total de Enums:             21   (v1.2 no añade enums: world_source es un VALUE nuevo de ledger.account_kind, no un enum)
+Total de Enums:             21   (v1.2–v1.4 no añaden enums: world_source es un VALUE nuevo de ledger.account_kind, no un enum; los enums de flota/tránsito ya existían desde 0003_world)
 Dominios de tipo:            3   (sim_time, money_amount, stock_qty)
 Triggers de invariante:      4   (balance por cuenta, doble entrada diferida, inmutabilidad ×2)
 Funciones todo-o-nada:       2 documentadas (confirm_contract, settle_contract_prorata)
+Funciones auxiliares SQL:    1 (segment_travel_seconds, IMMUTABLE — tiempo de viaje de un segmento, v1.4/0009)
 ```
 
-*(v1.2 añade `public.idempotency_keys` a las 43 tablas de v1.1 —que a su vez había añadido `auth.account_credentials` y `world.sim_clock` a las 41 de v1.0— y el `ledger.account_kind` `world_source` (ADR-022). **v1.3 (Incremento 2) no altera ningún conteo**: opera las tablas de `world` que ya existían desde `0003_world` sin migraciones nuevas. La fuente de verdad de todos los conteos —tablas, índices, FKs, CHECKs— son las migraciones de `/backend/db/migrations`, aplicadas contra PostgreSQL 18 + PostGIS 3.6.)*
+*(v1.2 añade `public.idempotency_keys` a las 43 tablas de v1.1 —que a su vez había añadido `auth.account_credentials` y `world.sim_clock` a las 41 de v1.0— y el `ledger.account_kind` `world_source` (ADR-022). **v1.3 (Incremento 2) no altera ningún conteo**: opera las tablas de `world` que ya existían desde `0003_world` sin migraciones nuevas. **v1.4 (Incremento 3) no altera el conteo de tablas ni de enums**: sus dos migraciones (`0009_fleet_transit`, `0010_delivery_idempotency`) solo añaden **dos columnas** a `world.shipments` (`destination_node_id`, `deadline_sim`), **cuatro índices** (tres parciales de barrido en `0009` más el único de idempotencia de entrega en `0010`) y **una función SQL** auxiliar (`world.segment_travel_seconds`). La fuente de verdad de todos los conteos —tablas, índices, FKs, CHECKs— son las migraciones de `/backend/db/migrations`, aplicadas contra PostgreSQL 18 + PostGIS 3.6.)*
 
 ---
 
@@ -108,7 +111,11 @@ Orden lógico de las migraciones iniciales (en `/backend/db/migrations`):
 0006_outbox       → mensajería
 0007_roles        → roles de grupo NOLOGIN (ii_gateway/ii_engine/ii_analytics) y GRANTs por esquema (mínimo privilegio)
 0008_ccri_support → ADR-022 (kind world_source) + public.idempotency_keys — soporte del núcleo CCRI (Incremento 1)
+0009_fleet_transit → world.shipments.destination_node_id/deadline_sim + índices de barrido + world.segment_travel_seconds — soporte del tránsito físico (Incremento 3)
+0010_delivery_idempotency → índice único ux_contract_deliveries_shipment — idempotencia estructural de la entrega del CCRI (Incremento 3)
 ```
+
+> **Migraciones `0009_fleet_transit` y `0010_delivery_idempotency` (Incremento 3 — logística física).** `0009` añade a `world.shipments` los dos datos del **contrato de origen** que el motor de tránsito necesita para validar el despacho y confirmar la entrega **sin cruzar al bounded context `contracts`** (la frontera entre contextos es de código Go; `world` y `contracts` se integran solo por el outbox, SAD §7 / ADR-006): `destination_node_id` (el nodo al que debe llegar el cargamento; su llegada física emite `shipment.arrived`) y `deadline_sim` (informativo para el motor; la puntualidad la decide el consumidor `contracts`). Ambas son **NULLABLE** —los cargamentos de retirada in situ no se despachan y las dejan sin poblar—. Añade tres índices parciales de barrido (`ix_vehicles_in_transit`, `ix_vehicles_broken`, `ix_shipments_destination`) y la función `world.segment_travel_seconds(advance_fn jsonb)` **`IMMUTABLE`**, fuente ÚNICA en SQL de la fórmula de tiempo de viaje de un segmento (la comparten la derivación analítica de la posición y el barrido de segmentos vencidos; el código Go no la reimplementa, la consulta). `0010` añade el índice único `ux_contract_deliveries_shipment` sobre `ledger.contract_deliveries(shipment_id)` que habilita el `INSERT … ON CONFLICT (shipment_id) DO NOTHING` del consumidor `delivery_confirmer`: reprocesar el mismo `shipment.arrived` (reintento del lote, redespliegue) no duplica la partida ni la cantidad entregada. Ambos `down` son reversibles (drop de columnas/índices/función); el detalle operativo está en la sección *v1.4* más abajo.
 
 > **Migración `0008_ccri_support` (Incremento 1).** Se aplica con la directiva `-- migrate:no-transaction`: `ALTER TYPE ... ADD VALUE 'world_source'` no puede usarse en la misma transacción que lo referencia, así que cada sentencia va en autocommit y **todas son re-ejecutables** (`IF EXISTS`/`IF NOT EXISTS` o drop+add emparejados). Los dos CHECK de `ledger.accounts` (`ck_accounts_non_negative`, `ck_accounts_asset`) se recrean con `NOT VALID` + `VALIDATE` para no escanear la tabla bajo `ACCESS EXCLUSIVE`; la nueva condición es estrictamente más permisiva, así que `VALIDATE` no puede fallar sobre datos existentes. El `down` **falla explícitamente** si existen filas `world_source` (su saldo negativo violaría los CHECK originales) y no puede eliminar el VALUE del enum (límite de PostgreSQL: no hay `ALTER TYPE ... DROP VALUE`), que queda inerte al restaurarse los CHECK.
 
@@ -727,8 +734,8 @@ CREATE INDEX ix_segments_region ON world.link_segments (region_id);
 
 #### Reglas de Negocio
 
-- `congestion_ema` se recalcula como evento recurrente de baja frecuencia (cada 30–60 s de sim-time por enlace), no como tick continuo.
-- El pathfinding jerárquico (HPA*-style) del Logistics Service usa la grilla de regiones como nivel superior del grafo y estos pesos suavizados; las ETAs resultantes son **estimaciones informativas, no garantías** (el riesgo lo asume quien pactó el plazo).
+- `congestion_ema` se recalcula como **job periódico de baja frecuencia** (motor de tránsito, `II_CONGESTION_INTERVAL`, default 30 s wall), no como tick continuo: por segmento cuenta los vehículos `in_transit` sobre él y actualiza `congestion_ema = α × carga_normalizada + (1−α) × congestion_ema` (α = 0.3, `carga_normalizada = min(vehículos / II_CONGESTION_CAPACITY_REF, 3)`, suelo 1.0). Publica el peso que consume el pathfinding y el gauge `ii_segment_congestion`. En la Fase 1 solo se seedea el modo `road`; en cada región un enlace tiene **un único segmento** (el split fronterizo multi-región es Incremento 6).
+- El pathfinding del Logistics Service pondera con estos pesos suavizados (EMA) para evitar estampidas de replanificación; a la escala de la Fase 1 (una región, pocos nodos) resuelve con **Dijkstra plano** ponderado por congestión, y el pathfinding jerárquico HPA* (GDD 7.4) queda diferido como **optimización por escala** (la interfaz `Planner` lo deja listo sin cambiar la arquitectura). Las ETAs resultantes son **estimaciones informativas, no garantías** (el riesgo lo asume quien pactó el plazo).
 
 ### 21. `world.terminals` y 22. `world.terminal_slots`
 
@@ -846,6 +853,9 @@ CREATE INDEX ix_vehicles_node ON world.vehicles (at_node_id) WHERE at_node_id IS
 #### Reglas de Negocio
 
 - El CHECK de exclusión garantiza **exactamente una ubicación física**: en nodo XOR en segmento — un vehículo no puede estar en dos sitios ni en ninguno.
+- **Posición analítica (v1.4):** cuando el vehículo está `in_transit` se persiste `(on_segment_id, segment_entered_sim, advance_fn)` y la posición exacta (`segment_progress_pct`, punto sobre la línea) se **deriva bajo demanda** al consultarla; solo los **hitos** (despacho, llegada a nodo, avería, cambio de segmento) escriben. `advance_fn` es el JSONB `{base_speed_kmh, congestion_ema, length_m, dir}` fijado al **entrar** al segmento: la congestión es la **snapshot** de ese momento y la llegada no se recalcula al variar la congestión después.
+- **Índices de barrido del motor de tránsito (v1.4, 0009):** `ix_vehicles_in_transit (segment_entered_sim) WHERE status = 'in_transit'` (segmentos por vencer) y `ix_vehicles_broken (repair_until_sim) WHERE status = 'broken'` (averías por reanudar) — coherentes con el invariante de coste ∝ eventos.
+- **Fórmula de tiempo de viaje (v1.4, 0009):** `world.segment_travel_seconds(advance_fn)` `IMMUTABLE` es la fuente ÚNICA en SQL: `t_viaje(seg) = ceil(length_km × congestion_ema / base_speed_kmh) × 3600` (factor = 1/`congestion_ema`, >1 = más lento). La comparten la derivación de la posición (GET vehicle) y el barrido de vencimiento del motor; el código Go no la reimplementa para no divergir.
 - El protocolo formal de handoff (SELLADO→COPIADO→ACTIVADO→PURGADO, `transfer_id` idempotente, ledger como árbitro) está **especificado pero no construido** (ADR-015); mientras todos los shards convivan en un proceso, el cruce de frontera es un traspaso local entre colas.
 
 ### 27. `world.shipments`
@@ -866,6 +876,11 @@ CREATE TABLE world.shipments (
     vehicle_id           uuid REFERENCES world.vehicles(id),
     at_node_id           uuid REFERENCES world.network_nodes(id),
     status               world.shipment_status NOT NULL DEFAULT 'in_warehouse',
+    -- v1.4 (0009_fleet_transit): datos del contrato de origen que el motor de
+    -- tránsito necesita SIN importar el contexto contracts (integración solo por
+    -- outbox). NULLABLE: los cargamentos de retirada in situ no se despachan.
+    destination_node_id  uuid REFERENCES world.network_nodes(id),  -- nodo destino del contrato
+    deadline_sim         sim_time,                                 -- vencimiento del contrato (informativo)
     created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at_sim       sim_time NOT NULL DEFAULT 0,
     CHECK ((vehicle_id IS NULL) <> (at_node_id IS NULL))
@@ -875,10 +890,27 @@ CREATE INDEX ix_shipments_contract ON world.shipments (contract_id) WHERE contra
 CREATE INDEX ix_shipments_freight ON world.shipments (freight_contract_id) WHERE freight_contract_id IS NOT NULL;
 CREATE INDEX ix_shipments_vehicle ON world.shipments (vehicle_id) WHERE vehicle_id IS NOT NULL;
 CREATE INDEX ix_shipments_node ON world.shipments (at_node_id) WHERE at_node_id IS NOT NULL;
+-- v1.4 (0009): confirmación de entrega — al llegar un vehículo a un nodo el motor
+-- busca los cargamentos a bordo con destino ese nodo.
+CREATE INDEX ix_shipments_destination ON world.shipments (destination_node_id)
+    WHERE destination_node_id IS NOT NULL;
 ```
+
+#### Enums Relacionados
+
+##### `world.shipment_status`
+
+| Valor | Descripción |
+|---|---|
+| `in_warehouse` | El cargamento existe en un nodo/almacén (`at_node_id`), su stock ya **dejó** `building_inventories`; a la espera de despacho |
+| `in_transit` | A bordo de un vehículo (`vehicle_id`) que lo mueve por el grafo |
+| `at_terminal` | En terminal, a la espera de transbordo (Fase 2 con CCRI-Flete) |
+| `delivered` | Llegó físicamente a su `destination_node_id`; su stock se integró en `building_inventories` del almacén destino y se emitió `shipment.arrived` |
+| `released_in_situ` | Liberado donde estaba al fallar/vencer su contrato: nada se teletransporta (GDD 5.3 paso 6c) |
 
 #### Reglas de Negocio
 
+- **Ciclo de vida (v1.4):** `in_warehouse` → `in_transit` (despacho) → `delivered` (llegada al destino) o `released_in_situ` (contrato vencido con cantidad sin entregar). El detalle de cada transición —quién la escribe, qué evento emite y cómo cuadra el stock físico— está en la sección *v1.4* más abajo.
 - Un contrato puede cumplirse con varios envíos/vehículos: cada llegada parcial genera una fila en `ledger.contract_deliveries` (verificación acumulativa).
 - Un cargamento reservado por un CCRI de venta puede viajar en flota subcontratada (CCRI-Flete) sin romper garantías: la composición la resuelve el ledger (cuenta `custody`), no la física.
 
@@ -1305,6 +1337,14 @@ CREATE TABLE ledger.contract_deliveries (
 );
 
 CREATE INDEX ix_deliveries_contract ON ledger.contract_deliveries (contract_id);
+
+-- v1.4 (0010_delivery_idempotency): cada cargamento llega FÍSICAMENTE a su destino
+-- una sola vez ⇒ su entrega se cuenta una sola vez. El índice único habilita el
+-- INSERT ... ON CONFLICT (shipment_id) DO NOTHING del consumidor delivery_confirmer:
+-- reprocesar el mismo shipment.arrived no duplica la partida ni la cantidad
+-- entregada. shipment_id ya es globalmente único: es la restricción más ajustada
+-- (no hace falta (contract_id, shipment_id)).
+CREATE UNIQUE INDEX ux_contract_deliveries_shipment ON ledger.contract_deliveries (shipment_id);
 ```
 
 ### 37. `ledger.freight_contracts`
@@ -1497,6 +1537,94 @@ Emitidos por `internal/world` en la **misma tx** que el cambio de estado (dinero
 
 ---
 
+## 🚛 Interpretaciones operativas de la logística (v1.4 — Incremento 3, Fase 1 terrestre)
+
+Decisiones de diseño **vinculantes** con las que el Incremento 3 (logística física, Fase 1: terrestre con congestión básica) materializa el pilar **ningún bien se mueve sin transporte físico; nada se teletransporta, tampoco en los fallos** (GDD 7.1/5.3) sobre el grafo, la flota y los cargamentos que ya existían desde `0003_world`. Añaden **dos migraciones** (`0009_fleet_transit`, `0010_delivery_idempotency`) —dos columnas, cuatro índices y una función SQL, sin tablas ni enums nuevos— y fijan cómo opera la **simulación de tránsito** el bounded context `internal/world` (subpaquete `world/fleet`) y cómo planifica el **Logistics Service** (`internal/logistics`). Son coherentes con el contrato OpenAPI v1.3.0 (secciones `world` fleet/shipments y `logistics/*`).
+
+### Frontera de contextos: `world` simula, `logistics` planifica, integración solo por outbox
+
+- **`internal/logistics` (Logistics Service) NO tiene estado de tránsito** (GDD 15.1 / ADR-006): lee el grafo (`world.network_nodes/links/link_segments`), planifica rutas con Dijkstra ponderado por congestión (POST `/logistics/route-plans`, solo cálculo, no persiste) y escribe **únicamente** `world.routes`/`route_legs` (CRUD de rutas propias). No mueve nada.
+- **`internal/world` (World Simulation) simula el movimiento**: el `TransitWorker` del engine mueve los vehículos y cargamentos por el grafo. `logistics` y `world` **no se importan** entre sí (SAD §7); se integran solo por el outbox. La frontera es de código Go, no de esquema: las queries sqlc de `logistics` (paquete propio `internal/logistics/sqlcgen`) leen `world.*` y escriben rutas, pero el paquete Go nunca alcanza el de `world`.
+- La integración CCRI↔Logística cruza contextos **solo por eventos**: `contracts` emite, `world` consume (`shipment_creator`) y emite de vuelta (`shipment.arrived`), que `contracts` consume (`delivery_confirmer`). Ningún import cruzado.
+
+### Ciclo de vida del cargamento (`world.shipments`) y coherencia física↔contable ampliada
+
+El stock reservado por un contrato viaja **etiquetado con `contract_id`**: deja de estar en el almacén físico y pasa a en tránsito **sin dejar de estar reservado** en el ledger (solo cambia su ubicación física, GDD 5.3 paso 4). Transiciones:
+
+1. **`in_warehouse`** — lo crea el consumidor `shipment_creator` desde `contract.confirmed` (compra cross-node): `owner = seller`, `at_node_id = origin_node_id`, `destination_node_id`/`deadline_sim` del contrato. En la MISMA tx **descuenta** `building_inventories(seller, product, almacén-del-origen) −= quantity` (el stock deja el almacén físico y pasa al cargamento; el `stock_reserved` contable del contrato **NO cambia**, sigue reservado, solo cambia su ubicación física). Emite `shipment.created`.
+2. **`in_transit`** — `POST /world/shipments/{id}/dispatch` carga el cargamento (`in_warehouse` → a bordo del `vehicle_id`) en un vehículo `idle` propio con ruta cuyos extremos casan origen→destino, valida que el combustible cubre **toda la ruta** (defensa: así la detención por falta de combustible en tránsito es solo un caso defensivo) y pone el vehículo `in_transit` sobre el primer segmento con su `advance_fn`. Emite `shipment.dispatched`.
+3. **`delivered`** — cuando el vehículo llega físicamente al `destination_node_id`, el motor marca el cargamento `delivered`, **integra su stock físico** en `building_inventories` del almacén del nodo destino y emite `shipment.arrived` (hito que consume `contracts`). La propiedad contable la resuelve el `settle` del CCRI.
+4. **`released_in_situ`** — si el contrato **vence** con cantidad sin entregar, los cargamentos aún en vuelo de ese contrato se **detienen y liberan en su ubicación física actual** (para la Fase 1, el último nodo alcanzado o el origen si no salió): `status = released_in_situ`, `building_inventories(seller, ese nodo) += quantity`. Nada se teletransporta (GDD 5.3 paso 6c). Ver «Liberación in situ» abajo.
+
+**Coherencia física↔contable (extiende la reconciliación del Incremento 2):** el stock físico total de un producto tiene ahora **dos ubicaciones** — el inventario del edificio (`building_inventories`) **más** los cargamentos en vuelo cuyo stock ya dejó el almacén (`world.shipments` en `in_warehouse`/`in_transit`/`at_terminal`). El job de reconciliación (`ListStockDiscrepancies`, motor del engine, `II_RECONCILE_INTERVAL`) re-atribuye cada cargamento en vuelo al **almacén de origen** (la cuenta `stock_reserved` del contrato conserva ahí su `warehouse_building_id` hasta la liquidación) y comprueba: `físico(building_inventories) + físico(cargamentos en vuelo) = stock_free + stock_reserved` por (almacén, producto). Los `delivered` ya están en `building_inventories` del destino; los `released_in_situ` nunca salieron del `building_inventories` de origen; se excluye `custody` (flete, Fase 2). Resultado esperado en reposo: **cero divergencias** (gauge `ii_reconciliation_discrepancies`).
+
+### Posición analítica de vehículos (solo los hitos escriben)
+
+En tránsito se persiste `(on_segment_id, segment_entered_sim, advance_fn)` y la posición exacta se **deriva bajo demanda** (GET vehicle: `segment_progress_pct` y el punto sobre la línea); solo los **hitos** escriben. `advance_fn` es el JSONB `{base_speed_kmh, congestion_ema, length_m, dir}` fijado al **entrar** al segmento — la congestión es la snapshot de ese momento y la llegada no se recalcula al variar la congestión después. El coste es proporcional a los eventos (despacho, llegada a nodo, avería, cambio de segmento), no a las entidades (invariante nº 2).
+
+### Motor de tránsito (`TransitWorker`, engine, event-driven)
+
+Un barrido periódico (`II_TRANSIT_SWEEP_INTERVAL`, default 1 s wall) toma con `FOR UPDATE SKIP LOCKED` los vehículos `in_transit` cuyo segmento **venció** (`segment_entered_sim + world.segment_travel_seconds(advance_fn) ≤ simNow`); cada vehículo se procesa en **su propia** tx serializable, de modo que varias instancias corren en paralelo. Al vencer, en orden:
+
+1. **Combustible:** consume `fuel = fuel_per_100km × length_m / 100000`. Si es insuficiente (caso defensivo: se validó toda la ruta al despachar) → el vehículo se **detiene** en el nodo previo, `status = idle`, evento `vehicle.stranded`, no avanza (el jugador debe repostar).
+2. **Desgaste:** suma `II_WEAR_PER_SEGMENT` a `wear_pct` (acotado a 100).
+3. **Avería probabilística** (`p = wear_pct / 1000` por segmento, `crypto/rand`, falla cerrado a "sin avería" si se agota la entropía): si avería → `status = broken`, `repair_until_sim = simNow + II_REPAIR_SIM_SECONDS`; **la carga espera a bordo** (avería = tiempo perdido, no carga perdida, GDD 7.3), evento `vehicle.broken`.
+4. **Avance:** si no hay avería, pasa al siguiente segmento del enlace, o al primer segmento del siguiente leg, o —si era el último— **llega** al nodo destino final: `at_node_id = destino`, `on_segment_id = NULL`, `status = idle`, evento `vehicle.arrived`. Si llevaba cargamentos con destino ESE nodo, los **entrega** (integra su stock en `building_inventories` del almacén del nodo y emite `shipment.arrived` por cada uno).
+
+**Reanudación** (barrido de recuperación): los `broken` con `repair_until_sim ≤ simNow` vuelven a `in_transit` **re-entrando al MISMO segmento** con `segment_entered_sim = simNow` (índice `ix_vehicles_broken`); los `in_maintenance` cuyo mantenimiento venció vuelven a `idle`.
+
+### Congestión (`congestion_ema` por segmento, EMA)
+
+Job periódico (`II_CONGESTION_INTERVAL`, default 30 s wall): por segmento cuenta los vehículos `in_transit` sobre él y actualiza `congestion_ema = α × carga_normalizada + (1−α) × congestion_ema` (α = 0.3, `carga_normalizada = min(vehículos / II_CONGESTION_CAPACITY_REF, 3)`, suelo 1.0 = fluido; >1 = más lento). Publica el gauge `ii_segment_congestion` y el peso que consume el pathfinding. En Fase 1 solo se seedea `road` y cada enlace tiene **un único segmento** por región (el split fronterizo multi-región es Incremento 6).
+
+### Integración CCRI↔Logística por outbox (contratos de evento FIJOS)
+
+- **`contract.confirmed`** (emite `contracts`) enriquecido con `{contract_id, kind: buy|sell, buyer_account_id, seller_account_id, product_id, quantity, origin_node_id, destination_node_id, deadline_sim, confirmed_at_sim}`. Lo consume el consumidor `world` **`shipment_creator`** SOLO si `kind = buy` **y** `origin_node_id ≠ destination_node_id` (los `sell` son entrega in situ, `origin == destination`, y ya liquidan al confirmar — no generan cargamento). Crea el `shipment` `in_warehouse` y mueve el stock físico fuera del almacén (ver ciclo de vida). Defensivo e idempotente: si el nodo de origen no tiene almacén, si no hay stock físico suficiente o si ya existe un cargamento del contrato, registra y omite (métrica `ii_shipments_created_skipped_total`).
+- **`shipment.arrived`** (emite `world` al llegar un cargamento a su nodo destino) `{shipment_id, contract_id, quantity, destination_node_id, arrived_at_sim}`. Lo consume el consumidor `contracts` **`delivery_confirmer`**: calcula `on_time = arrived_at_sim ≤ contract.deadline_sim`, inserta `ledger.contract_deliveries` (**idempotente por `shipment_id`**, índice único de `0010`), y **solo si `on_time`** incrementa `contracts.quantity_delivered` (lo entregado a tiempo es lo que se paga, GDD 5.3 paso 6). Si `quantity_delivered ≥ quantity_agreed` → **liquida ya** con `ledger.settle_contract_prorata` (fill 100% ⇒ `settled`; el stock del comprador se integra en `building_inventories` del destino). El contrato se bloquea `FOR UPDATE`, serializándose con el barrido de vencimiento (que lo toma con `SKIP LOCKED`): una entrada tardía a la par del vencimiento no liquida dos veces. Emite `contract.delivered` y, si liquida, `contract.settled`.
+- **Liberación in situ de contratos vencidos** (`contract.expired_undelivered`): el barrido de vencimiento de `contracts` liquida pro-rata lo no entregado a tiempo y, si quedó cantidad sin entregar, emite `contract.expired_undelivered {contract_id, undelivered_quantity, expired_at_sim}`. La contabilidad la cierra `contracts` (el `settle` pro-rata liberó en el ledger el `stock_reserved` no entregado, in situ en el origen); el **lado físico** —detener los cargamentos aún en vuelo de ese contrato y liberarlos in situ (`status = released_in_situ`, `building_inventories(seller, nodo actual) += quantity`)— es competencia del motor de tránsito de `world`, que lo recibe por este evento (integración solo por outbox, SAD §7). Nada se teletransporta.
+
+> **Nota de implementación (divergencia real).** En el estado actual del backend, la **emisión** de `contract.expired_undelivered` está construida y cableada en el barrido de vencimiento de `contracts`, y la **liberación contable** del stock reservado no entregado la realiza `settle_contract_prorata` (Incremento 1). El **consumidor `world`** que detiene físicamente los cargamentos en vuelo y los pasa a `released_in_situ` devolviéndolos a `building_inventories` es la pieza pendiente de este vector (el evento y su contrato de payload ya están fijados). Hasta que se cablee, un contrato cross-node que venza con cargamentos aún en tránsito deja esos cargamentos en su estado físico previo; la reconciliación los sigue contando en el almacén de origen (no hay pérdida de stock, sí una transición de estado pendiente). Se documenta aquí, con el mismo criterio honesto que el handoff multi-proceso «especificado pero no construido».
+
+### Parámetros de configuración del incremento
+
+| Parámetro | Default | Significado |
+|---|---|---|
+| `II_TRANSIT_SWEEP_INTERVAL` | 1 s wall | Periodo del barrido del motor de tránsito (segmentos vencidos + recuperación) |
+| `II_TRANSIT_SWEEP_BATCH_SIZE` | 100 | Máximo de vehículos por barrido (`FOR UPDATE SKIP LOCKED`) |
+| `II_REPAIR_SIM_SECONDS` | 1800 sim | Tiempo de reparación de una avería (`broken` → `in_transit`, mismo segmento) |
+| `II_CONGESTION_INTERVAL` | 30 s wall | Periodo del job de congestión (recálculo de la EMA por segmento) |
+| `II_CONGESTION_CAPACITY_REF` | 5 | Capacidad de referencia de vehículos por segmento para normalizar la carga |
+| `II_WEAR_PER_SEGMENT` | 1 | Desgaste (`wear_pct`) que suma cada segmento recorrido |
+| `II_MAINTENANCE_SIM_SECONDS` | 600 sim | Duración de un mantenimiento programado (`in_maintenance` → `idle`) |
+| `II_WORLD_QUERY_TIMEOUT` | 10 s | Timeout de las queries de lectura de los handlers `world/*` (compartido) |
+
+### Métricas Prometheus del motor de tránsito y los consumidores
+
+`ii_vehicles_in_transit` (gauge), `ii_segment_congestion{segment}` (gauge), `ii_shipments_delivered_total`, `ii_vehicle_breakdowns_total`, `ii_transit_arrivals_total`, `ii_vehicles_stranded_total`, `ii_transit_sweep_duration_seconds{sweep}` (histograma: `transit`/`recovery`/`congestion`); del `shipment_creator`: `ii_shipments_created_total`, `ii_shipments_created_skipped_total`; del `delivery_confirmer`: `ii_contract_deliveries_confirmed_total`, `ii_contract_deliveries_late_total`, `ii_contract_deliveries_settled_total`, `ii_contract_deliveries_duplicate_total`, `ii_contract_deliveries_after_settle_total`.
+
+Todas estas son métricas del **engine** y se exponen en **`:8081/metrics`** (workers del motor de tránsito y sus consumidores del outbox).
+
+### Métricas Prometheus del Logistics Service (gateway)
+
+El **Logistics Service** (`internal/logistics`) no es un worker del engine: sus handlers (route-plans y CRUD de rutas) son endpoints HTTP **síncronos** montados por el proceso *gateway* (ver «Frontera de contextos» arriba y `internal/gateway/server.go`), así que sus métricas se registran en el registry del gateway y se exponen en **`:8080/metrics`**, **no** en `:8081`: `ii_route_plans_total{result}` (`found`/`no_route`/`not_found`/`invalid`/`error`), `ii_routes_created_total` y el histograma `ii_route_plan_duration_seconds` (duración del pathfinding Dijkstra ponderado por congestión). Prometheus debe *scrapear ambos* endpoints (`:8080` gateway y `:8081` engine) para tener la vista completa de la logística.
+
+### Eventos de outbox del incremento
+
+| Evento | Agregado | Emisor | Momento |
+|---|---|---|---|
+| `vehicle.purchased` / `vehicle.updated` | `vehicle` | `world` | Compra de un vehículo; asignación/retiro de ruta o mantenimiento programado |
+| `vehicle.arrived` | `vehicle` | `world` | Llegada al nodo destino final de la ruta |
+| `vehicle.broken` | `vehicle` | `world` | Avería (la carga espera a bordo; reparación hasta `repair_until_sim`) |
+| `vehicle.stranded` | `vehicle` | `world` | Detención defensiva por falta de combustible en el nodo previo |
+| `shipment.created` | `shipment` | `world` (`shipment_creator`) | Materialización del cargamento desde `contract.confirmed` (compra cross-node) |
+| `shipment.dispatched` | `shipment` | `world` | Despacho: el cargamento sube a un vehículo y arranca el tránsito |
+| `shipment.arrived` | `shipment` | `world` | Llegada física al nodo destino (lo consume `delivery_confirmer`) |
+| `contract.confirmed` (enriquecido) | `contract` | `contracts` | Bloqueo triple asentado; payload FIJO de integración (lo consume `shipment_creator`) |
+| `contract.delivered` | `contract` | `contracts` (`delivery_confirmer`) | Llegada parcial/total confirmada del CCRI |
+| `contract.expired_undelivered` | `contract` | `contracts` | Vencimiento con cantidad sin entregar; coordina la liberación física in situ en `world` |
+
+---
+
 ## 📈 Módulo Analítica (esquema `analytics`)
 
 Escrito por el job **Analytics** (batch de baja prioridad, deliberadamente separado de Persistence). Son los **agregados permanentes** del mundo que nunca se resetea: crecen lento y se conservan para siempre (GDD 17.2).
@@ -1608,7 +1736,8 @@ CREATE TABLE outbox.consumer_cursors (
 #### Reglas de Negocio
 
 - `seq` (`IDENTITY`) da el orden total de polling — la única PK no-UUID del sistema, por diseño; `event_id` conserva la identidad UUID global del evento.
-- Eventos típicos: `contract.settled`, `vehicle.arrived`, `batch.completed`, `city.level_up` — los hitos del motor event-driven. El Incremento 1 emite el ciclo del CCRI (`publication.*`, `acceptance.*`, `contract.confirmed/delivered/settled`; ver «Interpretaciones operativas del CCRI»).
+- Eventos típicos: `contract.settled`, `vehicle.arrived`, `batch.completed`, `city.level_up` — los hitos del motor event-driven. El Incremento 1 emite el ciclo del CCRI (`publication.*`, `acceptance.*`, `contract.confirmed/delivered/settled`; ver «Interpretaciones operativas del CCRI»); el Incremento 2, los del mundo/producción (`concession.*`, `building.*`, `batch.*`); el Incremento 3, los de la logística física (`vehicle.*`, `shipment.*`, `contract.expired_undelivered`; ver «Interpretaciones operativas de la logística»).
+- **Consumidores cross-context del Incremento 3** (patrón de integración event-driven entre bounded contexts, cada uno con su cursor propio): `shipment_creator` (módulo `world`, suscrito a `contract.confirmed`) materializa el cargamento de las compras cross-node; `delivery_confirmer` (módulo `contracts`, suscrito a `shipment.arrived`) confirma la entrega y liquida. `world` y `contracts` **nunca se importan**: toda su coordinación pasa por estos eventos.
 - **API del módulo (v1.2, materializada en el Incremento 1):** `outbox.Emit(ctx, tx, simTime, aggregateType, aggregateID, eventType, payload)` inserta el evento **en la misma transacción** que el cambio de estado que lo causa; `outbox.NewConsumer(pool, name, eventTypes)` con `Run(ctx, interval, handler)` procesa los eventos **en orden de `seq`** y **avanza el cursor en la misma transacción del handler** — de ahí el *exactly-once por consumidor*: reejecutar un lote no duplica su efecto. Cada consumidor lógico tiene su propia fila en `consumer_cursors`.
 - **Primer consumidor real: `ohlc_aggregator`** (módulo `market`), suscrito a `contract.settled`, que construye las velas `analytics.market_ohlc`.
 - Los eventos consumidos por todos los cursores se purgan en la ventana de mantenimiento diaria.
@@ -1683,6 +1812,8 @@ erDiagram
     VEHICLE_TYPES ||--o{ VEHICLES : "FK"
     ROUTES ||--o{ ROUTE_LEGS : "FK"
     VEHICLES ||--o{ SHIPMENTS : "a bordo"
+    NETWORK_NODES ||--o{ SHIPMENTS : "ubicación/destino (v1.4)"
+    LINK_SEGMENTS ||--o{ VEHICLES : "en tránsito (v1.4)"
 
     LEDGER_ACCOUNTS ||--o{ LEDGER_ENTRIES : "partidas"
     LEDGER_TRANSACTIONS ||--o{ LEDGER_ENTRIES : "asiento"
@@ -1754,6 +1885,8 @@ Notas:
   - `ix_entries_account (account_id, created_at)` — extractos y auditoría por cuenta.
   - GIST en `regions.bounds`, `buildings.footprint`, `network_links.path`, `deposits/cities/nodes.location` — consultas espaciales PostGIS (validación de emplazamiento, área de interés).
   - Índices parciales sobre colas vivas (`production_batches`, `sessions.expires_at`, outbox por `seq`).
+  - `ix_vehicles_in_transit (segment_entered_sim) WHERE status='in_transit'` y `ix_vehicles_broken (repair_until_sim) WHERE status='broken'` (v1.4) — barridos del motor de tránsito (segmentos vencidos y averías por reanudar), coste ∝ eventos.
+  - `ux_contract_deliveries_shipment (shipment_id)` (v1.4) — idempotencia estructural de la entrega del CCRI (`ON CONFLICT DO NOTHING` del `delivery_confirmer`).
 - El trigger de balance serializa las escrituras por cuenta caliente (p. ej. el sink del banco central): es el coste aceptado de tener la invariante en la base. Si una cuenta de sistema se vuelve cuello de botella, la mitigación diseñada es el particionado del ledger **por cuenta** (Fase 2+, vía ADR).
 - Los jobs Analytics y Persistence no compiten: Analytics es batch de baja prioridad, Persistence tiene prioridad y RPO/RTO definidos.
 
@@ -1769,6 +1902,8 @@ Notas:
 - **Una garantía íntegra por publicación** (ADR-014): la invariante "todo lo visible en el tablón es ejecutable al 100%" se cumple por construcción, sin contabilidad N:M ni cancelaciones en cascada en la ruta crítica de aceptación. La reserva compartida queda como expansión.
 - **Garantía fija del 10%, sin reputación** (decisión #27): se elimina el premio en lugar de vigilar al tramposo — sin fill-rate no hay incentivo al wash-trading ni maquinaria anti-manipulación.
 - **Contrapartida física del stock = `world_source`** (ADR-022, v1.2): `emission`/`world_source` son las dos únicas cuentas *fiat* del banco central que pueden ser negativas —masa monetaria y masa física emitidas—; con ellas producción y consumo se asientan sin excepción al trigger de doble entrada por activo.
+- **Logística física con posición analítica** (v1.4, Incremento 3): ningún bien se mueve sin transporte físico; el stock reservado viaja etiquetado por contrato (`world.shipments`) entre `building_inventories` y su destino, y la reconciliación física↔contable incluye los cargamentos en vuelo (`físico(edificio) + físico(en vuelo) = free + reserved`). La posición de un vehículo en tránsito se persiste como `(segmento, t_entrada, advance_fn)` y se **deriva** bajo demanda con `world.segment_travel_seconds`; solo los hitos escriben (coste ∝ eventos). La integración CCRI↔Logística cruza contextos **solo por outbox** (`shipment_creator` en `world`, `delivery_confirmer` en `contracts`), sin imports cruzados.
+- **Planificación sin estado de tránsito** (v1.4, ADR-006): `internal/logistics` planifica rutas (Dijkstra ponderado por congestión EMA) y define `world.routes`, pero no simula el movimiento — eso lo hace el shard (`internal/world`). HPA* (GDD 7.4) queda diferido como optimización por escala (no cambia la arquitectura; la interfaz `Planner` lo deja listo) — sin ADR nuevo.
 - **Idempotencia de comandos que mueven valor** (contrato v1.2.0): la cabecera `Idempotency-Key` se persiste por `(key, account_id)` en `public.idempotency_keys`; misma clave ⇒ misma respuesta reproducida (solo `status < 500`), reintentos seguros sin doble ejecución.
 - **El esquema físico no impone la topología**: las cajas lógicas (shards, Contract Service, Balancer) comparten instancia con fronteras por esquema y credenciales por servicio; la extracción a procesos/instancias separadas es una decisión medida posterior (ADR-008), y este modelo de datos no la bloquea.
 - **Casos borde conocidos** (a resolver en la capa de orquestación, documentados aquí deliberadamente):

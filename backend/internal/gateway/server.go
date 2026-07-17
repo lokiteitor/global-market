@@ -21,6 +21,7 @@ import (
 	"github.com/lokiteitor/global-market/backend/internal/auth"
 	"github.com/lokiteitor/global-market/backend/internal/contracts"
 	"github.com/lokiteitor/global-market/backend/internal/ledger"
+	"github.com/lokiteitor/global-market/backend/internal/logistics"
 	"github.com/lokiteitor/global-market/backend/internal/market"
 	"github.com/lokiteitor/global-market/backend/internal/platform/httpx"
 	"github.com/lokiteitor/global-market/backend/internal/platform/idempotency"
@@ -28,6 +29,7 @@ import (
 	"github.com/lokiteitor/global-market/backend/internal/sim/simtime"
 	"github.com/lokiteitor/global-market/backend/internal/world/buildings"
 	"github.com/lokiteitor/global-market/backend/internal/world/catalog"
+	"github.com/lokiteitor/global-market/backend/internal/world/fleet"
 	"github.com/lokiteitor/global-market/backend/internal/world/land"
 	"github.com/lokiteitor/global-market/backend/internal/world/production"
 )
@@ -61,6 +63,12 @@ type Options struct {
 	// Production es la configuración del subpaquete world/production (cola de
 	// producción; el motor vive en el engine).
 	Production production.Options
+	// Fleet es la configuración del subpaquete world/fleet (flota y despacho de
+	// cargamentos; el motor de tránsito vive en el engine).
+	Fleet fleet.Options
+	// Logistics es la configuración del bounded context logistics (Logistics
+	// Service: grafo, route-plans y rutas propietarias).
+	Logistics logistics.Options
 	// ClockReader es la caché del lector del reloj de simulación.
 	ClockReader clock.ReaderOptions
 }
@@ -101,6 +109,14 @@ func OptionsFromEnv() (Options, error) {
 	if err != nil {
 		return Options{}, err
 	}
+	fleetOpts, err := fleet.OptionsFromEnv()
+	if err != nil {
+		return Options{}, err
+	}
+	logisticsOpts, err := logistics.OptionsFromEnv()
+	if err != nil {
+		return Options{}, err
+	}
 	readerOpts, err := clock.ReaderOptionsFromEnv()
 	if err != nil {
 		return Options{}, err
@@ -114,6 +130,8 @@ func OptionsFromEnv() (Options, error) {
 		Land:        landOpts,
 		Buildings:   buildingsOpts,
 		Production:  productionOpts,
+		Fleet:       fleetOpts,
+		Logistics:   logisticsOpts,
 		ClockReader: readerOpts,
 	}, nil
 }
@@ -251,13 +269,43 @@ func BuildHandler(deps Deps) (http.Handler, error) {
 	}
 	productionHandlers := production.NewHandlers(productionSvc, sessionIdentity{}, meta, deps.Logger)
 
+	// world/fleet (Incremento 3): flota (catálogo, compra, comando) y despacho de
+	// cargamentos (ejecución logística del CCRI). El motor de tránsito y el
+	// consumidor shipment_creator viven en el engine; aquí solo los handlers.
+	fleetSvc, err := fleet.NewService(deps.Pool, meta.reader, deps.Options.Fleet, deps.Logger, deps.Registry)
+	if err != nil {
+		return nil, err
+	}
+	fleetHandlers := fleet.NewHandlers(fleetSvc, sessionIdentity{}, meta, deps.Logger)
+
 	worldMux := http.NewServeMux()
 	catalogHandlers.Register(worldMux)
 	landHandlers.Register(worldMux)
 	buildingsHandlers.Register(worldMux)
 	productionHandlers.Register(worldMux)
+	fleetHandlers.Register(worldMux)
 	api.Handle(APIPrefix+"/world/",
 		http.StripPrefix(APIPrefix, authMW.RequireAuth(authMW.RateLimitAPI(idempotentWrites(idemMW, worldMux)))))
+
+	// Bounded context logistics (Incremento 3): el Logistics Service —
+	// planificación SIN estado de tránsito (ADR-006). Lee el grafo (nodos,
+	// enlaces, segmentos con congestión EMA), calcula route-plans (pathfinding de
+	// solo cálculo) y gestiona las rutas propietarias. NO importa internal/world:
+	// ambos contextos se integran solo por el outbox de eventos. Misma cadena que
+	// contracts/world — RequireAuth → RateLimitAPI → idempotencia (solo POST/
+	// PATCH/DELETE: route-plans es cálculo puro reintentable y el CRUD de rutas
+	// muta estado) — con la sesión de auth como Identity para la propiedad de las
+	// rutas y el reloj de simulación estampando el meta.
+	logisticsSvc, err := logistics.NewService(deps.Pool, deps.Options.Logistics, deps.Logger, deps.Registry)
+	if err != nil {
+		return nil, err
+	}
+	logisticsHandlers := logistics.NewHandlers(logisticsSvc, sessionIdentity{}, meta, deps.Logger)
+
+	logisticsMux := http.NewServeMux()
+	logisticsHandlers.Register(logisticsMux)
+	api.Handle(APIPrefix+"/logistics/",
+		http.StripPrefix(APIPrefix, authMW.RequireAuth(authMW.RateLimitAPI(idempotentWrites(idemMW, logisticsMux)))))
 
 	return contractErrors(api), nil
 }

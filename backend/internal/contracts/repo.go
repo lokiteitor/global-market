@@ -562,6 +562,17 @@ func (r *Repo) GetContract(ctx context.Context, id uuid.UUID) (Contract, error) 
 	return toContract(row), nil
 }
 
+// GetContractForUpdate bloquea el contrato (SELECT FOR UPDATE) y lo devuelve;
+// pgx.ErrNoRows si no existe. Lo usa el consumidor de entregas para fijar estado
+// y quantity_delivered bajo el lock antes de acumular la entrega y liquidar.
+func (r *Repo) GetContractForUpdate(ctx context.Context, id uuid.UUID) (Contract, error) {
+	row, err := r.q.GetContractForUpdate(ctx, id)
+	if err != nil {
+		return Contract{}, err
+	}
+	return toContract(row), nil
+}
+
 // GetContractForAcceptance resuelve el contrato de una aceptación servida por
 // (publicación, aceptante como comprador o vendedor); pgx.ErrNoRows si aún no
 // hay contrato (no servida) o no existe.
@@ -621,6 +632,28 @@ func (r *Repo) InsertContractDelivery(ctx context.Context, id, contractID, shipm
 		return ContractDelivery{}, fmt.Errorf("contracts: registrando la entrega del contrato %s: %w", contractID, err)
 	}
 	return toContractDelivery(row), nil
+}
+
+// InsertContractDeliveryIfNew registra la entrega de un cargamento de forma
+// idempotente por shipment_id (índice único ux_contract_deliveries_shipment).
+// Devuelve inserted=false (sin error) si ya existía una entrega para ese
+// cargamento: reprocesar el mismo shipment.arrived no duplica la partida.
+func (r *Repo) InsertContractDeliveryIfNew(ctx context.Context, id, contractID, shipmentID uuid.UUID, qty int64, deliveredAtSim simtime.SimTime, onTime bool) (ContractDelivery, bool, error) {
+	row, err := r.q.InsertContractDeliveryIfNew(ctx, sqlcgen.InsertContractDeliveryIfNewParams{
+		ID:             id,
+		ContractID:     contractID,
+		ShipmentID:     shipmentID,
+		Quantity:       qty,
+		DeliveredAtSim: int64(deliveredAtSim),
+		OnTime:         onTime,
+	})
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return ContractDelivery{}, false, nil
+	case err != nil:
+		return ContractDelivery{}, false, fmt.Errorf("contracts: registrando (idempotente) la entrega del contrato %s: %w", contractID, err)
+	}
+	return toContractDelivery(row), true, nil
 }
 
 // ListContractDeliveries devuelve las entregas confirmadas de un contrato.

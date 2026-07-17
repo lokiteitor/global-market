@@ -16,7 +16,7 @@ Login de desarrollo: corporación `Demo` / secret `demo-secret-dev` (configurabl
 |---|---|
 | API pública | `http://localhost:8080/api/v1/...` (en dev también vía `:3000/api/v1` por el proxy) |
 | Salud | `:8080/healthz`, `:8080/readyz`, `:8081/healthz` (fuera de `/api/v1`) |
-| Métricas | `:8080/metrics`, `:8081/metrics` |
+| Métricas | `:8080/metrics` (gateway: HTTP síncrono, incl. Logistics Service `ii_route_plans_total`/`ii_routes_created_total`/`ii_route_plan_duration_seconds`), `:8081/metrics` (engine: workers de tránsito/producción/CCRI, reconciliación, congestión). Prometheus scrapea **ambos**. |
 | PostgreSQL | `localhost:5432`, BD `imperio`, usuario/clave `imperio`/`imperio` |
 | Prometheus / Grafana | `:9090` / `:3001` (admin/admin) |
 

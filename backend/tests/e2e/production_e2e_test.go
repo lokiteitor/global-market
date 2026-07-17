@@ -44,12 +44,14 @@ import (
 	"github.com/lokiteitor/global-market/backend/internal/contracts"
 	"github.com/lokiteitor/global-market/backend/internal/gateway"
 	"github.com/lokiteitor/global-market/backend/internal/ledger"
+	"github.com/lokiteitor/global-market/backend/internal/logistics"
 	"github.com/lokiteitor/global-market/backend/internal/market"
 	"github.com/lokiteitor/global-market/backend/internal/seed"
 	"github.com/lokiteitor/global-market/backend/internal/sim/clock"
 	"github.com/lokiteitor/global-market/backend/internal/sim/simtime"
 	"github.com/lokiteitor/global-market/backend/internal/world/buildings"
 	"github.com/lokiteitor/global-market/backend/internal/world/catalog"
+	"github.com/lokiteitor/global-market/backend/internal/world/fleet"
 	"github.com/lokiteitor/global-market/backend/internal/world/land"
 	"github.com/lokiteitor/global-market/backend/internal/world/production"
 )
@@ -123,6 +125,8 @@ func TestProductionCycleE2E(t *testing.T) {
 			Land:        land.DefaultOptions(),
 			Buildings:   buildings.DefaultOptions(),
 			Production:  production.DefaultOptions(),
+			Fleet:       fleet.DefaultOptions(),
+			Logistics:   logistics.DefaultOptions(),
 			ClockReader: clock.ReaderOptions{CacheTTL: 0},
 		},
 	})
@@ -551,5 +555,7 @@ func withWorldDefaults(o gateway.Options) gateway.Options {
 	o.Land = land.DefaultOptions()
 	o.Buildings = buildings.DefaultOptions()
 	o.Production = production.DefaultOptions()
+	o.Fleet = fleet.DefaultOptions()
+	o.Logistics = logistics.DefaultOptions()
 	return o
 }
