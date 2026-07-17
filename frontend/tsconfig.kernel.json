@@ -1,0 +1,35 @@
+{
+  "$comment": "Proyecto TS del kernel framework-agnostic (shared/, domain/, network/, config/): se typechequea sin Nuxt con las opciones estrictas del FAD §23.2. Complementa a `nuxt typecheck` (ver script typecheck).",
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "types": ["vitest/importMeta"],
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "resolveJsonModule": true,
+    "forceConsistentCasingInFileNames": true,
+    "paths": {
+      "~shared/*": ["./shared/*"],
+      "~domain/*": ["./domain/*"],
+      "~network/*": ["./network/*"]
+    }
+  },
+  "include": [
+    "shared/**/*.ts",
+    "shared/**/*.json",
+    "domain/**/*.ts",
+    "network/**/*.ts",
+    "config/**/*.ts",
+    "vitest.config.ts"
+  ]
+}

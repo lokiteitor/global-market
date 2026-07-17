@@ -1,0 +1,38 @@
+// themes/light — tema claro opcional. Mapa de tokens → custom properties,
+// activado explícitamente con <html data-theme="light"> (FAD §15.14).
+
+@use 'sass:map';
+@use '../settings' as s;
+
+$theme-light: (
+  'bg': s.$color-gray-050,
+  'bg-raised': #ffffff,
+  'surface': #ffffff,
+  'surface-hover': s.$color-gray-100,
+  'surface-active': s.$color-gray-200,
+  'border': s.$color-gray-300,
+  'border-strong': s.$color-gray-400,
+  'text': s.$color-gray-800,
+  'text-strong': s.$color-gray-950,
+  'text-muted': s.$color-gray-500,
+  'link': s.$color-info-500,
+  'accent': s.$color-accent-600,
+  'accent-hover': s.$color-accent-500,
+  'accent-contrast': #ffffff,
+  'success': s.$color-success-500,
+  'warning': s.$color-warning-500,
+  'danger': s.$color-danger-500,
+  'info': s.$color-info-500,
+  'market-up': s.$color-market-up,
+  'market-down': s.$color-market-down,
+  'focus': s.$color-focus,
+  'selection': rgba(s.$color-accent-600, 0.25),
+);
+
+:root[data-theme='light'] {
+  color-scheme: light;
+
+  @each $name, $value in $theme-light {
+    --color-#{$name}: #{$value};
+  }
+}

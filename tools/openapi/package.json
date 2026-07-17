@@ -1,0 +1,11 @@
+{
+  "name": "ii-tools-openapi",
+  "private": true,
+  "description": "Lint del contrato OpenAPI de Imperio Industrial (Contract First). Invocado desde el Makefile raíz (make contract-lint).",
+  "scripts": {
+    "lint": "redocly lint ../../docs/api/openapi.yaml --config redocly.yaml"
+  },
+  "devDependencies": {
+    "@redocly/cli": "^2.0.0"
+  }
+}

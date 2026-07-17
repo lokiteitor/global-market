@@ -1,0 +1,65 @@
+// El binario gateway sirve la API pública del backend: la plataforma base
+// (healthz/readyz/metrics con la cadena de middlewares) y, bajo /api/v1, las
+// rutas del contrato OpenAPI v1.1.0 que compone internal/gateway (auth,
+// ledger y el lector del reloj de simulación). Este composition root es la
+// única capa que junta los bounded contexts: ellos no se importan entre sí.
+package main
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"os"
+	"os/signal"
+	"syscall"
+
+	"github.com/lokiteitor/global-market/backend/internal/gateway"
+	"github.com/lokiteitor/global-market/backend/internal/platform/config"
+	"github.com/lokiteitor/global-market/backend/internal/platform/metrics"
+	"github.com/lokiteitor/global-market/backend/internal/platform/service"
+)
+
+func main() {
+	if err := run(); err != nil {
+		fmt.Fprintln(os.Stderr, "gateway:", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	app, err := service.New(ctx, metrics.ServiceGateway, cfg.HTTPAddr, cfg)
+	if err != nil {
+		return err
+	}
+	defer app.Close()
+
+	opts, err := gateway.OptionsFromEnv()
+	if err != nil {
+		return err
+	}
+	api, err := gateway.BuildHandler(gateway.Deps{
+		Pool:     app.Pool(),
+		Logger:   app.Logger(),
+		Registry: app.Metrics().Registry(),
+		Options:  opts,
+	})
+	if err != nil {
+		return err
+	}
+	app.Mux().Handle(gateway.APIPrefix+"/", api)
+	app.Logger().Info("rutas del contrato montadas",
+		slog.String("prefix", gateway.APIPrefix),
+		slog.Int("login_per_min", opts.Auth.LoginPerMin),
+		slog.Float64("api_rps", opts.Auth.APIRPS),
+		slog.Int("api_burst", opts.Auth.APIBurst),
+		slog.Duration("simclock_cache_ttl", opts.ClockReader.CacheTTL))
+
+	return app.Run(ctx)
+}

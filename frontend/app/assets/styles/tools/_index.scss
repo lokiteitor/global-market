@@ -1,0 +1,5 @@
+// tools — mixins y funciones (capa ITCSS sin salida CSS). FAD §10.4.
+// Uso: `@use "tools" as t;` (loadPaths configurado en nuxt.config.ts).
+
+@forward 'media';
+@forward 'focus';

@@ -1,0 +1,18 @@
+# Binarios y artefactos
+backend/bin/
+frontend/.output/
+frontend/.nuxt/
+frontend/node_modules/
+tools/openapi/node_modules/
+coverage/
+*.out
+
+# Entorno local (los .env versionados solo contienen valores dev sin secretos)
+*.env.local
+.envrc
+
+# Editores / SO
+.idea/
+.vscode/
+*.swp
+.DS_Store

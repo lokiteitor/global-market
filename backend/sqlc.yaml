@@ -1,0 +1,73 @@
+# ══════════════════════════════════════════════════════════════════════════
+# Imperio Industrial — sqlc (ADR-020: sqlc SOLO genera código de queries;
+# el esquema es propiedad de las migraciones manuales de db/migrations).
+#
+# Se ejecuta vía `make backend-generate` → go:generate en internal/ledger
+# (go run github.com/sqlc-dev/sqlc/cmd/sqlc@vX.Y.Z, versión fijada allí,
+# sin dependencia en go.mod). El código generado SE VERSIONA.
+# Rutas relativas a este fichero (backend/). sqlc ignora los *.down.sql.
+# ══════════════════════════════════════════════════════════════════════════
+version: "2"
+sql:
+  - engine: "postgresql"
+    schema: "db/migrations"
+    queries: "internal/ledger/queries"
+    gen:
+      go:
+        package: "sqlcgen"
+        out: "internal/ledger/sqlcgen"
+        sql_package: "pgx/v5"
+        # El JSON del contrato lo forman los handlers (envelopes, snake_case,
+        # dinero como string) — nunca las structs generadas.
+        emit_json_tags: false
+        # Solo los modelos/enums que las queries usan (el esquema completo
+        # incluye world/analytics/outbox, ajenos a este módulo).
+        omit_unused_structs: true
+        overrides:
+          # IDs: uuid nativo ↔ github.com/google/uuid (ADR-018); las columnas
+          # opcionales van como puntero (NULL ↔ nil).
+          - db_type: "uuid"
+            go_type: "github.com/google/uuid.UUID"
+          - db_type: "uuid"
+            nullable: true
+            go_type:
+              import: "github.com/google/uuid"
+              type: "UUID"
+              pointer: true
+          # Wall-clock como time.Time plano (sin pgtype en la superficie).
+          # sqlc nombra el tipo con y sin prefijo pg_catalog según el origen
+          # (columna vs. cast), de ahí las dos variantes de cada override.
+          - db_type: "pg_catalog.timestamptz"
+            go_type: "time.Time"
+          - db_type: "pg_catalog.timestamptz"
+            nullable: true
+            go_type:
+              import: "time"
+              type: "Time"
+              pointer: true
+          - db_type: "timestamptz"
+            go_type: "time.Time"
+          - db_type: "timestamptz"
+            nullable: true
+            go_type:
+              import: "time"
+              type: "Time"
+              pointer: true
+          # Dominios del proyecto (0001_init): enteros de 64 bits en Go.
+          - db_type: "sim_time"
+            go_type: "int64"
+          - db_type: "money_amount"
+            go_type: "int64"
+          - db_type: "stock_qty"
+            go_type: "int64"
+          # Escalares opcionales como puntero, no pgtype.
+          - db_type: "pg_catalog.int8"
+            nullable: true
+            go_type:
+              type: "int64"
+              pointer: true
+          - db_type: "text"
+            nullable: true
+            go_type:
+              type: "string"
+              pointer: true

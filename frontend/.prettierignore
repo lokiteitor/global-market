@@ -1,0 +1,8 @@
+# Artefactos y generados (types/api.d.ts lo emite openapi-typescript, ADR-021)
+node_modules/
+.nuxt/
+.output/
+dist/
+coverage/
+types/api.d.ts
+package-lock.json

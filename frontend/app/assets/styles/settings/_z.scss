@@ -1,0 +1,14 @@
+// settings/z — escala de z-index (tokens puros, sin salida CSS).
+// Un solo eje de apilamiento para toda la app (FAD §15.4): el lienzo del
+// mundo debajo, HUD encima, superficies flotantes por bandas separadas.
+
+$z-below: -1;
+$z-base: 0;
+$z-canvas: 100; // lienzo del mundo (Phaser, incrementos futuros)
+$z-hud: 200; // barras/side del HUD superpuesto
+$z-panel: 300; // paneles y ventanas acoplables
+$z-dropdown: 400;
+$z-modal: 500;
+$z-toast: 600;
+$z-tooltip: 700;
+$z-overlay-system: 800; // overlays de sistema (mantenimiento, reconexión)

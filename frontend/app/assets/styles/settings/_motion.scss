@@ -1,0 +1,12 @@
+// settings/motion — duraciones y curvas (tokens puros, sin salida CSS).
+// Movimiento sobrio: la UI de gestión informa, no distrae. Todo consumo de
+// estos tokens debe respetar prefers-reduced-motion (ver generic/reset).
+
+$motion-duration-instant: 80ms;
+$motion-duration-fast: 140ms;
+$motion-duration-base: 220ms;
+$motion-duration-slow: 360ms;
+
+$motion-ease-out: cubic-bezier(0.2, 0, 0, 1);
+$motion-ease-in: cubic-bezier(1, 0, 0.8, 1);
+$motion-ease-in-out: cubic-bezier(0.45, 0, 0.15, 1);

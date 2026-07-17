@@ -1,0 +1,5 @@
+// themes — mapas de custom properties por tema (capa ITCSS). FAD §15.14.
+// Oscuro por defecto; claro opt-in vía :root[data-theme='light'].
+
+@forward 'dark';
+@forward 'light';

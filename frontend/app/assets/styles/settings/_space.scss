@@ -1,0 +1,14 @@
+// settings/space — escala de espaciado (tokens puros, sin salida CSS).
+// Base 4px expresada en rem (1rem = 16px). UI densa: pasos pequeños abajo,
+// saltos francos arriba. Prohibidos los valores mágicos fuera de esta escala.
+
+$space-0: 0;
+$space-1: 0.125rem; // 2px
+$space-2: 0.25rem; // 4px
+$space-3: 0.5rem; // 8px
+$space-4: 0.75rem; // 12px
+$space-5: 1rem; // 16px
+$space-6: 1.5rem; // 24px
+$space-7: 2rem; // 32px
+$space-8: 3rem; // 48px
+$space-9: 4rem; // 64px

@@ -1,0 +1,67 @@
+// elements/base — estilos base de elementos HTML (capa ITCSS). FAD §10.4.
+// Consume custom properties de themes/ (temables) y tokens de settings/.
+
+@use '../settings' as s;
+
+html {
+  font-family: s.$font-family-base;
+  font-size: 100%;
+  line-height: s.$line-height-base;
+}
+
+body {
+  background-color: var(--color-bg);
+  color: var(--color-text);
+  font-size: s.$font-size-400;
+}
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+  color: var(--color-text-strong);
+  line-height: s.$line-height-tight;
+  font-weight: s.$font-weight-semibold;
+}
+
+h1 {
+  font-size: s.$font-size-700;
+}
+
+h2 {
+  font-size: s.$font-size-600;
+}
+
+h3 {
+  font-size: s.$font-size-500;
+}
+
+a {
+  color: var(--color-link);
+  text-decoration: none;
+
+  &:hover {
+    text-decoration: underline;
+  }
+}
+
+code,
+pre,
+kbd,
+samp {
+  font-family: s.$font-family-mono;
+  font-size: s.$font-size-300;
+}
+
+::selection {
+  background-color: var(--color-selection);
+}
+
+// Datos numéricos (importes, cantidades, sim-time): cifras tabulares para
+// alineación en columnas (FAD §15.8). Aplicar a celdas y visores de datos.
+.u-numeric {
+  font-variant-numeric: tabular-nums lining-nums;
+  font-feature-settings: s.$font-features-numeric;
+}

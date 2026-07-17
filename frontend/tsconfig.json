@@ -1,0 +1,10 @@
+{
+  "$comment": "Proyecto raíz estilo Nuxt 4 (project references generadas por `nuxt prepare`). Las opciones estrictas del FAD §23.2 se inyectan vía typescript.tsConfig en nuxt.config.ts (capa app) y vía tsconfig.kernel.json (kernel framework-agnostic).",
+  "files": [],
+  "references": [
+    { "path": "./.nuxt/tsconfig.app.json" },
+    { "path": "./.nuxt/tsconfig.server.json" },
+    { "path": "./.nuxt/tsconfig.shared.json" },
+    { "path": "./.nuxt/tsconfig.node.json" }
+  ]
+}

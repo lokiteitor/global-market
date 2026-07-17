@@ -1,0 +1,40 @@
+// themes/dark — TEMA POR DEFECTO (FAD §15.14). Mapa de tokens → custom
+// properties. Se aplica en :root (sin atributo) y en :root[data-theme='dark'],
+// de modo que la app arranca oscura aunque el atributo aún no esté puesto.
+
+@use 'sass:map';
+@use '../settings' as s;
+
+$theme-dark: (
+  'bg': s.$color-gray-950,
+  'bg-raised': s.$color-gray-900,
+  'surface': s.$color-gray-900,
+  'surface-hover': s.$color-gray-850,
+  'surface-active': s.$color-gray-800,
+  'border': s.$color-gray-700,
+  'border-strong': s.$color-gray-600,
+  'text': s.$color-gray-200,
+  'text-strong': s.$color-gray-050,
+  'text-muted': s.$color-gray-400,
+  'link': s.$color-info-400,
+  'accent': s.$color-accent-500,
+  'accent-hover': s.$color-accent-400,
+  'accent-contrast': s.$color-gray-950,
+  'success': s.$color-success-400,
+  'warning': s.$color-warning-400,
+  'danger': s.$color-danger-400,
+  'info': s.$color-info-400,
+  'market-up': s.$color-market-up,
+  'market-down': s.$color-market-down,
+  'focus': s.$color-focus,
+  'selection': rgba(s.$color-accent-500, 0.35),
+);
+
+:root,
+:root[data-theme='dark'] {
+  color-scheme: dark;
+
+  @each $name, $value in $theme-dark {
+    --color-#{$name}: #{$value};
+  }
+}

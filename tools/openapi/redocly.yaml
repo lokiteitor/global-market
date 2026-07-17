@@ -1,0 +1,12 @@
+# Reglas de lint del contrato OpenAPI (make contract-lint)
+extends:
+  - recommended
+
+rules:
+  # El contrato es la frontera dura entre backend y frontend (API First):
+  operation-operationId: error
+  operation-summary: error
+  no-unresolved-refs: error
+  no-unused-components: warn
+  # El servidor de stress es un entorno separado documentado a propósito:
+  no-server-example.com: off

@@ -1,0 +1,24 @@
+# ══════════════════════════════════════════════════════════════════════════
+# Imperio Industrial — Prometheus (perfil obs)
+#
+# Modo habitual (make dev): gateway y engine corren en el HOST con `make
+# backend`; se scrapean vía host.docker.internal (extra_hosts en compose).
+# Perfil full: descomentar los targets de red interna gateway:8080 /
+# engine:8081 (o mantener ambos: los del host fallarán sin ruido).
+# ══════════════════════════════════════════════════════════════════════════
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: gateway
+    static_configs:
+      - targets:
+          - host.docker.internal:8080
+          # - gateway:8080   # perfil full (servicio en la red de compose)
+
+  - job_name: engine
+    static_configs:
+      - targets:
+          - host.docker.internal:8081
+          # - engine:8081    # perfil full (servicio en la red de compose)

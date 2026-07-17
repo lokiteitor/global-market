@@ -1,0 +1,14 @@
+# ══════════════════════════════════════════════════════════════════════════
+# Imperio Industrial — Caddy (perfil full)
+# Único punto de entrada HTTP del stack en Docker.
+# WebSockets: Caddy los proxya por defecto, sin configuración adicional.
+# ══════════════════════════════════════════════════════════════════════════
+:80 {
+	handle /api/* {
+		reverse_proxy gateway:8080
+	}
+
+	handle {
+		reverse_proxy frontend:3000
+	}
+}

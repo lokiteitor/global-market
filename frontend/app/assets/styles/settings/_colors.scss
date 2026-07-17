@@ -1,0 +1,43 @@
+// settings/colors — paleta propia (tokens puros, sin salida CSS). FAD §10.4/§15.
+// UI de gestión densa: neutros grafito con subtono frío, un acento ámbar
+// industrial contenido y semánticos legibles sobre fondo oscuro (tema por
+// defecto). Los temas (themes/) proyectan estos tokens a custom properties;
+// los componentes consumen las custom properties, no estos tokens directamente.
+
+// ── Neutros (grafito frío) ──
+$color-gray-950: #0d1117;
+$color-gray-900: #131924;
+$color-gray-850: #1a2130;
+$color-gray-800: #212a3b;
+$color-gray-700: #2e3a4f;
+$color-gray-600: #45536b;
+$color-gray-500: #5f6f88;
+$color-gray-400: #8494ab;
+$color-gray-300: #aab7c9;
+$color-gray-200: #cdd6e2;
+$color-gray-100: #e7ecf2;
+$color-gray-050: #f4f6f9;
+
+// ── Acento (ámbar industrial) ──
+$color-accent-700: #8a5a12;
+$color-accent-600: #b0761a;
+$color-accent-500: #d29224;
+$color-accent-400: #e3ab45;
+$color-accent-300: #eec677;
+
+// ── Semánticos ──
+$color-success-500: #3e9e5f;
+$color-success-400: #57b877;
+$color-warning-500: #c98a2e;
+$color-warning-400: #dda44b;
+$color-danger-500: #c4504a;
+$color-danger-400: #d96f68;
+$color-info-500: #3f7fae;
+$color-info-400: #5f9bc4;
+
+// ── Mercado (dirección de precio; distinguibles también por forma en la UI) ──
+$color-market-up: #4caf7d;
+$color-market-down: #d4645c;
+
+// ── Foco (anillo de accesibilidad, tools/focus) ──
+$color-focus: #6aa9dd;

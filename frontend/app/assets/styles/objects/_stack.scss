@@ -1,0 +1,11 @@
+// objects/stack — primitive de layout vertical (capa ITCSS, sin cosmética).
+// Apila hijos con ritmo uniforme. El espaciado se ajusta por custom property:
+//   <div class="o-stack" style="--stack-space: …">
+
+@use '../settings' as s;
+
+.o-stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--stack-space, #{s.$space-5});
+}

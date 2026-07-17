@@ -1,0 +1,12 @@
+// objects/cluster — primitive de layout horizontal con wrap (capa ITCSS).
+// Agrupa elementos de anchura variable (toolbars, chips, metadatos).
+//   <div class="o-cluster" style="--cluster-space: …">
+
+@use '../settings' as s;
+
+.o-cluster {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--cluster-space, #{s.$space-3});
+}

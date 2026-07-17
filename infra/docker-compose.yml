@@ -1,0 +1,135 @@
+# ══════════════════════════════════════════════════════════════════════════
+# Imperio Industrial — Infraestructura local (ADR-016: todo despliegue en /infra)
+#
+# Perfiles:
+#   core  → postgres                    (make infra-core lo combina con obs)
+#   obs   → prometheus + grafana
+#   full  → stack completo en Docker    (make run)
+#
+# Punto de entrada único: Makefile raíz (ADR-016). No invocar a mano salvo debug.
+# ══════════════════════════════════════════════════════════════════════════
+name: imperio
+
+services:
+  # ─── Núcleo: base de datos (ADR-018: PostgreSQL 18 + PostGIS 3.6) ────────
+  postgres:
+    image: postgis/postgis:18-3.6
+    container_name: imperio-postgres
+    # También en full: `make run` levanta solo --profile full y gateway/engine
+    # dependen de postgres healthy.
+    profiles: [core, full]
+    environment:
+      POSTGRES_USER: imperio
+      POSTGRES_PASSWORD: imperio
+      POSTGRES_DB: imperio
+    ports:
+      - "5432:5432"
+    volumes:
+      # PG18+: la imagen exige montar /var/lib/postgresql (no .../data);
+      # el entrypoint crea el subdirectorio por versión mayor (pg_upgrade-friendly)
+      - pgdata:/var/lib/postgresql
+      # Roles de servicio dev (solo primer arranque; ver postgres/init/01-roles.sql)
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+    shm_size: 256mb
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U imperio -d imperio"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # ─── Observabilidad (Fase 0: métricas + dashboards; Loki/Tempo pospuestos,
+  #     ver infra/README.md) ────────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v3.13.1
+    container_name: imperio-prometheus
+    profiles: [obs]
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    extra_hosts:
+      # Permite scrapear gateway/engine corriendo en el host (make backend)
+      - "host.docker.internal:host-gateway"
+
+  grafana:
+    image: grafana/grafana:13.1.0
+    container_name: imperio-grafana
+    profiles: [obs]
+    ports:
+      # 3000 lo ocupa el frontend en modo dev; Grafana se publica en 3001
+      - "3001:3000"
+    environment:
+      # Credenciales fijas SOLO para desarrollo local
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+
+  # ─── Perfil full: stack completo en Docker (make run) ────────────────────
+  gateway:
+    build:
+      context: ../backend
+      dockerfile: ../infra/docker/backend.Dockerfile
+      args:
+        CMD: gateway
+        PORT: "8080"
+    container_name: imperio-gateway
+    profiles: [full]
+    environment:
+      II_DATABASE_URL: postgres://imperio:imperio@postgres:5432/imperio?sslmode=disable
+      II_HTTP_ADDR: ":8080"
+      II_ENV: dev
+    expose:
+      - "8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  engine:
+    build:
+      context: ../backend
+      dockerfile: ../infra/docker/backend.Dockerfile
+      args:
+        CMD: engine
+        PORT: "8081"
+    container_name: imperio-engine
+    profiles: [full]
+    environment:
+      II_DATABASE_URL: postgres://imperio:imperio@postgres:5432/imperio?sslmode=disable
+      II_ENGINE_ADDR: ":8081"
+      II_ENV: dev
+    expose:
+      - "8081"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  frontend:
+    # NOTA: /frontend aún no existe; el Dockerfile queda preparado y el
+    # perfil full no se usa hasta que llegue el cliente Nuxt (ADR-021).
+    build:
+      context: ../frontend
+      dockerfile: ../infra/docker/frontend.Dockerfile
+    container_name: imperio-frontend
+    profiles: [full]
+    expose:
+      - "3000"
+
+  caddy:
+    image: caddy:2
+    container_name: imperio-caddy
+    profiles: [full]
+    ports:
+      - "80:80"
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+    depends_on:
+      - gateway
+      - frontend
+
+volumes:
+  pgdata:

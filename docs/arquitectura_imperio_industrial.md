@@ -4,9 +4,9 @@
 
 **Proyecto:** Imperio Industrial — Simulación Económica MMO
 
-**Versión del Documento:** 1.0 (derivada del GDD/SAD v1.2)
+**Versión del Documento:** 1.1 (derivada del GDD/SAD v1.3)
 
-**Fecha:** 2026-07-15
+**Fecha:** 2026-07-16
 
 **Responsables:** Equipo de Arquitectura / Backend
 
@@ -65,14 +65,14 @@ graph LR
 
 ### 4.1 Descripción de Contenedores
 
-En Fases 0–1 la topología física es un **monolito modular**: pocas unidades desplegables con fronteras internas estrictas. Las cajas lógicas del diagrama **no** implican procesos separados desde el inicio (ver ADR-017 y sección 11 de este documento).
+En Fases 0–1 la topología física es un **monolito modular**: pocas unidades desplegables con fronteras internas estrictas. Las cajas lógicas del diagrama **no** implican procesos separados desde el inicio (ver ADR-008, ADR-013 y ADR-017, y la sección 11 de este documento).
 
 | Contenedor | Tecnología | Responsabilidad |
 |-----------|------------|-----------------|
 | Motor de simulación (shards + contratos + logística + balancer) | Go + sqlc | Simulación del mundo por shards lógicos, ciclo de vida del CCRI, pathfinding jerárquico, balance macroeconómico. Un solo proceso en Fases 0–1 con módulos tras fronteras estrictas (paquetes con interfaces, sin imports cruzados). |
-| Gateway web / Auth / Presentación | TypeScript + Fastify + Drizzle | API pública REST, autenticación y sesiones, Notification/Event Gateway (WebSocket con interest management). |
+| Gateway web / Auth / Presentación | Go + net/http | API pública REST, autenticación y sesiones, Notification/Event Gateway (WebSocket con interest management). |
 | Bot Orchestration Service | Proceso aparte (consume la API como un cliente) | Ciclo de vida de la población de bots: modo mundo vivo, densidad dinámica, y aprovisionamiento del cluster de stress test. |
-| Base de datos | PostgreSQL (única instancia) + PostGIS | Persistencia de todo el sistema con esquemas separados por dominio: mundo/espacial, ledger/contratos (ACID), analítica, outbox de eventos. TimescaleDB solo si el volumen medido lo justifica. |
+| Base de datos | PostgreSQL 18 (única instancia) + PostGIS 3.6 | Persistencia de todo el sistema con esquemas separados por dominio: mundo/espacial, ledger/contratos (ACID), analítica, outbox de eventos. TimescaleDB solo si el volumen medido lo justifica. |
 | Mensajería entre módulos | Outbox table + polling sobre PostgreSQL | Propagación asíncrona de eventos de dominio. Kafka (con schema registry) solo en Fase 2+ y solo si el volumen lo exige. |
 | Reverse proxy | Caddy | Terminación TLS y enrutado. |
 | Despliegue | Docker Compose sobre hosts administrados manualmente | Plataforma definitiva y asumida (no transitoria); impone el techo de capacidad explícito de la sección 11.2. |
@@ -83,9 +83,9 @@ En Fases 0–1 la topología física es un **monolito modular**: pocas unidades 
 graph TB
     Client[Cliente web] -->|HTTPS/WSS| Caddy[Caddy<br/>reverse proxy]
     BotOrch[Bot Orchestration<br/>proceso aparte] -->|API interna multiplexada| Caddy
-    Caddy --> GW[Gateway TS/Fastify<br/>Auth · REST · WebSocket]
+    Caddy --> GW[Gateway Go · net/http<br/>Auth · REST · WebSocket]
     GW --> Engine[Motor Go — un proceso en Fases 0–1<br/>shards · Contract Service · Logistics · Economy Balancer]
-    Engine --> PG[(PostgreSQL única<br/>esquemas: mundo+PostGIS · ledger · analítica · outbox)]
+    Engine --> PG[(PostgreSQL 18 única<br/>esquemas: mundo+PostGIS · ledger · analítica · outbox)]
     GW --> PG
     Engine -.->|outbox + polling| GW
 ```
@@ -149,10 +149,11 @@ graph TD
 
 ### 6.1 Tecnologías Principales
 
-- Runtime: procesos nativos Go (motor) y Node.js (gateway), sobre Docker Compose
-- Lenguajes: **Go** (motor de simulación y Contract Service — el código que mueve dinero se decide explícitamente, no por descarte) y **TypeScript** (gateway, auth, presentación)
-- Frameworks: Fastify + Drizzle ORM (TS); sqlc (Go)
-- Persistencia: **PostgreSQL, una sola instancia** con esquemas por dominio; extensiones PostGIS (espacial) y TimescaleDB (solo si el volumen lo justifica)
+- Runtime: procesos nativos Go (gateway y motor), sobre Docker Compose
+- Lenguajes: **Go** para todo el backend — gateway, auth, motor de simulación, Contract Service, bots y su SDK (ADR-017; el código que mueve dinero se decide explícitamente, no por descarte). TypeScript existe **solo en el cliente web**
+- Stack Go: `net/http` de la librería estándar (Go ≥1.22, sin framework web; middleware propio), `log/slog` con salida JSON, `pgx/v5` como driver de PostgreSQL, `prometheus/client_golang` para métricas y `golang.org/x/crypto` (argon2id) para credenciales; **sqlc solo como codegen de queries SQL escritas a mano, nunca de esquema** (ADR-020)
+- Persistencia: **PostgreSQL 18, una sola instancia** con esquemas por dominio; extensiones PostGIS 3.6 (espacial) y TimescaleDB (solo si el volumen lo justifica)
+- Migraciones: SQL escritas a mano en `backend/db/migrations`, aplicadas por un **runner propio** (`cmd/migrate`, targets `make migrate-*`) — ADR-020
 - Mensajería: **outbox table + polling sobre PostgreSQL** en Fases 0–1; Kafka con schema registry en Fase 2+ solo si el volumen lo exige
 - Reverse proxy: Caddy
 
@@ -163,44 +164,48 @@ graph TD
 ### 6.2 Herramientas de Soporte
 
 - Testing: tests de invariantes del ledger a nivel SQL; el **modo stress test** con bots masivos actúa como banco de pruebas de carga y balance del camino real (los bots ejercitan la API pública literal)
-- Linting / Formatting: los estándares de cada stack (gofmt/go vet; ESLint/Prettier)
+- Linting / Formatting: los estándares de cada stack (gofmt/go vet en el backend; ESLint/Prettier en el frontend)
 - Observabilidad: Prometheus (métricas), Grafana (dashboards), Loki (logs), Tempo (trazas). Métricas de dominio críticas: carga por shard lógico (umbral de alerta con meses de margen para la extracción), masa monetaria vs. PIB simulado, ritmo de agotamiento global de recursos (proyección 6–12 meses para planificar expansiones de mapa)
 
 ---
 
 ## 7. Estructura del Proyecto
 
-Estructura propuesta como monorepo, reflejando las fronteras lógicas de 18.1/18.4 del GDD:
+Monorepo con **raíz fija e inmutable** (ADR-016): carpetas de primer nivel completamente independientes entre sí, con el **Makefile como único punto de entrada** de tareas (`build`, `test`, `lint`, `generate`, `migrate-*`, `dev`, …). El único acoplamiento permitido entre `/backend` y `/frontend` es *contract-first*: ambos derivan del contrato `docs/api/openapi.yaml` en tiempo de generación, nunca en runtime.
 
 ```
-imperio-industrial/
-├── engine/                      # Go — un desplegable en Fases 0–1
-│   ├── cmd/engine/              # main del proceso único del motor
+global-market/
+├── backend/                     # todo el código de servidor — Go (módulo github.com/lokiteitor/global-market/backend)
+│   ├── cmd/
+│   │   ├── gateway/             # main del gateway: API REST pública, auth/sesiones, Notification Gateway (WebSocket)
+│   │   ├── engine/              # main del proceso único del motor (shards, contratos, logística, balancer)
+│   │   ├── migrate/             # runner propio de migraciones (ADR-020)
+│   │   └── seed/                # datos semilla (cmd/bots se añade en su fase — ADR-016/017)
 │   ├── internal/
+│   │   ├── auth/                # identidad y sesiones (humanos y bots); propietario del esquema auth
 │   │   ├── sim/                 # shards: cola de eventos, sim-time, producción, tránsito
 │   │   ├── contracts/           # Contract Service: tablón, sorteo, garantías, liquidación
 │   │   ├── logistics/           # pathfinding jerárquico, ETAs (sin estado de tránsito)
 │   │   ├── balancer/            # Economy Balancer + agente decisor de ciudades
 │   │   ├── ledger/              # acceso al esquema ledger (sqlc); invariantes en SQL
-│   │   └── outbox/              # publicación/consumo de eventos sobre PostgreSQL
-│   └── migrations/              # esquemas: world, ledger, analytics, outbox
-├── gateway/                     # TypeScript — Fastify
-│   ├── src/
-│   │   ├── routes/              # API REST pública (/api/v1/...)
-│   │   ├── auth/                # identidad y sesiones (humanos y bots)
-│   │   ├── ws/                  # Notification Gateway: WebSocket + interest management
-│   │   └── schemas/             # validación de entrada/salida
-│   └── package.json
-├── bots/                        # Bot Orchestration Service (proceso aparte)
-│   ├── archetypes/              # productor primario, transformador, arbitrajista, transportista
-│   └── orchestrator/            # densidad dinámica, ciclo de vida, capitalización vía banco central
-├── stress/                      # arranque del cluster de stress test (entorno separado)
-├── deploy/                      # docker-compose.yml, Caddyfile, config región→proceso versionada
-├── docs/                        # GDD, este documento, ADRs
-└── ops/                         # dashboards, alertas, runbooks de ventana de mantenimiento
+│   │   ├── outbox/              # publicación/consumo de eventos sobre PostgreSQL
+│   │   └── platform/            # transversales: middleware HTTP, config, logging (slog), métricas
+│   ├── pkg/
+│   │   └── botsdk/              # SDK público de bots: consume exclusivamente la API pública del gateway (ADR-010)
+│   └── db/
+│       └── migrations/          # migraciones SQL escritas a mano: NNNN_nombre.up.sql / NNNN_nombre.down.sql
+├── frontend/                    # cliente web autónomo: Nuxt 4 + Vue 3 + TS estricto + Pinia + Sass (npm, sin workspaces)
+├── infra/                       # Dockerfiles, Docker Compose, Caddy, Prometheus, Grafana
+├── docs/                        # documentación viva: GDD, este documento, ADRs (docs/adr/), contrato OpenAPI (docs/api/openapi.yaml)
+├── scripts/                     # scripts de apoyo (shell) invocados desde el Makefile
+├── tools/                       # herramientas de desarrollo (lint de contrato, utilidades de generación)
+├── Makefile                     # ÚNICO punto de entrada para tareas comunes
+└── README.md
 ```
 
-Regla estructural: dentro de `engine/internal/`, los módulos se comunican **solo por interfaces y por la outbox** — sin imports cruzados entre `sim`, `contracts`, `logistics` y `balancer`. Esta disciplina es lo que convierte la extracción futura a procesos separados en una operación mecánica, no en un rediseño.
+La antigua carpeta `specs/` se disuelve (ADR-016): el contrato OpenAPI vive en `docs/api/openapi.yaml` y los DDL de `specs/schemas/` se convierten en las migraciones reales de `backend/db/migrations` (fuente única de verdad del esquema).
+
+Regla estructural: dentro de `backend/internal/`, los módulos se comunican **solo por interfaces y por la outbox** — sin imports cruzados entre `sim`, `contracts`, `logistics` y `balancer`. Esta disciplina es lo que convierte la extracción futura a procesos separados en una operación mecánica, no en un rediseño.
 
 ---
 
@@ -219,7 +224,7 @@ Principios:
 - **REST** para operaciones no urgentes (construcción, recetas, contratos); **WebSocket** para eventos en tiempo real del área de interés (movimiento de vehículos, alertas configuradas).
 - **El tablón global es pull, no push**: se consulta bajo demanda con filtros (producto, ubicación, precio, plazo); las suscripciones push se limitan al área de interés y a alertas explícitas del jugador.
 - **Sim-time en el contrato de API**: todo plazo (contratos, producción, viajes) se define y transmite en sim-time; la traducción a tiempo real es responsabilidad exclusiva de la UI.
-- **Identificadores ULID con espacio de nombres por tipo** (`veh_...`, `ctr_...`, `crg_...`), únicos globalmente e independientes del esquema donde residan.
+- **Identificadores UUIDv7 planos, sin prefijos** (`type: string, format: uuid` en el contrato; `DEFAULT uuidv7()` en la base — ADR-018), únicos globalmente e independientes del esquema donde residan. El contrato conserva los schemas nominales (`AccountId`, `ContractId`, `VehicleId`, …) para que el codegen produzca tipos distinguibles.
 
 ### 8.2 Estructura de Respuestas
 
@@ -268,7 +273,7 @@ Los importes monetarios y cantidades de stock se serializan como **enteros/punto
 | 400 | Bad Request | Comando malformado, unidades inválidas |
 | 401 | Unauthorized | Sesión ausente o expirada |
 | 403 | Forbidden | Comandar recursos de otra corporación; vehículo SELLADO durante handoff |
-| 404 | Not Found | Entidad inexistente (ULID no resuelto) |
+| 404 | Not Found | Entidad inexistente (UUID no resuelto) |
 | 409 | Conflict | Aceptación sobre publicación agotada; cancelación dentro del cooldown; stock ya reservado |
 | 422 | Validation Error | Garantía insuficiente, requisitos de emplazamiento no cumplidos, lote menor al mínimo de aceptación |
 | 429 | Too Many Requests | Rate limit (idéntico para humanos y bots) |
@@ -310,7 +315,7 @@ La plataforma de despliegue definitiva (Compose, hosts manuales) impone un **tec
 
 ## 12. Architecture Decision Records (ADR)
 
-Las decisiones arquitectónicas se documentan siguiendo el formato ADR. El GDD (Anexo B) mantiene el registro completo (37 decisiones en v1.1/v1.2); aquí se consolidan las **estructurales para la arquitectura de software**, renumeradas para este documento con referencia al origen.
+Las decisiones arquitectónicas se documentan siguiendo el formato ADR. El GDD (Anexo B, v1.3) mantiene el registro histórico completo; aquí se consolidan las **estructurales para la arquitectura de software**. ADR-001 a ADR-015 están renumeradas para este documento con referencia a su origen en el GDD; **ADR-016 a ADR-021** son documentos ADR de pleno derecho cuyo detalle íntegro (contexto, decisión, consecuencias) vive en `docs/adr/`.
 
 ### 12.1 Formato ADR
 
@@ -325,13 +330,13 @@ Las decisiones arquitectónicas se documentan siguiendo el formato ADR. El GDD (
 
 ### 12.2 Registro de ADRs
 
-| ID | Origen (GDD) | Estado | Decisión | Trade-off asumido |
+| ID | Origen | Estado | Decisión | Trade-off asumido |
 |----|-------|--------|----------|----------|
 | ADR-001 | #1 | Aceptado | Motor **event-driven** por shard (cola de prioridad; magnitudes continuas analíticas), sin tick global | Mayor disciplina de diseño; coste ∝ eventos, no ∝ entidades |
 | ADR-002 | #2 | Aceptado | Ratio de tiempo **24×**; todo plazo de dominio en **sim-time**; wall-clock solo para sesiones/UI | La UI traduce siempre; la pausa diaria es económicamente transparente |
 | ADR-003 | #4 | Aceptado | **Ventana de mantenimiento diaria** con sim-time congelado y coordinado | 10–30 min/día de pausa a cambio de despliegues, migraciones, snapshots globales y rebalanceos triviales |
 | ADR-004 | #8 | Aceptado | **Inventario comprometible como cuentas del ledger**: bloqueo triple del CCRI = 1 transacción ACID local | El shard cede la propiedad contable del stock; reconciliación física↔contable periódica |
-| ADR-005 | #19 | Aceptado | **Contract Service en Go**; invariantes de dinero/stock **en SQL** (`SERIALIZABLE`, constraints, funciones todo-o-nada) | Dos stacks backend; la contabilidad no depende del lenguaje de aplicación |
+| ADR-005 | #19 | Aceptado | **Contract Service en Go**; invariantes de dinero/stock **en SQL** (`SERIALIZABLE`, constraints, funciones todo-o-nada) | La contabilidad no depende del lenguaje de aplicación (su parte de «dos stacks backend» queda derogada por ADR-017; la regla de oro del ledger permanece intacta) |
 | ADR-006 | #10 | Aceptado | **Los shards simulan tránsito; Logistics Service solo planifica** (sin estado de movimiento) | La congestión de enlaces fronterizos se simula por segmentos |
 | ADR-007 | #13 | Aceptado | **Región de gameplay = unidad de sharding**, indivisible | Hotspots solo mitigables con escalado vertical, diseño de mapa y congestion pricing fiscal |
 | ADR-008 | #17 | Aceptado | **Monolito modular** en Fases 0–1: un proceso Go, un PostgreSQL, outbox; sin Kafka/Redis/Meilisearch/etcd | La validación de la topología distribuida se pospone a la extracción medida |
@@ -342,6 +347,12 @@ Las decisiones arquitectónicas se documentan siguiendo el formato ADR. El GDD (
 | ADR-013 | #33 (modifica #11, #13) | Aceptado | **Todos los shards lógicos en un único proceso**; protocolo de handoff especificado pero no construido | Si el crecimiento desborda el proceso único, el multi-proceso se construye bajo presión (riesgo registrado) |
 | ADR-014 | #28 (deroga #5) | Aceptado | **Una garantía íntegra por publicación** (sin reserva compartida N:M) | Explorar varias regiones exige más capital; la aceptación no arrastra cancelaciones en cascada en la ruta crítica |
 | ADR-015 | #11 | Aceptado | **Handoff formal por evento** (SELLADO→COPIADO→ACTIVADO→PURGADO, `transfer_id` idempotente, ledger como árbitro) para el despliegue multi-proceso futuro | Protocolo por implementar y probar cuando la extracción se active |
+| ADR-016 | `docs/adr/` | Aceptado | **Raíz de monorepo fija** (`/backend /frontend /infra /docs /scripts /tools` + Makefile como único punto de entrada); `specs/` se disuelve: contrato → `docs/api/openapi.yaml`, DDL → migraciones reales | Reescritura de las secciones de estructura de los documentos, a cambio de una raíz estable con fronteras físicas alineadas con las lógicas |
+| ADR-017 | `docs/adr/` (deroga GDD #19) | Aceptado | **Backend 100% Go, gateway incluido** (`net/http` estándar, Go ≥1.22, middleware propio); Fastify y Drizzle desaparecen; TypeScript solo en el cliente web | Se pierde la afinidad natural TS↔Fastify para el fan-out WebSocket; Go la cubre con goroutines/canales |
+| ADR-018 | `docs/adr/` (deroga GDD §17.2) | Aceptado | **PostgreSQL 18 + PostGIS 3.6**; identificadores **UUIDv7 planos** (`DEFAULT uuidv7()` en BD, `format: uuid` en la API), sin prefijos ni dominio `ulid_id`; schemas nominales conservados en el contrato | Se pierde la legibilidad del tipo a simple vista en logs/URLs; se compensa con tipos nominales/wrapper y logging estructurado |
+| ADR-019 | `docs/adr/` (deroga GDD §1) | Aceptado | **Vista top-down cenital (90°)**, sin isométrico; geometría PostGIS planar **SRID 0** (unidad = metro de mundo); formas GeoJSON-like con coordenadas planas `[x_m, y_m]` en la API | Se renuncia al atractivo visual isométrico a cambio de legibilidad, densidad de información y render/matemática más simples |
+| ADR-020 | `docs/adr/` | Aceptado | **Migraciones SQL a mano** en `backend/db/migrations` (`NNNN_nombre.up/down.sql`) con **runner propio** (`cmd/migrate`: transacciones, checksums SHA-256); sqlc solo como codegen de queries | Coste de mantener el runner y escribir el `down` de cada migración, a cambio de reproducibilidad total y cero magia |
+| ADR-021 | `docs/adr/` | Aceptado | **Frontend autónomo** (npm, sin workspaces); tipos generados con `openapi-typescript` desde `docs/api/openapi.yaml` vía `make generate`; prohibidas las librerías de componentes/CSS utilitario | Sin paquete compartido de tipos entre cliente y servidor: la coherencia la garantiza el contrato, no un paquete común |
 
 Toda nueva decisión estructural (adopción de Kafka, extracción de un módulo, particionado del ledger por cuenta) **debe** registrarse como ADR antes de implementarse, incluyendo la medición que la justifica.
 
@@ -355,4 +366,4 @@ Toda nueva decisión estructural (adopción de Kafka, extracción de un módulo,
 - **Elementos diseñados pero diferidos** (especificación conservada, activación por fase): red eléctrica regional (Fase 3), CCRI-Flete y slots de terminales (Fase 2), extracción multi-proceso (medida). Las expansiones de la sección 22 del GDD (reputación, reserva compartida, futuros financieros, consorcios) son reintroducibles de forma aditiva sobre el CCRI sin rediseño.
 - El roadmap técnico sigue las fases del GDD (sección 21): Fase 0 valida el loop económico con un shard y un producto; la Fase 1 entrega el vertical slice con el ciclo CCRI completo contra entrega física; las fases posteriores amplían mundo, modos de transporte y escala.
 
-**Referencia normativa:** GDD/SAD v1.2 (`gdd.md`). Ante discrepancia entre ambos documentos, prevalece el GDD y este documento debe actualizarse.
+**Referencia normativa:** GDD/SAD v1.3 (`gdd.md`) y los ADR de `docs/adr/`. Ante discrepancia entre ambos documentos, prevalece el GDD y este documento debe actualizarse.

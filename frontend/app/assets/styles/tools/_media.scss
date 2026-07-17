@@ -1,0 +1,26 @@
+// tools/media — mixin de media queries (sin salida CSS).
+// Desktop-first con techo evergreen (FAD C18): breakpoints mínimos para el
+// shell; el mundo de juego escala por cámara, no por breakpoints.
+
+@use 'sass:map';
+
+$breakpoints: (
+  'sm': 40rem,
+  // 640px — degradación mínima (touch secundario)
+  'md': 60rem,
+  // 960px — paneles laterales colapsan
+  'lg': 80rem,
+  // 1280px — layout completo de gestión
+  'xl': 100rem, // 1600px — densidad extendida
+);
+
+// @include media('md') { … }  → aplica desde el breakpoint hacia arriba.
+@mixin media($name) {
+  @if not map.has-key($breakpoints, $name) {
+    @error 'tools/media: breakpoint desconocido `#{$name}`. Válidos: #{map.keys($breakpoints)}';
+  }
+
+  @media (min-width: map.get($breakpoints, $name)) {
+    @content;
+  }
+}

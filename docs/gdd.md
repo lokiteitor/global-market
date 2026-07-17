@@ -1,7 +1,7 @@
 # Imperio Industrial: Simulación Económica MMO
 ### Game Design Document (GDD) + Software Architecture Document (SAD)
 
-**Versión:** 1.2 — revisada tras review de simplificación (ver Anexo B: registro de decisiones)
+**Versión:** 1.3 — revisada tras el mandato de implementación (decisiones #38–#43, ver Anexo B y docs/adr/)
 **Referencias de diseño:** Sim Companies, Simutrans, OpenTTD, Factorio
 **Tipo:** MMO de simulación económica, industrial y logística en mundo único persistente
 
@@ -36,7 +36,7 @@
 
 ## 1. Visión general
 
-El juego propone un **mundo isométrico único, persistente y compartido** (Single Shared World) en el que decenas de miles de jugadores humanos y cientos de miles de agentes automatizados coexisten en una misma economía viva (dentro del techo de capacidad asumido en la sección 19). No hay servidores separados ni instancias: todos comparten el mismo mapa, el mismo mercado y las mismas reglas.
+El juego propone un **mundo top-down (vista cenital) único, persistente y compartido** (Single Shared World) en el que decenas de miles de jugadores humanos y cientos de miles de agentes automatizados coexisten en una misma economía viva (dentro del techo de capacidad asumido en la sección 19). No hay servidores separados ni instancias: todos comparten el mismo mapa, el mismo mercado y las mismas reglas.
 
 El pilar central no es la progresión narrativa ni el desbloqueo de contenido, sino la **optimización de sistemas complejos**: cadenas de producción, redes logísticas y estrategia de mercado. La profundidad emerge de la interacción entre estos tres sistemas, no de mecánicas artificiales de "árbol tecnológico".
 
@@ -671,16 +671,16 @@ Los bots no están confinados a un entorno de pruebas: son **residentes permanen
 
 ### 17.1 Una base de datos, esquemas por dominio
 
-**PostgreSQL es la única base de datos del sistema** (una sola instancia en Fases 0–1, ver 18.4), con **esquemas separados por dominio** — no una arquitectura poliglota (v1.2: se elimina ese rótulo; instancias separadas solo si la escala medida lo exige):
+**PostgreSQL 18 es la única base de datos del sistema** (una sola instancia en Fases 0–1, ver 18.4), con **esquemas separados por dominio** — no una arquitectura poliglota (v1.2: se elimina ese rótulo; instancias separadas solo si la escala medida lo exige):
 
-- **Estado del mundo/edificios/entidades espaciales**: esquema por shard, con la extensión PostGIS para consultas geoespaciales.
+- **Estado del mundo/edificios/entidades espaciales**: esquema por shard, con la extensión PostGIS (3.6) para consultas geoespaciales sobre geometrías planares (SRID 0, unidad = metro de mundo, ver ADR-019).
 - **Contratos, garantías (CCRI) y ledger financiero**: esquema transaccional (ACID estricta) — cada contrato bloquea simultáneamente inventario real y dinero; el ledger de doble entrada da trazabilidad completa de escrow, garantías, liquidaciones y saldos.
 - **Historial de contratos liquidados/analítica**: agregaciones (velas OHLC, estadísticas de mercado) construidas a partir de contratos cerrados, no de órdenes vivas; la extensión TimescaleDB se adopta solo si el volumen de series lo justifica (a la escala de Fases 0–1, un `GROUP BY` por hora basta).
 - **Eventos y mensajería entre módulos**: outbox sobre PostgreSQL en Fases 0–1; Kafka con schema registry solo en Fase 2+ y solo si el volumen lo exige (ver 18.4).
 
 ### 17.2 Identidad global y retención
 
-- **Esquema de IDs global**: toda entidad usa identificadores **ULID** con espacio de nombres por tipo (`veh_...`, `ctr_...`, `crg_...`), únicos en todo el mundo e independientes del esquema/base donde residan. Las referencias entre dominios (un contrato que apunta a un cargamento, un cargamento a un vehículo) son así auditables aunque las entidades vivan en esquemas distintos o migren entre shards en el futuro.
+- **Esquema de IDs global (v1.3, ver ADR-018)**: toda entidad usa identificadores **UUIDv7 nativos, planos y sin prefijo** — en la base, columnas `uuid` con `DEFAULT uuidv7()` (PostgreSQL 18); en la API, `type: string, format: uuid`. El tipado por tipo de entidad no vive en el formato del string sino en el sistema de tipos: el contrato conserva schemas nominales (`AccountId`, `ContractId`, …) para que el codegen produzca tipos distinguibles en el código cliente y servidor. Al formar todos los UUID un único espacio global, únicos en todo el mundo e independientes del esquema/base donde residan, las referencias entre dominios (un contrato que apunta a un cargamento, un cargamento a un vehículo) siguen siendo auditables aunque las entidades vivan en esquemas distintos o migren entre shards en el futuro.
 - **Retención y archivado** (el mundo nunca se resetea, los datos no pueden crecer sin cota):
   - **Agregados permanentes**: velas OHLC, estadísticas regionales e índices de ciudades se conservan para siempre (crecen lentamente).
   - **Detalle archivable**: contratos liquidados y movimientos raw del ledger se mueven a almacenamiento frío tras ~1 año de juego (≈15 días reales × 24 = calibrar según volumen real), conservando en caliente los saldos, los agregados y todo contrato/garantía vivo. El archivo frío permanece consultable para auditoría.
@@ -716,19 +716,20 @@ Los bots no están confinados a un entorno de pruebas: son **residentes permanen
 - **Síncrona** (REST/JSON): operaciones que requieren respuesta inmediata (colocar una orden, iniciar construcción).
 - **Asíncrona** (bus de eventos): propagación de cambios de estado (llegada de mercancía, fin de producción, actualización de precios).
 
-### 18.3 Stack tecnológico sugerido (orientativo, no vinculante)
+### 18.3 Stack tecnológico (v1.3: vinculante tras el mandato de implementación, ver docs/adr/)
 
-- **Go** para el motor de simulación (shards) **y para el Contract Service**: el componente que mueve dinero se decide explícitamente en el mismo stack que el motor (tipado fuerte, mismo toolchain), no por descarte en el stack web.
+- **Go para el 100% del backend** (ADR-017): motor de simulación (shards), Contract Service **y también el gateway** (REST + WebSocket + auth/sesiones), sobre `net/http` de la librería estándar (Go ≥1.22), sin framework web. Binarios separados (`cmd/gateway`, `cmd/engine`, `cmd/migrate`) dentro de `/backend`. Node.js, TypeScript, Fastify y Drizzle desaparecen del backend; TypeScript vive únicamente en el cliente web (`/frontend`).
 - **Regla de oro del ledger (independiente del lenguaje):** toda invariante de dinero/stock (no-negatividad, doble entrada balanceada, bloqueo triple atómico del CCRI) vive **en la base de datos** — transacciones `SERIALIZABLE`, constraints y funciones SQL que asientan todo-o-nada. El código de aplicación orquesta; la base garantiza. Un bug de aplicación no puede romper la contabilidad.
-- Framework web (Node.js/TypeScript) para gateway, autenticación y servicios de presentación menos sensibles a latencia.
-- PostgreSQL como base única (esquemas separados por dominio; PostGIS y TimescaleDB son extensiones de la misma instalación).
+- **PostgreSQL 18** como base única (esquemas separados por dominio; **PostGIS 3.6** y TimescaleDB son extensiones de la misma instalación). Identificadores UUIDv7 nativos (ver 17.2, ADR-018).
+- **Migraciones SQL escritas a mano** en `/backend/db/migrations`, aplicadas por un runner propio (`cmd/migrate`; targets `make migrate-up/down/create/status/reset-db`); **sqlc solo como codegen de queries SQL**, nunca de esquema (ADR-020).
+- **Monorepo de raíz fija** — `/backend`, `/frontend`, `/infra`, `/docs`, `/scripts`, `/tools` — con el Makefile como punto de entrada único (ADR-016).
 - Caddy como reverse proxy.
 
 ### 18.4 Topología física por fases
 
 Las **fronteras lógicas** de los 7 servicios y 2 jobs (18.1) son firmes desde el día 1; su **materialización física** es progresiva:
 
-- **Fases 0–1: monolito modular.** Un número mínimo de desplegables: el motor (Go) con los módulos shard/contratos/logística/balancer tras fronteras internas estrictas (paquetes con interfaces, sin imports cruzados), el orquestador de bots como proceso aparte que consume la API igual que un cliente (coherente con 15.4), más el gateway web (TS). **Una sola instancia de PostgreSQL** con esquemas separados (ledger, mundo, analítica). La mensajería entre módulos usa una **outbox table + polling** en lugar de Kafka. Sin Redis, sin Meilisearch, sin etcd: el tablón se sirve desde PostgreSQL con índices apropiados, que a la escala de estas fases sobra.
+- **Fases 0–1: monolito modular.** Un número mínimo de desplegables: el motor (Go) con los módulos shard/contratos/logística/balancer tras fronteras internas estrictas (paquetes con interfaces, sin imports cruzados), el orquestador de bots como proceso aparte que consume la API igual que un cliente (coherente con 15.4), más el gateway web (también Go, binario separado `cmd/gateway`; ADR-017). **Una sola instancia de PostgreSQL** con esquemas separados (ledger, mundo, analítica). La mensajería entre módulos usa una **outbox table + polling** en lugar de Kafka. Sin Redis, sin Meilisearch, sin etcd: el tablón se sirve desde PostgreSQL con índices apropiados, que a la escala de estas fases sobra.
 - **Fase 2+: extracción medida.** Los módulos se extraen a procesos/servicios separados solo cuando la medición lo justifique, en este orden probable: shards a procesos propios (implementando entonces el protocolo de handoff de 15.2), Contract Service, gateway de notificaciones. La outbox se sustituye por un bus real solo si el volumen lo exige. Extraer un módulo con fronteras ya estrictas es una operación mecánica, no un rediseño.
 - Los diagramas de la sección 15 describen la arquitectura **lógica**; no implican que cada caja sea un proceso separado desde el inicio.
 
@@ -826,13 +827,16 @@ Este documento combina las perspectivas de diseño de juego (GDD) y arquitectura
 
 ## Anexo: Stack tecnológico consolidado
 
+**Estructura de monorepo (raíz fija, ADR-016):** `/backend`, `/frontend`, `/infra`, `/docs`, `/scripts`, `/tools`, más el Makefile como punto de entrada único. Módulo Go: `github.com/lokiteitor/global-market/backend`; el contrato OpenAPI vive en `/docs/api/openapi.yaml`.
+
 **Fases 0–1 (monolito modular, ver 18.4):**
 
-- Motor de simulación + Contract Service: Go + sqlc (módulos con fronteras estrictas en un solo desplegable).
-- Gateway web / auth / presentación: TypeScript + Fastify + Drizzle ORM.
+- Backend **100% Go** (ADR-017): motor de simulación + Contract Service (`cmd/engine`) y gateway REST + WebSocket + auth (`cmd/gateway`, `net/http` estándar de Go ≥1.22, sin framework web), módulos con fronteras estrictas; sqlc **solo** como codegen de queries SQL escritas a mano, nunca de esquema.
+- Migraciones: SQL manuales en `/backend/db/migrations` (`NNNN_nombre.up.sql`/`.down.sql`) aplicadas por un runner propio (`cmd/migrate`; `make migrate-up/down/create/status/reset-db`) (ADR-020).
+- Cliente web: `/frontend` autónomo — Nuxt 4 + Vue 3 + TypeScript estricto + Pinia + Sass, gestor npm **sin workspaces**; tipos generados desde `docs/api/openapi.yaml` con openapi-typescript vía `make generate`; prohibidos Tailwind/Bootstrap/Bulma/Vuetify y toda librería de componentes (ADR-021).
 - Comunicación síncrona: REST/JSON.
 - Comunicación asíncrona entre módulos: **outbox table + polling sobre PostgreSQL** (sin bus dedicado).
-- Base de datos: **una sola instancia de PostgreSQL** con esquemas separados por dominio; PostGIS (estado espacial) como extensión; TimescaleDB (series temporales/OHLC) solo si el volumen medido lo justifica (ver 17.1).
+- Base de datos: **una sola instancia de PostgreSQL 18** con esquemas separados por dominio; PostGIS 3.6 (estado espacial, geometrías planares SRID 0, ADR-019) como extensión; TimescaleDB (series temporales/OHLC) solo si el volumen medido lo justifica (ver 17.1). Identificadores UUIDv7 nativos (17.2, ADR-018).
 - Reverse proxy: Caddy.
 - Despliegue: Docker Compose.
 - Observabilidad: Prometheus, Grafana, Loki y Tempo.
@@ -846,7 +850,7 @@ Este documento combina las perspectivas de diseño de juego (GDD) y arquitectura
 **Decisión de despliegue (definitiva, asumida):** Docker Compose sobre un puñado de hosts administrados manualmente es el **destino**, no una fase transitoria. No hay autoescalado, ni orquestador, ni migración automática entre hosts; la reubicación de shards es manual y ocurre en la ventana de mantenimiento diaria (sección 19). Esta decisión impone el techo de capacidad descrito en la sección 19 y se revisitaría únicamente si el juego lo desborda de forma sostenida.
 
 
-## Anexo B: Registro de decisiones de arquitectura (ADR resumido, v1.1)
+## Anexo B: Registro de decisiones de arquitectura (ADR resumido, v1.1–v1.3)
 
 Decisiones tomadas en la design review de la v1.1, con su trade-off asumido:
 
@@ -870,7 +874,7 @@ Decisiones tomadas en la design review de la v1.1, con su trade-off asumido:
 | 16 | Contenido embargado se liquida por **subasta pública vía CCRI** | Botín del reclamante | Menos incentivo al "buitreo"; el sistema actúa como vendedor |
 | 17 | **Monolito modular** en Fases 0–1 (un Postgres, outbox, sin Kafka/Redis/Meilisearch/etcd) | Microservicios desde el inicio | La validación de la topología distribuida se pospone a la extracción medida |
 | 18 | **Docker Compose como destino final** (techo de capacidad explícito) | Orquestador (K8s/Nomad) | El pilar "masivo" queda acotado al techo; revisitable solo si se desborda |
-| 19 | **Contract Service en Go**, invariantes de dinero/stock **en SQL** | TypeScript por descarte | Dos stacks backend; la contabilidad no depende del lenguaje de aplicación |
+| 19 | **Contract Service en Go**, invariantes de dinero/stock **en SQL** *(derogada en v1.3 por #39: backend 100% Go; la regla de oro del ledger permanece)* | TypeScript por descarte | Dos stacks backend; la contabilidad no depende del lenguaje de aplicación |
 | 20 | Insolvencia = **parada progresiva sin deuda** | Crédito del banco central | Los préstamos quedan para la expansión de bancos |
 | 21 | **Mercado laboral**: pool regional finito con salario de mercado | Tabla de salarios fija | Asignación periódica por prioridad salarial; +1 subsistema |
 | 22 | **Red eléctrica regional desde v1** (térmicas a combustible físico, spot por orden de mérito, sin interconexiones) | Combustible in situ sin red | Mayor alcance de v1 (riesgo en §20); degradación acordada: lanzar sin red y activarla en Fase 2 |
@@ -895,6 +899,17 @@ Decisiones tomadas en la design review de la v1.1, con su trade-off asumido:
 | 36 | **Avería = espera + reparación** (sin rescate en v1) | Modifica 7.3 | El rescate/transbordo llega con el CCRI-Flete (Fase 2) |
 | 37 | **Clima eliminado** del alcance | Modifica 15.1 y 18.1 | Ninguno: ninguna mecánica lo consumía |
 
-**Revisado y conservado deliberadamente en v1.2** (complejidad ratificada): mercado secundario de vehículos (§8), Economy Balancer como agente decisor de las ciudades (18.1), stack dual Go + TypeScript (#19), CCRI-Flete en Fase 2 (#23), slots de prioridad de terminales (#12), y aceptación/liquidación parciales (#6).
+**Decisiones v1.3 (mandato de implementación):**
+
+| # | Decisión | Deroga/modifica | Trade-off asumido |
+|---|---|---|---|
+| 38 | **Estructura de monorepo con raíz fija** (`/backend /frontend /infra /docs /scripts /tools`) y **Makefile como punto de entrada único** (ADR-016) | Disuelve `specs/` (contrato → `docs/api/openapi.yaml`; DDL → migraciones reales en `/backend/db/migrations`) | Reescritura de las secciones de estructura de SAD y FAD; las referencias históricas a `specs/` y `engine/migrations/` quedan obsoletas |
+| 39 | **Backend unificado en Go, gateway incluido** (REST + WS + auth sobre `net/http` estándar, sin framework web) (ADR-017) | Deroga #19 (dual stack Go + TypeScript) | Se pierde la afinidad natural TS↔Fastify para el fan-out WebSocket (Go la cubre con goroutines/canales) y los `packages/` compartidos con un gateway TS |
+| 40 | **PostgreSQL 18 + UUIDv7 plano como ID universal** (`uuid` con `DEFAULT uuidv7()` en BD; `format: uuid` en la API; schemas nominales para el codegen) (ADR-018) | Modifica 17.2 (ULID prefijados y dominio `ulid_id`) | Se pierde la legibilidad del tipo a simple vista en logs/URLs; se compensa con schemas nominales en el contrato, tipos wrapper y logging estructurado |
+| 41 | **Vista top-down cenital (90°)** y geometría planar **SRID 0** (unidad = metro de mundo) (ADR-019) | Modifica sección 1 (mundo isométrico) | Se pierde el atractivo visual isométrico; asumido: el objetivo del juego es gestión, no vistosidad |
+| 42 | **Migraciones SQL manuales con runner propio** (`cmd/migrate`: transacciones, checksums, `up`/`down` reversibles); sqlc solo codegen de queries (ADR-020) | Deroga Drizzle como gestor del esquema `auth` y todo tooling de migración/esquema automático | Coste de mantener el runner propio (~pequeño y estable) y de escribir el `down` de cada migración |
+| 43 | **Frontend autónomo sin workspaces** (npm; tipos generados del contrato con openapi-typescript vía `make generate`) (ADR-021) | Deroga los workspaces pnpm y los `packages/` compartidos del FAD | Sin paquete compartido, los branded types existen por duplicado (cliente TS / backend Go); la coherencia la garantiza el contrato, no un paquete común |
+
+**Revisado y conservado deliberadamente en v1.2** (complejidad ratificada): mercado secundario de vehículos (§8), Economy Balancer como agente decisor de las ciudades (18.1), stack dual Go + TypeScript (#19; derogado posteriormente en v1.3 por #39), CCRI-Flete en Fase 2 (#23), slots de prioridad de terminales (#12), y aceptación/liquidación parciales (#6).
 
 Retirados del alcance base en la revisión v1.1 (movidos a la sección 22 como expansiones futuras): **consorcios/alianzas formales** y **bots con aprendizaje automático** (los bots de producción usan exclusivamente heurísticas auditables). El diseño detallado de la toma de decisiones de los bots (13.3) se pospone deliberadamente.

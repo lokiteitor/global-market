@@ -7,11 +7,11 @@
 |---|---|
 | **Proyecto** | Imperio Industrial — Simulación Económica MMO |
 | **Documento** | Frontend Architecture Document (FAD) |
-| **Versión** | 1.0 |
-| **Fecha** | 2026-07-15 |
-| **Estado** | Propuesto — pendiente de aprobación por el Comité de Arquitectura |
-| **Alcance** | Exclusivamente el cliente web (frontend). El backend (GDD/SAD v1.2) es fijo y no se modifica. |
-| **Documentos normativos** | `docs/gdd.md` (GDD/SAD v1.2), `docs/arquitectura_imperio_industrial.md` (SAD backend v1.0), `specs/openapi.yaml` (contrato REST v1.0.0), `specs/schemas/*.sql` |
+| **Versión** | 1.1 |
+| **Fecha** | 2026-07-16 |
+| **Estado** | Aceptado (v1.1 — revisado conforme a ADR-016…ADR-021) |
+| **Alcance** | Exclusivamente el cliente web (frontend). El backend (GDD/SAD v1.3) es fijo y no se modifica. |
+| **Documentos normativos** | `docs/gdd.md` (GDD/SAD v1.3), `docs/arquitectura_imperio_industrial.md` (SAD backend v1.1), `docs/api/openapi.yaml` (contrato REST v1.1.0) |
 | **Autoría** | Principal Frontend Software Architect |
 | **Regla de precedencia** | Ante discrepancia con el GDD/SAD o el contrato OpenAPI, **prevalece el backend** y este documento se corrige. El frontend nunca dicta el contrato. |
 
@@ -53,13 +53,13 @@
 
 ## 1. Resumen ejecutivo
 
-Imperio Industrial es un MMO de simulación económica, industrial y logística sobre un **mundo único, isométrico, persistente y compartido**. El servidor es la **única fuente de verdad** (authoritative server): simula la economía event-driven, mueve dinero y stock en un ledger ACID de doble entrada, y particiona el mundo en shards espaciales. El cliente **no ejecuta lógica de negocio**: envía intenciones, recibe eventos y renderiza estado.
+Imperio Industrial es un MMO de simulación económica, industrial y logística sobre un **mundo único, top-down cenital (90°), persistente y compartido**. El servidor es la **única fuente de verdad** (authoritative server): simula la economía event-driven, mueve dinero y stock en un ledger ACID de doble entrada, y particiona el mundo en shards espaciales. El cliente **no ejecuta lógica de negocio**: envía intenciones, recibe eventos y renderiza estado.
 
 Este documento define la arquitectura del **cliente web** que materializa ese contrato. Sus tesis centrales son:
 
 1. **Thin client radical.** El frontend es un *terminal de observación y mando*. No calcula precios, no resuelve pathfinding autoritativo, no valida garantías, no avanza el sim-time. Toda regla vive en el backend. El cliente **predice y presenta**, nunca **decide**. (Cf. GDD §14.1, `openapi.yaml` "Servidor autoritativo".)
 
-2. **Dos superficies de datos, no una.** El backend expone (a) una **API REST** para operaciones no urgentes e idempotentes de lectura/comando (`specs/openapi.yaml`), y (b) un **Notification/Event Gateway WebSocket** para el flujo de eventos del *área de interés* (movimiento de vehículos, alertas, cambios de estado). El tablón de contratos es **pull** (consulta con filtros), nunca push mundial. El frontend trata estas dos superficies como **dos puertos de infraestructura distintos** con políticas de consistencia distintas.
+2. **Dos superficies de datos, no una.** El backend expone (a) una **API REST** para operaciones no urgentes e idempotentes de lectura/comando (`docs/api/openapi.yaml`), y (b) un **Notification/Event Gateway WebSocket** para el flujo de eventos del *área de interés* (movimiento de vehículos, alertas, cambios de estado). El tablón de contratos es **pull** (consulta con filtros), nunca push mundial. El frontend trata estas dos superficies como **dos puertos de infraestructura distintos** con políticas de consistencia distintas.
 
 3. **Separación render ↔ UI ↔ dominio.** Phaser 3 (WebGL) renderiza el *mundo espacial* (mapa, ciudades, edificios, vehículos, rutas, overlays). Vue 3 renderiza toda la *UI de gestión* (HUD, paneles, inspectores, tablón, diálogos). Ambos son **consumidores** de un núcleo de dominio y estado (Pinia) desacoplado de los dos. Ni Vue conoce Phaser, ni Phaser conoce Vue: se comunican por **stores reactivas** y un **event bus tipado**, nunca por referencias directas.
 
@@ -116,7 +116,7 @@ Los principios son las reglas que resuelven las decisiones no anticipadas por es
 
 **P1 — El servidor decide, el cliente presenta.** Toda mutación de dominio se origina en un evento o respuesta del servidor. La única excepción es la *predicción optimista*, que siempre está etiquetada, es siempre reversible y nunca se confunde con estado confirmado (§13.6). *Corolario:* si dudas de si algo va en el cliente o en el servidor, va en el servidor; si ya está en el servidor, el cliente no lo recalcula, lo pide o lo escucha.
 
-**P2 — Un dato, un dueño.** Cada pieza de estado tiene exactamente una store dueña (bounded context). El resto la lee por getter/selector, nunca la duplica. La normalización (§20.5) es obligatoria para colecciones de entidades con identidad (ULID).
+**P2 — Un dato, un dueño.** Cada pieza de estado tiene exactamente una store dueña (bounded context). El resto la lee por getter/selector, nunca la duplica. La normalización (§20.5) es obligatoria para colecciones de entidades con identidad (UUID).
 
 **P3 — Las fronteras son puertos, no imports.** Toda dependencia hacia afuera de una capa cruza por una *interfaz* (puerto) definida por la capa consumidora, no por la proveedora (Dependency Inversion). Infraestructura implementa puertos de aplicación; aplicación no conoce infraestructura concreta. Esto es lo que hace intercambiables WS-real/mock, REST/mock, Phaser/headless.
 
@@ -156,9 +156,9 @@ Las restricciones son condiciones impuestas desde fuera de la arquitectura del f
 | **C3** | Networking: **WebSocket** (cliente nativo sobre el Notification/Event Gateway del backend) + REST. | Mandato del proyecto |
 | **C4** | Estado: **Pinia**. | Mandato del proyecto |
 | **C5** | Estilos: **Sass (SCSS)**; **CSS Modules** cuando aporte encapsulación. Diseño visual construido **desde cero**. | Mandato del proyecto |
-| **C6** | **Prohibido**: Tailwind, Vuetify, Bootstrap, Quasar, PrimeVue y cualquier framework CSS utilitario o librería de componentes. | Mandato del proyecto |
+| **C6** | **Prohibido**: Tailwind, Vuetify, Bootstrap, Bulma, Quasar, PrimeVue y cualquier framework CSS utilitario o librería de componentes. | Mandato del proyecto |
 
-### 4.2 Restricciones de dominio (impuestas por el backend, GDD/SAD v1.2)
+### 4.2 Restricciones de dominio (impuestas por el backend, GDD/SAD v1.3)
 
 | ID | Restricción | Implicación para el frontend |
 |---|---|---|
@@ -167,9 +167,9 @@ Las restricciones son condiciones impuestas desde fuera de la arquitectura del f
 | **C9** | **Ventana de mantenimiento diaria** (10–30 min, sim-time congelado). API responde `503 Retry-After`. | Estado de aplicación "mundo pausado" de primera clase (§12.9). |
 | **C10** | **Tablón es pull, no push.** Suscripciones push limitadas al *área de interés* y a *alertas explícitas*. | El módulo de mercado consulta REST con filtros; no espera un stream del tablón entero. |
 | **C11** | **Dinero y stock = enteros de punto fijo serializados como strings.** Nunca floats. | Tipo `Money`/`Quantity` dedicado; prohibido `parseFloat` sobre importes. |
-| **C12** | **IDs = ULID con namespace por tipo** (`veh_`, `ctr_`, `crg_`, `bld_`, …). | Claves de normalización y de branding de tipos (§20.6). |
+| **C12** | **IDs = UUIDv7 planos, sin prefijo** (`type: string, format: uuid`); el contrato conserva schemas nominales por entidad (`AccountId`, `ContractId`, `VehicleId`, …) (ADR-018). | Claves de normalización y de branding de tipos por entidad (§20.6). |
 | **C13** | **Autorización por propiedad.** Una corporación solo comanda lo suyo (403 en caso contrario). | La UI distingue *observable* (todo el mundo visible) de *comandable* (solo lo propio); deshabilita comandos ajenos preventivamente. |
-| **C14** | **Contrato REST fijo** = `specs/openapi.yaml` v1.0.0. Envoltura `{ data, meta }` / `{ error }`. | Cliente REST generado desde OpenAPI; `meta.sim_time` alimenta el `SimClock`. |
+| **C14** | **Contrato REST fijo** = `docs/api/openapi.yaml` v1.1.0. Envoltura `{ data, meta }` / `{ error }`. | Cliente REST generado desde OpenAPI; `meta.sim_time` alimenta el `SimClock`. |
 | **C15** | **El protocolo WebSocket del Gateway está fuera del OpenAPI** y es propio del backend. | Ver §4.4 y ADR-FE-004. |
 
 ### 4.3 Restricciones de plataforma y despliegue
@@ -184,7 +184,7 @@ Las restricciones son condiciones impuestas desde fuera de la arquitectura del f
 
 La superficie de tiempo real del backend es la restricción de infraestructura más delicada del frontend y se documenta abiertamente, como haría cualquier estudio serio antes de comprometer el diseño.
 
-**El hecho.** El backend fijo describe un **Notification/Event Gateway** propio (TypeScript + Fastify) que distribuye eventos por WebSocket con *interest management*, y un tablón **pull** por REST. El OpenAPI declara explícitamente que el protocolo del WS está **fuera de ese documento**: es propio del backend, no un estándar de terceros con cliente prefabricado. **El backend no se modifica** (mandato del proyecto).
+**El hecho.** El backend fijo describe un **Notification/Event Gateway** propio (Go, ADR-017) que distribuye eventos por WebSocket con *interest management*, y un tablón **pull** por REST. El OpenAPI declara explícitamente que el protocolo del WS está **fuera de ese documento**: es propio del backend, no un estándar de terceros con cliente prefabricado. **El backend no se modifica** (mandato del proyecto).
 
 **La consecuencia.** El cliente debe hablar *exactamente* ese protocolo propio. Cualquier idiosincrasia del Gateway (formato de frame, forma de las suscripciones, envelopes `{data,meta}`) no puede filtrarse hacia la UI ni al dominio: hay que absorberla en una frontera.
 
@@ -213,7 +213,7 @@ Esta sección fija, sin ambigüedad, la línea entre lo que el cliente hace y lo
 ### 5.1 El cliente SÍ es responsable de
 
 **Representación del mundo.**
-- Renderizar el **mapa mundial** isométrico por regiones/chunks, con sus biomas, ríos y relieve (datos procedurales ya persistidos en el servidor; el cliente los recibe, no los genera).
+- Renderizar el **mapa mundial** top-down cenital por regiones/chunks, con sus biomas, ríos y relieve (datos procedurales ya persistidos en el servidor; el cliente los recibe, no los genera).
 - Mostrar **ciudades** con su nivel, huella urbana, radio de influencia y estado de demanda.
 - Representar **edificios** (tipo, nivel, estado: operativa/construcción/dañada/mantenimiento/abandonada/embargo), su ocupación de footprint y sus conexiones logísticas.
 - Representar **vehículos** en tránsito con **interpolación** de su posición analítica (`tramo + t_entrada + función de avance`) entre eventos de hito.
@@ -310,7 +310,7 @@ El stack está fijado por mandato (C1–C6). Esta sección no *elige* —eso lo 
 
 **Rol:** lenguaje único de todo el frontend.
 
-**Por qué encaja:** un dominio económico con invariantes fuertes (punto fijo, ULID con namespace, sim-time, estados de contrato) exige **tipos como contrato** (P9). Se activan `strict`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`, `noImplicitOverride`. Los tipos de dominio se *derivan* del OpenAPI (generación) pero se *refinan* con *branded types* (`Money`, `Quantity`, `SimTime`, `Ulid<'veh'>`) que hacen imposible, por ejemplo, sumar un importe a una cantidad o pasar un `bld_` donde se espera un `veh_`.
+**Por qué encaja:** un dominio económico con invariantes fuertes (punto fijo, UUIDv7 con schemas nominales por entidad, sim-time, estados de contrato) exige **tipos como contrato** (P9). Se activan `strict`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`, `noImplicitOverride`. Los tipos de dominio se *derivan* del OpenAPI (generación) pero se *refinan* con *branded types* (`Money`, `Quantity`, `SimTime`, `EntityId<'Vehicle'>`) que hacen imposible, por ejemplo, sumar un importe a una cantidad o pasar un `BuildingId` donde se espera un `VehicleId`.
 
 ### 6.4 Phaser 3
 
@@ -319,7 +319,7 @@ El stack está fijado por mandato (C1–C6). Esta sección no *elige* —eso lo 
 **Por qué encaja:**
 - Motor 2D maduro y **batch-oriented**: su pipeline WebGL agrupa draw calls por textura (texture atlases), esencial para miles de sprites (P8, §21.3).
 - Sistema de **Scenes** que mapea limpiamente a los estados del cliente (Boot, Preload, World, UI-overlay, etc.) y permite escenas paralelas (§11.5).
-- **Tilemap** nativo (incl. isométrico) con culling y capas — base del sistema de mapas por chunks (§16).
+- **Tilemap** nativo (ortogonal) con culling y capas — base del sistema de mapas por chunks (§16).
 - **Cameras** con zoom, pan, bounds, follow y efectos — base del sistema de cámara (§17).
 - Gestión de **input** (pointer, wheel, keyboard) integrada con el pipeline de render, necesaria para picking espacial preciso (§18).
 - **Loader** con soporte de spritesheets, atlases, tilemaps, audio y colas — base de la gestión de assets (§14).
@@ -394,9 +394,9 @@ Formato: contexto → decisión → alternativas descartadas → consecuencias/t
 | Campo | Contenido |
 |---|---|
 | **Estado** | Aceptado (C2) |
-| **Contexto** | Render de mundo isométrico 2D con tilemaps, miles de sprites, cámaras, input espacial, animaciones y assets — todo en el navegador, conviviendo con Vue. |
+| **Contexto** | Render de mundo top-down 2D con tilemaps, miles de sprites, cámaras, input espacial, animaciones y assets — todo en el navegador, conviviendo con Vue. |
 | **Decisión** | **Phaser 3** (WebGL2, fallback Canvas), encapsulado tras el puerto `WorldRenderer`. |
-| **Alternativa descartada — PixiJS** | PixiJS es un excelente *renderer* 2D (y de hecho Phaser comparte linaje con esa familia), pero es **solo render**: no trae Scenes, Tilemap isométrico, sistema de Cámaras con bounds/follow, Loader con colas de assets, ni input espacial integrado. Con Pixi habría que ensamblar a mano tilemaps, culling, gestión de escenas y loader — reconstruir media plataforma que Phaser ya ofrece cohesionada. Para un MMO de gestión con mapa por chunks, ese andamiaje es sustancial. Pixi seguiría siendo válido como *capa inferior*, pero Phaser lo empaqueta con la ergonomía que necesitamos. (C2 además fija Phaser.) |
+| **Alternativa descartada — PixiJS** | PixiJS es un excelente *renderer* 2D (y de hecho Phaser comparte linaje con esa familia), pero es **solo render**: no trae Scenes, Tilemap ortogonal, sistema de Cámaras con bounds/follow, Loader con colas de assets, ni input espacial integrado. Con Pixi habría que ensamblar a mano tilemaps, culling, gestión de escenas y loader — reconstruir media plataforma que Phaser ya ofrece cohesionada. Para un MMO de gestión con mapa por chunks, ese andamiaje es sustancial. Pixi seguiría siendo válido como *capa inferior*, pero Phaser lo empaqueta con la ergonomía que necesitamos. (C2 además fija Phaser.) |
 | **Alternativa descartada — Unity WebGL** | Ver ADR-FE-008. |
 | **Alternativa descartada — Godot Web** | Ver ADR-FE-009. |
 | **Consecuencias** | + Plataforma 2D cohesionada (scenes/tilemap/camera/loader/input). + Batch WebGL por atlas. − Motor pesado en bytes → se carga perezoso solo en `/play` (§21.8). − Impone convivir con su game-loop; se aísla tras `WorldRenderer` para que no contamine la app. |
@@ -432,7 +432,7 @@ Formato: contexto → decisión → alternativas descartadas → consecuencias/t
 | **Contexto** | UI de gestión densa, con identidad propia, temas claro/oscuro, y componentes de datos (tablas, inspectores, gráficos). |
 | **Decisión** | **Design system a medida en Sass** (tokens, mixins, capas) + **CSS Modules** para encapsulación por componente. |
 | **Alternativa descartada — Tailwind CSS** | Prohibido por C6. Además, para una UI de datos con componentes complejos y temables, las utilidades atómicas inflan el marcado, dispersan la decisión de diseño y dificultan un theming coherente centralizado; un sistema de tokens en Sass da control y consistencia superiores para este caso. |
-| **Alternativa descartada — Vuetify/Bootstrap/Quasar/PrimeVue** | Prohibidas por C6. Imponen su propio look, su propio sistema de theming y peso; contradicen el mandato de "diseño desde cero" y complicarían la coherencia con el lienzo Phaser. |
+| **Alternativa descartada — Vuetify/Bootstrap/Bulma/Quasar/PrimeVue** | Prohibidas por C6. Imponen su propio look, su propio sistema de theming y peso; contradicen el mandato de "diseño desde cero" y complicarían la coherencia con el lienzo Phaser. |
 | **Consecuencias** | + Identidad visual única y coherente con el mundo. + Theming centralizado. + Sin peso de librerías de componentes. − Hay que construir los componentes base (botón, modal, tabla, tooltip…) — se planifica como *UI kit* interno en Fase 5 (§26). |
 
 ### 7.7 ADR-FE-007 — Sim-time como servicio único de cliente (frente a conversiones dispersas)
@@ -452,7 +452,7 @@ Formato: contexto → decisión → alternativas descartadas → consecuencias/t
 | **Estado** | Aceptado |
 | **Contexto** | Alternativa hipotética para el render del mundo. |
 | **Decisión** | **No** usar Unity WebGL. |
-| **Razones** | (a) Contradice C1/C2 (stack web Vue/Phaser). (b) Unity WebGL produce bundles y arranques pesados (descarga del runtime + IL2CPP/WASM), TTI alto, y una integración incómoda con una UI web reactiva (la UI DOM y el canvas Unity viven en mundos separados, con puentes JS frágiles). (c) Es un motor 3D de propósito general sobredimensionado para un 2D isométrico de gestión. (d) Licenciamiento y pipeline de build ajenos al ecosistema web/Vite. (e) La convivencia Vue↔Unity sería mucho más costosa que Vue↔Phaser. |
+| **Razones** | (a) Contradice C1/C2 (stack web Vue/Phaser). (b) Unity WebGL produce bundles y arranques pesados (descarga del runtime + IL2CPP/WASM), TTI alto, y una integración incómoda con una UI web reactiva (la UI DOM y el canvas Unity viven en mundos separados, con puentes JS frágiles). (c) Es un motor 3D de propósito general sobredimensionado para un 2D top-down de gestión. (d) Licenciamiento y pipeline de build ajenos al ecosistema web/Vite. (e) La convivencia Vue↔Unity sería mucho más costosa que Vue↔Phaser. |
 | **Consecuencias** | Se conserva un stack 100% web, integrable y ligero comparado con Unity. |
 
 ### 7.9 ADR-FE-009 — Descarte de Godot Web (HTML5 export)
@@ -531,14 +531,14 @@ El frontend se organiza en **seis capas** con una regla de dependencia estricta:
 
 #### Domain Layer
 - **Modelos de dominio** con el lenguaje ubicuo del GDD: `Building`, `Vehicle`, `Shipment`, `Contract`, `Publication`, `City`, `Concession`, `Region`, `LedgerAccount`, `Route`, `Link`, `Terminal`.
-- **Branded types**: `Money`, `Quantity`, `SimTime`, `Ulid<T>`, `RegionId`, `Coord`.
+- **Branded types**: `Money`, `Quantity`, `SimTime`, `EntityId<T>`, `RegionId`, `Coord`.
 - **Políticas de presentación** puras: formateo de dinero (punto fijo), cálculo de estados visuales (¿está este contrato "en riesgo" según su fill y su plazo?), *sin* reglas autoritativas.
 - **Máquinas de estado de UI** que espejan (no calculan) los estados del backend (ciclo de vida de contrato, de edificio, de vehículo).
 - **Prohibido**: cualquier dependencia hacia afuera; cualquier I/O; recalcular precios/demanda/pathfinding autoritativos.
 
 #### Infrastructure Layer
 - **REST client** generado desde `openapi.yaml`, con envoltura `{data,meta}`/`{error}`, reintentos, idempotencia, manejo de `503 Retry-After`.
-- **Mapeadores DTO ↔ dominio** (ACL REST): convierten strings de punto fijo a `Money`, ULID a `Ulid<T>`, sim-time a `SimTime`.
+- **Mapeadores DTO ↔ dominio** (ACL REST): convierten strings de punto fijo a `Money`, UUID a `EntityId<T>`, sim-time a `SimTime`.
 - **`SimClock`** (implementación de `Clock`).
 - **Storage** (persistencia local: preferencias, caché de assets versionada, layout de paneles) tras el puerto `Storage`.
 - **Telemetry/logging**.
@@ -652,10 +652,10 @@ Transversales a todos los contexts, viven en `shared/` (§10):
 
 - **Time**: `SimClock`, conversores sim↔wall, formateadores de plazo.
 - **Money/Quantity**: aritmética de punto fijo, formateo, tipo `Money`/`Quantity`.
-- **Ids**: `Ulid<T>` branded, parseo/validación de namespace.
+- **Ids**: `EntityId<T>` branded (UUIDv7 plano; brand derivado de los schemas nominales del contrato), validación de formato `uuid`.
 - **Event Bus**: bus tipado inter-subsistema (§19).
 - **Result/Error**: tipo `Result<T,E>` y taxonomía de errores del backend (mapeo de `error.code`).
-- **Geometry**: proyección isométrica, coordenadas, culling helpers.
+- **Geometry**: proyección ortogonal top-down (`GridProjection`), coordenadas planas en metros de mundo, culling helpers.
 - **UI Kit**: componentes base Sass (botón, modal, tabla, tooltip, panel…).
 - **Ports**: definiciones de interfaces (puertos) que las infraestructuras implementan.
 
@@ -699,31 +699,28 @@ Cada context define su propio *mapper* DTO↔dominio en su rebanada de infraestr
 
 ## 10. Organización del proyecto — estructura de carpetas completa
 
-La estructura combina **Feature-Sliced Design (FSD)** para las features de UI, un **núcleo de dominio/aplicación** independiente del framework, y las **infraestructuras pesadas** (game, network) como subsistemas de primer nivel. Se asume un **monorepo** (coherente con el monorepo del backend) con `apps/web` como la app cliente y `packages/` para código compartible.
+La estructura combina **Feature-Sliced Design (FSD)** para las features de UI, un **núcleo de dominio/aplicación** independiente del framework, y las **infraestructuras pesadas** (game, network) como subsistemas de primer nivel. El cliente vive en la carpeta raíz `/frontend` del monorepo (raíz fija, ADR-016), como **paquete Node autónomo sin workspaces de ningún tipo** (ADR-021).
 
 ### 10.1 Vista de alto nivel del monorepo
 
 ```
-imperio-industrial/                 # monorepo (ya existente para el backend)
-├── engine/                         # backend Go        (existente, no se toca)
-├── gateway/                        # backend TS/Fastify (existente, no se toca)
-├── bots/  · stress/ · deploy/ · docs/ · specs/         (existentes)
-│
-├── apps/
-│   └── web/                        # ← EL CLIENTE (este documento)
-│
-└── packages/                       # código compartible (opcional, ver 10.7)
-    ├── api-types/                  # tipos generados desde specs/openapi.yaml
-    ├── domain-kernel/              # Money, SimTime, Ulid, Result (framework-agnostic)
-    └── config/                     # eslint, tsconfig, prettier compartidos
+global-market/                      # monorepo con raíz fija (ADR-016)
+├── backend/                        # todo el código de servidor (Go): gateway, engine, bots, SDK, migraciones (no se toca)
+├── frontend/                       # ← EL CLIENTE (este documento); paquete Node autónomo (npm, sin workspaces)
+├── infra/                          # Dockerfiles, Docker Compose, Caddy, Prometheus, Grafana
+├── docs/                           # documentación viva; el contrato OpenAPI vive en docs/api/openapi.yaml
+├── scripts/                        # scripts de apoyo invocados desde el Makefile
+├── tools/                          # herramientas de desarrollo (lint de contrato, utilidades de generación)
+├── Makefile                        # ÚNICO punto de entrada de tareas (make generate, make frontend, …)
+└── README.md
 ```
 
-> **Decisión (ADR-FE-010, implícito):** los tipos del contrato REST se **generan** desde `specs/openapi.yaml` a `packages/api-types` y se versionan con el contrato. El frontend nunca escribe a mano un DTO del backend. La generación corre en CI y en un script `pnpm gen:api`. Si `specs/openapi.yaml` cambia, el build del cliente falla ruidosamente hasta reconciliar — frontera dura O5.
+> **Decisión (ADR-021):** los tipos del contrato REST se **generan localmente** desde `docs/api/openapi.yaml` con `npm run gen:api` (`openapi-typescript`, invocado por `make generate`) y se **versionan dentro de `/frontend`**. El frontend nunca escribe a mano un DTO del backend. La generación corre en CI; si `docs/api/openapi.yaml` cambia y los tipos generados divergen, `make generate` + typecheck fallan ruidosamente hasta reconciliar — frontera dura O5.
 
-### 10.2 Estructura interna de `apps/web`
+### 10.2 Estructura interna de `/frontend`
 
 ```
-apps/web/
+frontend/
 ├── nuxt.config.ts                  # config Nuxt (runtimeConfig, modules, vite, sass)
 ├── app.config.ts                   # config de app (tema por defecto, feature flags UI)
 ├── tsconfig.json                   # strict; paths a src/*
@@ -856,7 +853,7 @@ apps/web/
 
 - **`game/` totalmente separado de `components/`.** Regla física que hace cumplir O2: el linter prohíbe que `game/**` importe de `components/**` o `modules/**`, y viceversa que `components/**`/`modules/**` importen de `game/scenes/**` o `game/renderer/**`. El único puente permitido es `game/bridge/` (suscripción a stores) y el `WorldRenderer` (puerto).
 
-- **`shared/` como kernel puro.** Nada de Vue, Phaser ni red. Solo tipos y utilidades de dominio universal (tiempo, dinero, ids, geometría, bus). Es lo que se podría extraer a `packages/domain-kernel` (§10.7).
+- **`shared/` como kernel puro.** Nada de Vue, Phaser ni red. Solo tipos y utilidades de dominio universal (tiempo, dinero, ids, geometría, bus). Es el antiguo `packages/domain-kernel`, internalizado aquí por ADR-021 (§10.7).
 
 ### 10.4 Arquitectura de estilos (Sass 7-1 / ITCSS adaptado)
 
@@ -902,9 +899,9 @@ Los **componentes** no usan estas capas globales para su cosmética propia: usan
 
 Regla dura (repite §6.2): **el estado de dominio en vivo nunca se hidrata desde SSR**. `/play` es una isla cliente; Nuxt entrega el shell y el arranque (§11.2) monta el mundo contra el socket.
 
-### 10.7 `packages/` compartidos (opcional, recomendado)
+### 10.7 Nota histórica: los antiguos `packages/` compartidos (derogados por ADR-021)
 
-Si el equipo de backend (TS/Fastify) y el frontend comparten tipos, `packages/api-types` y `packages/domain-kernel` permiten **una sola definición** de `Money`, `SimTime`, `Ulid`, códigos de error, y de los DTO del contrato. Beneficio: el mismo `error.code` que emite el Gateway tiene su tipo en el cliente. Coste: disciplina de versionado del monorepo. **Recomendado** desde Fase 2; no bloqueante para Fase 1 (donde `api-types` puede vivir dentro de `apps/web`).
+La v1.0 de este documento planteaba un workspace pnpm con `packages/api-types` y `packages/domain-kernel` compartibles con el gateway TypeScript. Con **ADR-017** (backend 100% Go) desapareció el único consumidor TS fuera del cliente, y **ADR-021** disolvió los workspaces: `domain-kernel` se internalizó en `src/shared/` (kernel puro, sin dependencias de framework) y `api-types` pasó a **generación local** (`npm run gen:api` desde `docs/api/openapi.yaml`, tipos versionados dentro de `/frontend`). La coherencia de tipos entre cliente y servidor la garantiza el **contrato**, no un paquete común. Ver ADR-021 para el detalle y las consecuencias.
 ---
 
 ## 11. Integración de Phaser en Nuxt/Vue
@@ -1007,7 +1004,7 @@ Este es el corazón de "cómo Phaser se comunica con Pinia y comparte estado". L
 `game/bridge/` implementa un **WorldStateBridge** que:
 
 1. **Observa** las stores de gameplay (buildings, fleet, shipments, logistics, cities) mediante `store.$subscribe` / `watch` sobre *getters espaciales* parametrizados por el **viewport actual** (la cámara define qué chunks son visibles).
-2. **Deriva view-models de render**: estructuras planas y baratas (`BuildingVM`, `VehicleVM`, `CityVM`) que contienen solo lo que el sprite necesita (posición isométrica, tipo, nivel, estado visual, flags de selección/propiedad), no la entidad de dominio completa.
+2. **Deriva view-models de render**: estructuras planas y baratas (`BuildingVM`, `VehicleVM`, `CityVM`) que contienen solo lo que el sprite necesita (posición de mundo (celda), tipo, nivel, estado visual, flags de selección/propiedad), no la entidad de dominio completa.
 3. **Difunde diffs, no snapshots**: entrega al `WorldRenderer` altas/bajas/updates de VMs (`upsert`, `remove`), para que el renderer haga *reconciliación de sprites* mínima (crear del pool, actualizar, devolver al pool) — coherente con P8.
 
 ```mermaid
@@ -1050,7 +1047,7 @@ Esto implementa "coste ∝ eventos" también en el cliente: entre hitos, no hay 
 
 #### 11.8.2 Edificios
 - `BuildingSprite` desde atlas por `BuildingType` y **nivel** (1–4, footprint y arte cambian con el nivel, GDD §6.3).
-- **Footprint** isométrico correcto (ocupa varias celdas); anclaje a la rejilla del tilemap.
+- **Footprint** ortogonal correcto (ocupa varias celdas); anclaje a la rejilla ortogonal del tilemap.
 - Estados: operativa, en construcción (progreso visual), dañada, en mantenimiento, abandonada, **en embargo** (tinte/overlay del sistema, GDD §11.2).
 - Indicadores flotantes: cola de producción activa, falta de combustible (icono de "apagón", GDD §5.8), sin trabajadores.
 
@@ -1186,7 +1183,7 @@ sequenceDiagram
 El modelo de sincronización es **snapshot inicial + patches incrementales ordenados**, idempotente y recuperable:
 
 - **Snapshot**: estado completo y autoritativo de una room en un `sim_time` dado. Reemplaza (no fusiona parcialmente) el subárbol correspondiente en las stores. Se recibe al `join`, y de nuevo tras un *resync* (§12.13).
-- **Patch**: delta con `{ sim_time, sequence, ops[] }`. Las `ops` son `upsert`/`remove`/`update-field` sobre entidades identificadas por ULID. Se aplican **en orden** `(sim_time, sequence)` (espejando el desempate del backend, GDD §1.1).
+- **Patch**: delta con `{ sim_time, sequence, ops[] }`. Las `ops` son `upsert`/`remove`/`update-field` sobre entidades identificadas por UUID. Se aplican **en orden** `(sim_time, sequence)` (espejando el desempate del backend, GDD §1.1).
 - **Message**: evento puntual sin estado persistente (resultado de sorteo, alerta, aviso de mantenimiento). No entra en el pipeline de patches; se enruta a los casos de uso correspondientes.
 
 **Pipeline de aplicación de patches** (`network/pipeline/`):
@@ -1234,7 +1231,7 @@ El cliente **no** hace *lag compensation* al estilo FPS (rewind de hitboxes): no
 **La mayoría de comandos van por REST** (coherente con `openapi.yaml`: construir, publicar, aceptar, asignar ruta, comprar slot, renovar concesión…). El WS se reserva para *mensajes* de tiempo real que el Gateway acepte (si los hay); por defecto, el cliente **no** asume comandos por WS.
 
 Cada comando REST:
-- Lleva una **`Idempotency-Key`** (ULID de cliente) para tolerar reintentos sin doble ejecución (P6) — el backend, siendo autoritativo y transaccional, es el árbitro; la clave evita duplicar una publicación por un reintento de red.
+- Lleva una **`Idempotency-Key`** (UUIDv7 de cliente) para tolerar reintentos sin doble ejecución (P6) — el backend, siendo autoritativo y transaccional, es el árbitro; la clave evita duplicar una publicación por un reintento de red.
 - Es **idempotente en efecto** desde la perspectiva del cliente: si la respuesta se pierde pero el comando se aplicó, el reintento con la misma clave no crea un segundo efecto.
 - Devuelve `{data, meta}` en éxito o `{error:{code,message,details}}` tipado; el cliente **mapea `error.code`** a UX (§13.7). Nunca inventa el resultado.
 
@@ -1343,7 +1340,7 @@ flowchart TD
     GW["Notification/Event Gateway (WSS)\ninterest management"]
     NT["NetworkTransport (ACL)\nsnapshot/patch/message"]
     PIPE["Patch Pipeline\norden · dedup · idempotencia"]
-    MAP["Mappers DTO→dominio\nMoney · SimTime · Ulid"]
+    MAP["Mappers DTO→dominio\nMoney · SimTime · EntityId"]
     STORE["Pinia stores\n(dominio normalizado)"]
     VUE["Vue (HUD/paneles)\nreactivo"]
     BRIDGE["WorldStateBridge\nview-models espaciales"]
@@ -1363,8 +1360,8 @@ flowchart TD
 
 1. **Gateway → NT**: el frame WS crudo del Gateway se traduce al modelo `snapshot|patch|message` (ACL, §4.4/§12.2).
 2. **NT → Pipeline**: ordenación por `(sim_time, sequence)`, dedup, detección de huecos (§12.5).
-3. **Pipeline → Mappers**: los DTO crudos (strings de punto fijo, ULID, sim-time en segundos) se convierten a **tipos de dominio branded** (`Money`, `Quantity`, `SimTime`, `Ulid<T>`). Aquí, y **solo aquí**, se cruza la frontera de infraestructura (§9.5).
-4. **Mappers → Store**: aplicación **idempotente** a la store dueña, normalizada por ULID (P2, §20.5).
+3. **Pipeline → Mappers**: los DTO crudos (strings de punto fijo, UUID, sim-time en segundos) se convierten a **tipos de dominio branded** (`Money`, `Quantity`, `SimTime`, `EntityId<T>`). Aquí, y **solo aquí**, se cruza la frontera de infraestructura (§9.5).
+4. **Mappers → Store**: aplicación **idempotente** a la store dueña, normalizada por UUID (P2, §20.5).
 5. **Store → Vue**: reactividad de grano fino; los componentes que leen los getters afectados se re-renderizan.
 6. **Store → Bridge → Phaser**: el bridge deriva view-models espaciales acotados al viewport y emite diffs al renderer (§11.6), que reconcilia sprites desde el pool.
 
@@ -1377,8 +1374,8 @@ sequenceDiagram
     participant NT
     participant Store as fleet.store
     participant Sprite as VehicleSprite
-    Shard->>GW: evento hito: veh_X llega a nodo N (sim_time, seq)
-    GW->>NT: patch { upsert veh_X: {link, tEnter, speedProfile} }
+    Shard->>GW: evento hito: vehículo V llega a nodo N (sim_time, seq)
+    GW->>NT: patch { upsert vehículo V: {link, tEnter, speedProfile} }
     NT->>Store: apply idempotente (mapeado a dominio)
     Note over Store: verdad cinemática actualizada
     loop cada frame de Phaser
@@ -1523,7 +1520,7 @@ El backend define una taxonomía de `error.code` (SAD §10: `INSUFFICIENT_COLLAT
 | `422 INSUFFICIENT_COLLATERAL` | Garantía insuficiente | Revertir predicción; señalar el campo; sugerir capital/menor cantidad |
 | `409` | Conflicto (publicación agotada, cooldown, stock ya reservado) | Revertir; refrescar el ítem del tablón; explicar |
 | `403` | Recurso ajeno / vehículo SELLADO | No debería ocurrir si `OwnershipPolicy` funcionó; log de discrepancia + revertir |
-| `404` | ULID no resuelto | Entidad desapareció; refrescar vista |
+| `404` | UUID no resuelto | Entidad desapareció; refrescar vista |
 | `429` | Rate limit | Backoff, "ve más despacio" (§12.10) |
 | `503 Retry-After` | Ventana de mantenimiento | Estado `frozen` (§12.9), no error |
 | `401` | Sesión expirada | Refresh de token o re-login |
@@ -1555,7 +1552,7 @@ Los assets del cliente se dividen en dos universos que **no deben mezclarse**: (
 | Clase | Ejemplos | Pipeline | Cargador |
 |---|---|---|---|
 | **Atlases de sprites** | edificios (por tipo/nivel), vehículos (por tipo/orientación), ciudades (por nivel), iconos de estado espacial | Empaquetado en *texture atlases* (§14.2) | Phaser Loader (Preload) |
-| **Tilesets / Tilemaps** | terreno isométrico, biomas, ríos, red logística | Tiled JSON + tileset atlas | Phaser Loader |
+| **Tilesets / Tilemaps** | terreno top-down, biomas, ríos, red logística | Tiled JSON + tileset atlas | Phaser Loader |
 | **Audio** | ambiente, UI sfx, avisos (avería, entrega) | sprites de audio (audio sprite) | Phaser Sound / HTMLAudio |
 | **Fuentes de UI** | tipografía del design system | woff2 subset | CSS `@font-face` (build) |
 | **Bitmap fonts** | etiquetas ancladas al mundo (nombres, contadores) en WebGL | fnt + atlas | Phaser Loader |
@@ -1572,9 +1569,9 @@ Regla: **nada espacial se carga como asset de build; nada de UI se carga por el 
 - **Nivel/estado en el atlas**: las variantes por nivel (edificios 1–4) y estado (operativa/dañada/embargo) son *frames* del mismo atlas para conmutar sin recargar textura.
 - **Mipmaps** para sprites que se ven a distintos zooms (reduce aliasing y coste de muestreo al alejar, §21.6).
 
-### 14.3 Tilemaps (terreno isométrico por chunks)
+### 14.3 Tilemaps (terreno top-down por chunks)
 
-- El terreno se define como **tilemap isométrico** troceado en **chunks** (§16.3). Cada chunk es un tilemap (o capa) cargado bajo demanda según el viewport (streaming, §16.8).
+- El terreno se define como **tilemap ortogonal (top-down)** troceado en **chunks** (§16.3). Cada chunk es un tilemap (o capa) cargado bajo demanda según el viewport (streaming, §16.8).
 - **Fuente de la geometría**: el mundo es procedural pero **ya persistido** en el servidor (GDD §9). El cliente **no** genera terreno; recibe la definición de la región (biomas, elevación, ríos, red) por REST/snapshot y la materializa en tiles. Para el *arte*, usa tilesets locales; para la *disposición*, los datos del servidor.
 - **Capas de tilemap**: base (terreno/bioma), agua/ríos, red logística (enlaces), decoración. Culling por capa (§16.5).
 
@@ -1635,7 +1632,7 @@ flowchart LR
     MAN --> PHL
 ```
 
-- El empaquetado (texture packing, audio sprite, export de tilemaps) es un **paso de build reproducible** (script `pnpm build:assets`), versionado en el repo o en un pipeline de arte. El resultado (atlases + manifiesto) es lo que consume el runtime, nunca el arte crudo.
+- El empaquetado (texture packing, audio sprite, export de tilemaps) es un **paso de build reproducible** (script `npm run build:assets`), versionado en el repo o en un pipeline de arte. El resultado (atlases + manifiesto) es lo que consume el runtime, nunca el arte crudo.
 - **Validación en CI**: presupuestos de tamaño de atlas y de peso total de assets críticos se verifican en CI; un atlas que exceda el presupuesto rompe el build (§21.6, §23.6).
 ---
 
@@ -1691,7 +1688,7 @@ El layout `game.vue` compone el mundo y la UI en capas z:
 | **Modal** | Interacción que bloquea el fondo | Sí | Centro, overlay | Confirmaciones críticas, publicación de contrato |
 | **Diálogo** | Modal pequeño de decisión | Sí | Centro | "¿Cancelar publicación?" |
 | **Tooltip** | Info efímera al hover/focus | No | Anclado al target | Detalle de sprite, ayuda de campo |
-| **Toast/Notificación** | Aviso no bloqueante | No | Esquina | "Contrato liquidado", "Avería en veh_X" |
+| **Toast/Notificación** | Aviso no bloqueante | No | Esquina | "Contrato liquidado", "Avería en vehículo V" |
 | **Popover/Menú** | Acciones contextuales | No | Anclado | Menú contextual espacial, dropdowns |
 
 ### 15.5 Gestión de ventanas y paneles (window manager)
@@ -1773,19 +1770,20 @@ Aunque son dos motores de render (DOM y WebGL), comparten el **mismo lenguaje vi
 
 ## 16. Sistema de mapas
 
-El mundo es un **único mapa isométrico persistente, enorme y compartido** (GDD §1, §9). El cliente nunca lo tiene entero en memoria: lo **transmite por chunks** según lo que la cámara ve. Cubre mapa mundial, capas, chunks, tilemaps, culling, render parcial, LOD y streaming.
+El mundo es un **único mapa top-down cenital, persistente, enorme y compartido** (GDD §1, §9). El cliente nunca lo tiene entero en memoria: lo **transmite por chunks** según lo que la cámara ve. Cubre mapa mundial, capas, chunks, tilemaps, culling, render parcial, LOD y streaming.
 
 ### 16.1 Modelo del mundo en cliente
 
 - El mundo se particiona en **macro-regiones** (grilla gruesa, p. ej. 500×500 celdas cada una, GDD §9), que además son la **unidad de sharding** del backend (GDD §15.1) y la jurisdicción de juego (impuestos, estadísticas).
 - El cliente representa: **regiones** (contexto fiscal/visual), y dentro de cada región, **chunks** de tiles (unidad de streaming y render, más fina que la región).
 - **La geometría es autoritativa del servidor** (procedural persistida): el cliente recibe la definición de cada región/chunk (bioma, elevación, ríos, red logística, yacimientos) por REST/snapshot y la materializa con sus tilesets locales. **No** genera terreno (P1).
+- **Las formas llegan de la API como GeoJSON-like con coordenadas planas `[x_m, y_m]` en metros de mundo** (SRID 0 cartesiano, ADR-019; desviación documentada de RFC 7946): el cliente las convierte a celdas/píxeles vía `GridProjection` (§16.2), sin ninguna matemática geográfica (lon/lat).
 
-### 16.2 Proyección isométrica
+### 16.2 Proyección ortogonal (top-down)
 
-- Proyección **isométrica 2:1** (o dimétrica según arte), con un `IsoProjection` en `shared/geometry` que convierte **coordenadas de mundo (celda) ↔ coordenadas de pantalla** de forma centralizada. Toda conversión pasa por ahí (no hay math iso disperso).
-- **Orden de dibujo (depth sorting)**: por `y` isométrico (y `z` para altura de edificios/relieve), para que lo "delante" tape lo "detrás". Phaser ordena por `depth`; el renderer asigna `depth` derivado de la posición iso (§16.4).
-- **Footprints** de edificios ocupan varias celdas; su anclaje y su depth se calculan desde la celda base.
+- Vista **top-down cenital estricta (90°)** (ADR-019): tilemaps ortogonales de Phaser, sin proyección isométrica. Una **`GridProjection` ortogonal** en `shared/geometry` convierte **coordenadas de mundo (celda) ↔ coordenadas de pantalla** de forma centralizada (multiplicación/división por el tamaño de tile). Sigue siendo el **único punto de conversión** de coordenadas del cliente (no hay math de proyección disperso).
+- **Orden de dibujo por capas**, no por depth sorting por entidad: terreno → agua → red logística → recursos → edificios → vehículos → efectos → overlays → etiquetas (§16.4). En cenital estricto no hay oclusión entre entidades que exija ordenación por `y`; Phaser asigna un `depth` fijo por capa.
+- **Footprints** de edificios ocupan varias celdas; su anclaje se calcula desde la celda base sobre la **rejilla ortogonal**.
 
 ### 16.3 Chunks
 
@@ -1806,16 +1804,18 @@ stateDiagram-v2
 
 ### 16.4 Capas del mapa (layers)
 
-Cada chunk se compone de capas con orden y culling independientes:
+Cada chunk se compone de capas con orden de dibujo fijo (§16.2) y culling independientes:
 
 | Capa | Contenido | Frecuencia de cambio |
 |---|---|---|
 | **Terreno base** | bioma, elevación (tiles) | Estática (solo tras despliegue) |
 | **Agua/ríos** | ríos, costa, mar (animación ligera) | Estática (anim decorativa) |
 | **Red logística** | enlaces (carretera/vía/marítima) | Semi-estática (construcción de infraestructura) |
-| **Entidades fijas** | edificios, ciudades (sprites) | Dinámica (estado, nivel) |
+| **Recursos** | yacimientos, agotamiento (GDD §10) | Semi-estática (agotamiento) |
+| **Edificios/ciudades** | entidades fijas (sprites) | Dinámica (estado, nivel) |
+| **Vehículos** | móviles, marcadores de cargamento | Cada frame (interpolación) |
+| **Efectos** | partículas/animaciones puntuales (EffectsScene) | Puntual |
 | **Overlays** | congestión, propiedad, demanda (OverlayScene) | Muy dinámica (toggle + datos en vivo) |
-| **Móviles** | vehículos, marcadores de cargamento | Cada frame (interpolación) |
 | **Etiquetas** | nombres, contadores (BitmapText/DOM) | Según LOD/zoom |
 
 ### 16.5 Culling (coste ∝ visible)
@@ -1878,7 +1878,7 @@ flowchart TD
 - Un vehículo cuya ruta cruza un borde de chunk/región se interpola con continuidad; su verdad vive en `fleet.store`, no en el chunk. El cruce de frontera de shard es transparente para el cliente (el backend lo resuelve, GDD §15.2).
 
 ### 16.11 Coordenadas, picking y consistencia
-- Todo el sistema comparte el `IsoProjection` (§16.2) para picking (pantalla→celda, §18.4) y para posicionar tooltips/menús DOM sobre el mundo. Una sola matemática de proyección evita desalineaciones entre el clic, el sprite y el tooltip.
+- Todo el sistema comparte la `GridProjection` (§16.2) para picking (pantalla→celda, §18.4) y para posicionar tooltips/menús DOM sobre el mundo. Una sola matemática de proyección evita desalineaciones entre el clic, el sprite y el tooltip.
 
 ---
 
@@ -1914,7 +1914,7 @@ La cámara es el instrumento principal de navegación de un mundo enorme. Se con
 ### 17.5 Animaciones de cámara y el servicio de tiempo
 
 - **Transiciones**: `pan`/`zoomTo` con easing para saltos (ir a una ciudad desde el inspector, "ver esta ruta", saltar a una alerta). Duración corta y saltable.
-- **Cinemática de alertas**: al clicar una notificación ("avería en veh_X"), la cámara hace un *fly-to* animado a la entidad y la resalta.
+- **Cinemática de alertas**: al clicar una notificación ("avería en un vehículo"), la cámara hace un *fly-to* animado a la entidad y la resalta.
 - Las animaciones de cámara usan el **RAF de Phaser**, no el `SimClock` (son wall-clock puro, presentación), a diferencia de la interpolación de vehículos que sí usa sim-time (§11.7). Esta distinción es deliberada: mover la cámara no es un evento de dominio.
 
 ### 17.6 Límites (bounds)
@@ -1973,7 +1973,7 @@ El input es compartido entre dos consumidores (el mundo Phaser y la UI DOM) y de
 
 ### 18.4 Picking espacial (pantalla → entidad)
 
-- El clic en el canvas se convierte de **coordenada de pantalla → celda de mundo** vía `IsoProjection` (§16.2), y de ahí a **entidad** consultando el índice espacial del renderer (qué sprite/footprint ocupa esa celda, respetando depth para lo apilado).
+- El clic en el canvas se convierte de **coordenada de pantalla → celda de mundo** vía `GridProjection` (§16.2), y de ahí a **entidad** consultando el índice espacial del renderer (qué sprite/footprint ocupa esa celda, resolviendo lo superpuesto por prioridad de capa, §16.2).
 - **Prioridad de picking**: entidad móvil > edificio > tile de terreno (se selecciona lo más "arriba" y accionable).
 - **Tolerancia**: para sprites pequeños a lejano LOD, un radio de picking evita exigir precisión de píxel.
 
@@ -2100,20 +2100,20 @@ Las stores mapean 1:1 a los contexts (§9.1, §10.2): `session`, `world`, `build
 
 ### 20.3 Normalización
 
-Las colecciones de entidades con identidad (ULID) se guardan **normalizadas** (P2):
+Las colecciones de entidades con identidad (UUID) se guardan **normalizadas** (P2):
 
 ```
 buildings.store = {
-  byId: Record<Ulid<'bld'>, Building>,
-  idsByRegion: Record<RegionId, Ulid<'bld'>[]>,   // índices para consultas espaciales
-  idsByType: Record<BuildingType, Ulid<'bld'>[]>,
+  byId: Record<BuildingId, Building>,
+  idsByRegion: Record<RegionId, BuildingId[]>,   // índices para consultas espaciales
+  idsByType: Record<BuildingType, BuildingId[]>,
   // sin duplicar entidades; las listas son índices de ids
 }
 ```
 
-- **Fuente única por entidad**: una entidad vive en `byId` de su store dueña; cualquier otra referencia es por ULID, nunca por copia.
+- **Fuente única por entidad**: una entidad vive en `byId` de su store dueña; cualquier otra referencia es por UUID, nunca por copia.
 - **Índices** (`idsByRegion`, `idsByType`, `idsByOwner`) se mantienen al aplicar patches, para consultas O(1)/O(k) sin recorrer todo.
-- **Referencias cross-store por ULID**: un `Contract` referencia `shipmentId`, `buildingId`; se resuelven por getter contra la store dueña, no se embeben.
+- **Referencias cross-store por UUID**: un `Contract` referencia `shipmentId`, `buildingId`; se resuelven por getter contra la store dueña, no se embeben.
 
 ### 20.4 Aplicación de eventos (la única vía de escritura de dominio)
 
@@ -2142,12 +2142,14 @@ El dominio usa **branded types** (P9/P10) para que el compilador impida errores 
 type Money    = string & { readonly __brand: 'Money' }      // punto fijo, del servidor
 type Quantity = string & { readonly __brand: 'Quantity' }
 type SimTime  = number & { readonly __brand: 'SimTime' }     // segundos desde génesis
-type Ulid<T extends string> = string & { readonly __brand: `ulid:${T}` }
-type RegionId = Ulid<'reg'>
+type EntityId<T extends string> = string & { readonly __brand: `id:${T}` }  // string uuid (UUIDv7, ADR-018)
+type BuildingId = EntityId<'Building'>   // derivados de los schemas nominales del contrato
+type VehicleId  = EntityId<'Vehicle'>
+type RegionId   = EntityId<'Region'>
 ```
 
 - **`Money`/`Quantity`** solo se manipulan con helpers de `shared/money` (suma/resta/comparación en punto fijo); **prohibido** `Number(money)` para aritmética (C11). El formateo a texto es la única salida.
-- **`Ulid<T>`** impide pasar un `bld_` donde se espera `veh_`; los mappers validan el namespace al entrar (§9.5).
+- **`EntityId<T>`** impide pasar un `BuildingId` donde se espera un `VehicleId`: el UUID es plano y sin prefijo (ADR-018), así que el tipado por entidad vive en el brand, derivado de los **schemas nominales** del contrato (`AccountId`, `ContractId`, `VehicleId`, …); los mappers validan el formato `uuid` al entrar (§9.5).
 - **`SimTime`** solo se convierte a wall-clock por el `SimClock` (P5). Nunca se hace `new Date(simTime)` directo.
 
 ### 20.7 Estados de vista (staleness) de primera clase
@@ -2171,13 +2173,13 @@ Los ciclos de vida del dominio (contrato: publicado→aceptado→en ejecución�
 
 ### 20.10 Sincronización entre stores
 
-- **Sin acoplamiento directo**: una store no importa otra. La coordinación cross-store ocurre en **casos de uso** (Application) que leen varias stores y las actualizan de forma consistente, o por **getters** que resuelven referencias por ULID.
+- **Sin acoplamiento directo**: una store no importa otra. La coordinación cross-store ocurre en **casos de uso** (Application) que leen varias stores y las actualizan de forma consistente, o por **getters** que resuelven referencias por UUID.
 - **Consistencia transaccional local**: cuando un evento afecta varias stores (una liquidación toca `market`, `finance`, `shipments`), el caso de uso las aplica en un mismo *tick* para evitar estados intermedios visibles incoherentes (un contrato "liquidado" pero el saldo aún sin reflejar). Si el backend envía esas mutaciones en patches separados, el cliente las aplica idempotentemente y converge; la UI tolera el instante intermedio con marcado `pending`/`stale` si hiciera falta.
 
 ### 20.11 Reglas de oro de las stores (checklist)
 
 1. El estado replicado se escribe **solo** por `apply*` desde Application (P1).
-2. Colecciones **normalizadas** por ULID; referencias por id (P2).
+2. Colecciones **normalizadas** por UUID; referencias por id (P2).
 3. Lo computable es **getter**, no campo (P2).
 4. Importes con `Money`, tiempos con `SimTime`; **sin floats** (C11).
 5. Aplicación **idempotente y ordenada** (P6).
@@ -2241,7 +2243,7 @@ Estos números son *objetivos de arranque* a calibrar con hardware real; lo esen
 - **Mipmaps** para sprites vistos a múltiples zooms (menos aliasing y menos coste de muestreo al alejar).
 - **Power preference** `high-performance`; respetar `prefers-reduced-motion` para pausar animaciones no esenciales.
 - **Un solo contexto GL**; el minimapa comparte contexto (segunda cámara/RenderTexture), no crea otro.
-- **Evitar reads del GPU** (getImageData/readPixels) en caliente: son *stalls*; el picking es matemático (IsoProjection + índice espacial, §18.4), no por lectura de píxeles.
+- **Evitar reads del GPU** (getImageData/readPixels) en caliente: son *stalls*; el picking es matemático (GridProjection + índice espacial, §18.4), no por lectura de píxeles.
 
 ### 21.7 Memoización y coalescing
 
@@ -2308,7 +2310,7 @@ La estrategia de testing sigue la **pirámide** adaptada a un cliente con dos mo
 
 - El **dominio** es framework-agnostic y puro (§8): se testea sin montar Vue ni Phaser. Money/time/ids, políticas de presentación, máquinas de estado de UI → tests unitarios rápidos y exhaustivos.
 - Los **casos de uso** se testean con **fakes de puertos** (`FakeRestApi`, `FakeNetworkTransport`, `FakeClock`): se verifica que un intent produce el comando correcto, aplica la predicción correcta, revierte ante `error.code`, y reconcilia ante el evento de confirmación.
-- Los **mappers** (ACL) se testean con **DTOs reales** tomados de `specs/openapi.yaml` (fixtures generadas): un DTO crudo entra, un modelo de dominio branded sale, con validación de ULID/punto fijo/sim-time.
+- Los **mappers** (ACL) se testean con **DTOs reales** tomados de `docs/api/openapi.yaml` (fixtures generadas): un DTO crudo entra, un modelo de dominio branded sale, con validación de UUID/punto fijo/sim-time.
 
 ### 22.3 Testing de Vue (UI)
 
@@ -2322,7 +2324,7 @@ La estrategia de testing sigue la **pirámide** adaptada a un cliente con dos mo
 Phaser es notoriamente difícil de testear; la arquitectura lo mitiga porque el render está tras el puerto `WorldRenderer` y consume **view-models**, no stores:
 
 - **Renderer headless**: Phaser en modo headless (canvas mockeado) permite instanciar escenas y verificar *lógica de render* sin GPU: que un `upsert` de VM crea/actualiza un sprite del pool, que un `remove` lo devuelve, que el culling excluye lo fuera de viewport, que el LOD selecciona el frame correcto por zoom, que la interpolación evalúa la posición correcta para un `SimClock` dado.
-- **Tests de proyección** (`IsoProjection`): pantalla↔celda es matemática pura → tests exhaustivos de picking (§18.4) y anclaje.
+- **Tests de proyección** (`GridProjection`): pantalla↔celda es matemática pura → tests exhaustivos de picking (§18.4) y anclaje.
 - **Tests del bridge**: dado un cambio de store + viewport, verificar los diffs de VM emitidos (§11.6).
 - **No** se testea "que se vea bonito" en unitario; eso es E2E visual (§22.7) o QA manual.
 
@@ -2349,7 +2351,7 @@ Es el conjunto de tests **más crítico** del frontend por el riesgo de la §4.4
 
 ### 22.8 Datos de prueba y fixtures
 
-- **Fixtures derivadas del contrato**: DTOs, snapshots y secuencias de patches generados desde `specs/openapi.yaml` y de escenarios de dominio (un ciclo CCRI completo, una avería, una subida de nivel de ciudad).
+- **Fixtures derivadas del contrato**: DTOs, snapshots y secuencias de patches generados desde `docs/api/openapi.yaml` y de escenarios de dominio (un ciclo CCRI completo, una avería, una subida de nivel de ciudad).
 - **Escenas sintéticas grandes** para perf: generar 10k entidades y medir culling/FPS.
 - Fixtures versionadas junto al contrato; si el contrato cambia, las fixtures se regeneran (§10.1).
 
@@ -2364,14 +2366,14 @@ Es el conjunto de tests **más crítico** del frontend por el riesgo de la §4.4
 
 ### 23.1 Gestor de paquetes y monorepo
 
-- **pnpm** con workspaces (coherente con el monorepo; eficiente en disco y estricto en dependencias fantasma).
-- Scripts unificados: `pnpm dev` (Nuxt), `pnpm gen:api` (tipos desde OpenAPI), `pnpm build:assets` (atlases/tilemaps), `pnpm test`, `pnpm lint`, `pnpm typecheck`, `pnpm build`.
+- **npm sin workspaces de ningún tipo** (ADR-021): `/frontend` es un paquete Node autónomo; lockfile `package-lock.json` versionado. El Makefile de la raíz del monorepo es el punto de entrada único (`make frontend`, `make generate`, …) y delega en los scripts npm.
+- Scripts unificados: `npm run dev` (Nuxt), `npm run gen:api` (tipos desde `docs/api/openapi.yaml`), `npm run build:assets` (atlases/tilemaps), `npm run test`, `npm run lint`, `npm run typecheck`, `npm run build`.
 
 ### 23.2 TypeScript estricto
 
 - `strict: true` + `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`, `noImplicitOverride`, `noFallthroughCasesInSwitch`.
-- `pnpm typecheck` (vue-tsc) en CI; **cero errores** de tipos es gate de merge.
-- Tipos del contrato **generados** desde `specs/openapi.yaml` (§10.1); no se editan a mano.
+- `npm run typecheck` (vue-tsc) en CI; **cero errores** de tipos es gate de merge.
+- Tipos del contrato **generados** desde `docs/api/openapi.yaml` (§10.1); no se editan a mano.
 
 ### 23.3 ESLint + reglas de fronteras (lo que hace cumplir la arquitectura)
 
@@ -2403,7 +2405,7 @@ Pipeline por etapas (en cada PR salvo lo indicado):
 
 ```mermaid
 flowchart LR
-    PR[Pull Request] --> INSTALL[pnpm install]
+    PR[Pull Request] --> INSTALL[npm ci]
     INSTALL --> GEN[gen:api + build:assets]
     GEN --> LINT[eslint + stylelint + prettier check]
     GEN --> TYPE[typecheck vue-tsc]
@@ -2423,7 +2425,7 @@ flowchart LR
 - **Presupuestos** (§21.1, §21.11, §14.8) como *gates*: superar peso de bundle o de atlas rompe el CI.
 - **E2E/perf/chaos** en `main`/nightly (más lentos), con alertas si regresan.
 - **Despliegue**: build estático/SSR de Nuxt servido tras **Caddy** (C16), **coordinado con la ventana de mantenimiento** para que los cambios de assets/manifiesto coincidan con la pausa (§14.6) y no haya mezcla de versiones en vivo.
-- **Versionado de contrato**: el CI verifica que los tipos generados están sincronizados con `specs/openapi.yaml`; si el contrato del backend cambió, el frontend falla ruidosamente hasta reconciliar (O5).
+- **Versionado de contrato**: el CI verifica que los tipos generados están sincronizados con `docs/api/openapi.yaml`; si el contrato del backend cambió, el frontend falla ruidosamente hasta reconciliar (O5).
 
 ### 23.7 Entornos y configuración
 
@@ -2436,7 +2438,7 @@ flowchart LR
 - **Storybook** (o equivalente ligero) para el UI kit: desarrollar/documentar componentes base en aislamiento con sus estados.
 - **Playground de escenas** (`/dev/world-sandbox`): una escena Phaser con datos sintéticos para iterar render/cámara/overlays sin backend.
 - **Mock server** del backend (sirve `openapi.yaml` + Gateway guionizado) para desarrollar sin depender del backend real.
-- **Documentación viva**: este FAD + ADRs en `docs/`; diagramas Mermaid versionados; convenciones en el README del `apps/web`.
+- **Documentación viva**: este FAD + ADRs en `docs/`; diagramas Mermaid versionados; convenciones en el README de `/frontend`.
 ---
 
 ## 24. Seguridad del cliente
@@ -2640,10 +2642,10 @@ Estas son **fases de construcción del frontend** (entregables internos del equi
 ### 26.1 Fases
 
 #### Fase FE 1 — Infraestructura
-- Monorepo `apps/web`, pnpm workspaces, TypeScript estricto, ESLint + reglas de fronteras (§23.3), Prettier/Stylelint, Husky/Commitlint.
-- Generación de tipos desde `specs/openapi.yaml` (`gen:api`); pipeline de assets (`build:assets`) esqueleto.
+- `/frontend` autónomo en el monorepo de raíz fija (ADR-016/ADR-021), npm sin workspaces, TypeScript estricto, ESLint + reglas de fronteras (§23.3), Prettier/Stylelint, Husky/Commitlint.
+- Generación de tipos desde `docs/api/openapi.yaml` (`gen:api`, vía `make generate`); pipeline de assets (`build:assets`) esqueleto.
 - CI base (lint/typecheck/unit/build + presupuestos de bundle).
-- `shared/` kernel: `Money`, `Quantity`, `SimTime`, `Ulid`, `Result`, `EventBus`, `IsoProjection` (con tests exhaustivos).
+- `shared/` kernel: `Money`, `Quantity`, `SimTime`, `EntityId`, `Result`, `EventBus`, `GridProjection` (con tests exhaustivos).
 - Runtime config tipada (zod), entornos, mock server del backend.
 - **Validación inter-equipo de ADR-FE-004** con backend (protocolo real del Gateway).
 - *Entregable:* andamiaje verde en CI, kernel probado, contrato de red acordado.
@@ -2658,8 +2660,8 @@ Estas son **fases de construcción del frontend** (entregables internos del equi
 
 #### Fase FE 3 — Motor Phaser
 - Bootstrap de Phaser client-only en `/play` (§11.2); BootScene/PreloadScene/WorldScene.
-- Puerto `WorldRenderer`; renderer headless-testable; pools; `IsoProjection` en render.
-- Tilemap isométrico básico + chunks + culling + cámara (zoom/pan/bounds) (§16, §17).
+- Puerto `WorldRenderer`; renderer headless-testable; pools; `GridProjection` en render.
+- Tilemap ortogonal top-down básico + chunks + culling + cámara (zoom/pan/bounds) (§16, §17).
 - Sprites base (edificio/vehículo/ciudad) desde atlases; bridge Pinia↔Phaser con VMs sintéticos (§11.6).
 - Playground de escenas (`/dev/world-sandbox`).
 - *Entregable:* un mundo navegable con datos **sintéticos**, 60 FPS con culling, render testeado headless.
@@ -2748,7 +2750,7 @@ gantt
 
 | Hito | Criterio objetivo |
 |---|---|
-| Kernel probado (FE1) | `Money`/`SimTime`/`Ulid`/`IsoProjection` con tests; CI verde; contrato de red acordado |
+| Kernel probado (FE1) | `Money`/`SimTime`/`EntityId`/`GridProjection` con tests; CI verde; contrato de red acordado |
 | Login real (FE2) | Autenticación REST + `SimClock` corriendo desde `meta.sim_time` |
 | Mundo sintético 60 FPS (FE3) | Culling + pooling + cámara; render headless testeado |
 | Estado real en el mundo (FE4) | Snapshots/patches pueblan stores; reconexión y mantenimiento OK; contract-tests verdes |
@@ -2782,6 +2784,8 @@ gantt
 | **ACL (Anti-Corruption Layer)** | Adaptador que absorbe el protocolo del backend sin filtrarlo (§4.4, §9.5). |
 | **LOD** | Nivel de detalle según zoom (§16.6). |
 | **Chunk** | Bloque de tiles, unidad de streaming/render (§16.3). |
+| **Top-down cenital** | Vista del mundo a 90° (ADR-019); sin proyección isométrica ni depth sorting por entidad: el orden de dibujo es por capas (§16.2). |
+| **GridProjection** | Conversión ortogonal celda ↔ píxel (por tamaño de tile); único punto de conversión de coordenadas del cliente (§16.2). |
 
 ### 27.2 Puertos del cliente (contratos, resumen)
 
@@ -2850,4 +2854,4 @@ gantt
 
 ---
 
-*Fin del Frontend Architecture Document (FAD) v1.0. Documento vivo: toda decisión estructural nueva se incorpora vía ADR (§7). Ante discrepancia con el GDD/SAD o `specs/openapi.yaml`, prevalece el backend y este documento se corrige.*
+*Fin del Frontend Architecture Document (FAD) v1.1. Documento vivo: toda decisión estructural nueva se incorpora vía ADR (§7). Ante discrepancia con el GDD/SAD o `docs/api/openapi.yaml`, prevalece el backend y este documento se corrige.*

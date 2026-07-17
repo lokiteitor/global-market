@@ -1,0 +1,17 @@
+// Entrada global de estilos — ITCSS con @use/@forward, nunca @import
+// (FAD §10.4/§15.2). Especificidad creciente:
+//
+//   settings/  tokens puros (sin salida CSS — los consumen las demás capas)
+//   tools/     mixins/funciones (sin salida CSS)
+//   themes/    mapas de custom properties por tema (oscuro por defecto)
+//   generic/   reset
+//   elements/  base de elementos HTML
+//   objects/   primitives de layout (.o-*)
+//
+// La cosmética de componentes NO vive aquí: cada componente usa CSS Modules
+// (`*.module.scss`) o <style scoped> consumiendo settings/tools vía @use.
+
+@use 'themes';
+@use 'generic';
+@use 'elements';
+@use 'objects';

@@ -1,0 +1,8 @@
+// settings — tokens de diseño (capa ITCSS sin salida CSS). FAD §10.4.
+// Uso: `@use "settings" as s;` (loadPaths configurado en nuxt.config.ts).
+
+@forward 'colors';
+@forward 'space';
+@forward 'type';
+@forward 'z';
+@forward 'motion';
