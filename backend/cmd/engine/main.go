@@ -21,6 +21,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/lokiteitor/global-market/backend/internal/balancer"
 	"github.com/lokiteitor/global-market/backend/internal/contracts"
 	"github.com/lokiteitor/global-market/backend/internal/market"
 	"github.com/lokiteitor/global-market/backend/internal/outbox"
@@ -186,11 +187,46 @@ func run() error {
 	shipmentReleaser := fleet.NewShipmentReleaser(app.Logger(), app.Metrics().Registry())
 	releaseConsumer := shipmentReleaser.NewConsumer(app.Pool(), outbox.WithLogger(app.Logger()))
 
+	// ── Economy Balancer (Incremento 6b): las ciudades como consumidor final
+	//    (faucet, GDD 5.5/5.6). El DemandWorker recalcula las curvas de demanda,
+	//    corre la máquina de niveles y publica las buys de ciudad por el PORT
+	//    (implementado aquí con contracts.CreatePublication: mismo camino estándar
+	//    del Contract Service, sin canal privilegiado, GDD 18.1). El consumer
+	//    consume las entregas urbanas (contract.settled con comprador ciudad) para
+	//    que la ciudad sea sumidero final real (city stock_free → world_source) ──
+	balancerOpts, err := balancer.OptionsFromEnv()
+	if err != nil {
+		return err
+	}
+	balancerMetrics := balancer.NewMetrics(app.Metrics().Registry())
+	cityBuyPort := cityBuyCreator{svc: contractsSvc}
+	demandWorker, err := balancer.NewDemandWorker(app.Pool(), cityBuyPort, clockSimSource{clk}, balancerOpts, balancerMetrics, app.Logger())
+	if err != nil {
+		return err
+	}
+	cityConsumer, err := balancer.NewConsumer(balancerOpts, balancerMetrics, app.Logger())
+	if err != nil {
+		return err
+	}
+	cityConsumerRunner := cityConsumer.NewOutboxConsumer(app.Pool(), outbox.WithLogger(app.Logger()))
+
+	// Job MACRO del Balancer (Incremento 6b): analítica (analytics.region_stats/
+	// city_snapshots/economy_indicators bucketizados), fórmula laboral (GDD 5.7:
+	// recalcula world.cities.base_salary = salario_base(nivel)·saturación regional)
+	// y ajuste fiscal algorítmico (GDD 5.5: mueve tax_rate_bp/canon_base un paso
+	// acotado según la tendencia masa monetaria vs. PIB). Corre en su propio bucle
+	// (II_BALANCER_ANALYTICS_INTERVAL); es monitoreo/regulación de parámetros, no
+	// mueve valor del ledger.
+	analyticsWorker, err := balancer.NewAnalyticsWorker(app.Pool(), clockSimSource{clk}, balancerOpts, balancerMetrics, app.Logger())
+	if err != nil {
+		return err
+	}
+
 	// ── Arranque de los procesos en segundo plano ────────────────────────────
 	// Comparten el ctx de la señal: al apagar, los bucles observan ctx.Done() y
 	// retornan nil (parada limpia). wg los sincroniza antes de cerrar el pool.
 	var wg sync.WaitGroup
-	wg.Add(9)
+	wg.Add(12)
 	go func() {
 		defer wg.Done()
 		if err := worker.Run(ctx); err != nil {
@@ -245,6 +281,24 @@ func run() error {
 			app.Logger().Error("contracts: el consumidor system_liquidator terminó con error", slog.Any("error", err))
 		}
 	}()
+	go func() {
+		defer wg.Done()
+		if err := demandWorker.Run(ctx); err != nil {
+			app.Logger().Error("balancer: el motor de demanda terminó con error", slog.Any("error", err))
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		if err := cityConsumerRunner.Run(ctx, consumerInterval, cityConsumer.Handle); err != nil {
+			app.Logger().Error("balancer: el consumidor city_consumer terminó con error", slog.Any("error", err))
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		if err := analyticsWorker.Run(ctx); err != nil {
+			app.Logger().Error("balancer: el job macro terminó con error", slog.Any("error", err))
+		}
+	}()
 
 	app.Logger().Info("procesos del motor en marcha",
 		slog.Duration("contracts_sweep_interval", workerOpts.SweepInterval),
@@ -273,7 +327,11 @@ func run() error {
 		slog.Duration("enforcement_interval", enforcementWorkerOpts.EnforcementInterval),
 		slog.Int("degrade_pct_per_sim_day", int(enforcementWorkerOpts.DegradePctPerSimDay)),
 		slog.Int("abandon_condition_pct", int(enforcementWorkerOpts.AbandonConditionPct)),
-		slog.Int64("seize_grace_sim_seconds", enforcementWorkerOpts.SeizeGraceSimSeconds))
+		slog.Int64("seize_grace_sim_seconds", enforcementWorkerOpts.SeizeGraceSimSeconds),
+		slog.Duration("balancer_demand_interval", balancerOpts.DemandInterval),
+		slog.Duration("balancer_analytics_interval", balancerOpts.AnalyticsInterval),
+		slog.Int64("city_buy_deadline_sim", int64(balancerOpts.CityBuyDeadlineSim)),
+		slog.String("city_consumer", balancer.ConsumerName))
 
 	// Sirve HTTP (sondas/métricas) hasta la señal; entonces app.Run apaga el
 	// servidor de forma graceful. Al retornar, el ctx ya está cancelado y los
@@ -291,6 +349,29 @@ func run() error {
 type clockSimSource struct{ clk *clock.Clock }
 
 func (c clockSimSource) Now(context.Context) simtime.SimTime { return c.clk.Now() }
+
+// cityBuyCreator implementa balancer.PublicationCreator (el PORT del Balancer)
+// con el Contract Service: publica la solicitud de compra de una ciudad por
+// contracts.CreatePublication — el MISMO camino estándar (validación, escrow,
+// ventana de sorteo) que cualquier otra publicación del tablón, sin canal
+// privilegiado (GDD 18.1). La dependencia dirigida balancer→contracts vive AQUÍ,
+// en el composition root: el paquete balancer solo conoce el PORT.
+type cityBuyCreator struct{ svc *contracts.Service }
+
+func (c cityBuyCreator) CreateCityBuy(ctx context.Context, by balancer.CityBuy) error {
+	product := by.ProductID
+	dest := by.DestinationNodeID
+	_, err := c.svc.CreatePublication(ctx, by.CityAccountID, contracts.PublicationInput{
+		Kind:               contracts.KindBuy,
+		Channel:            contracts.ChannelBoard,
+		ProductID:          &product,
+		QuantityTotal:      by.Quantity,
+		UnitPrice:          by.UnitPrice,
+		DestinationNodeID:  &dest,
+		DeliverySimSeconds: int64(by.DeliverySimSeconds),
+	})
+	return err
+}
 
 // ohlcConsumerInterval lee II_OHLC_CONSUMER_INTERVAL (time.ParseDuration) con
 // su default; un valor inválido o no positivo devuelve error (la configuración

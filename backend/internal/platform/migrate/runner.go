@@ -25,6 +25,66 @@ const (
 	selectRecordSQL = `SELECT version, name, checksum, applied_at FROM public.schema_migrations ORDER BY version`
 )
 
+// cleanSlateSQL descarta el estado que dejan las migraciones sin ejercitar sus
+// .down.sql (Reset lo usa; ver su doc). Es genérico: descubre los objetos por
+// catálogo en vez de nombrarlos, de modo que sigue a las migraciones sin
+// acoplarse a ellas y sirve igual a los fixtures de test.
+//
+//  1. Esquemas de usuario (dominios del proyecto + fixtures): fuera con
+//     CASCADE. Se preservan los del sistema (pg_catalog, information_schema,
+//     public, pg_toast/pg_temp) y los creados por una extensión.
+//  2. Objetos que las migraciones dejan en public (tablas como
+//     schema_migrations e idempotency_keys; dominios de tipo como sim_time),
+//     preservando SIEMPRE lo que pertenece a una extensión (postgis:
+//     spatial_ref_sys, etc.). Las tablas se borran antes que los dominios para
+//     no dejar columnas dependientes. schema_migrations se recrea en el Up.
+const cleanSlateSQL = `
+DO $clean_slate$
+DECLARE
+    obj text;
+BEGIN
+    FOR obj IN
+        SELECT n.nspname
+        FROM pg_namespace n
+        WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'public')
+          AND n.nspname NOT LIKE 'pg\_toast%'
+          AND n.nspname NOT LIKE 'pg\_temp%'
+          AND NOT EXISTS (
+              SELECT 1 FROM pg_depend d
+              WHERE d.classid = 'pg_namespace'::regclass
+                AND d.objid = n.oid AND d.deptype = 'e')
+    LOOP
+        EXECUTE format('DROP SCHEMA %I CASCADE', obj);
+    END LOOP;
+
+    FOR obj IN
+        SELECT c.relname
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p')
+          AND NOT EXISTS (
+              SELECT 1 FROM pg_depend d
+              WHERE d.classid = 'pg_class'::regclass
+                AND d.objid = c.oid AND d.deptype = 'e')
+    LOOP
+        EXECUTE format('DROP TABLE IF EXISTS public.%I CASCADE', obj);
+    END LOOP;
+
+    FOR obj IN
+        SELECT t.typname
+        FROM pg_type t
+        JOIN pg_namespace n ON n.oid = t.typnamespace
+        WHERE n.nspname = 'public' AND t.typtype = 'd'
+          AND NOT EXISTS (
+              SELECT 1 FROM pg_depend d
+              WHERE d.classid = 'pg_type'::regclass
+                AND d.objid = t.oid AND d.deptype = 'e')
+    LOOP
+        EXECUTE format('DROP DOMAIN IF EXISTS public.%I CASCADE', obj);
+    END LOOP;
+END
+$clean_slate$;`
+
 // lockKey identifica el advisory lock de sesión que serializa los runners
 // concurrentes sobre la misma BD (ASCII "IMPERMIG").
 const lockKey int64 = 0x494D5045524D4947
@@ -163,23 +223,24 @@ func (r *Runner) Status(ctx context.Context) ([]Status, error) {
 	return items, verifyAppliedState(migs, recs, true)
 }
 
-// Reset revierte todas las migraciones aplicadas y las reaplica, de modo que
-// los down se ejercitan siempre. Rehúsa ejecutarse en producción.
+// Reset lleva la BD a un estado limpio y reaplica todas las migraciones.
+// Rehúsa ejecutarse en producción.
+//
+// El clean-slate NO ejercita los .down.sql: los descarta con un barrido
+// directo (DROP SCHEMA ... CASCADE de los esquemas de usuario + borrado de
+// los objetos que las migraciones dejan en public). Ejercitar los downs sobre
+// una BD sembrada es imposible por diseño: llevan guardas de datos legítimas
+// para reversiones reales (p. ej. 0008 rehúsa revertir mientras existan
+// cuentas world_source, que el seed crea desde el Incremento 2). reset-db es
+// una operación de "nuke and repave" de desarrollo, no una reversión, así que
+// no debe depender de esas guardas. Coincide con el contrato documentado del
+// Makefile: "Destruye los esquemas de dominio y reaplica todo (solo dev)".
 func (r *Runner) Reset(ctx context.Context) error {
 	if r.env == "prod" {
 		return errors.New("reset rehusado: II_ENV=prod (operación destructiva, solo entornos no productivos)")
 	}
-	if err := r.ensureControlTable(ctx); err != nil {
-		return err
-	}
-	var n int
-	if err := r.conn.QueryRow(ctx, "SELECT count(*) FROM public.schema_migrations").Scan(&n); err != nil {
-		return fmt.Errorf("contando migraciones aplicadas: %w", err)
-	}
-	if n > 0 {
-		if _, err := r.Down(ctx, n); err != nil {
-			return fmt.Errorf("reset (down): %w", err)
-		}
+	if _, err := r.conn.Exec(ctx, cleanSlateSQL); err != nil {
+		return fmt.Errorf("reset (clean slate): %w", err)
 	}
 	if _, err := r.Up(ctx); err != nil {
 		return fmt.Errorf("reset (up): %w", err)

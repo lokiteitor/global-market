@@ -100,8 +100,8 @@ func TestLogisticsDeliveryE2E(t *testing.T) {
 	if n := countRows(t, ctx, pool, `SELECT count(*) FROM world.network_nodes WHERE kind = 'junction'`); n != 1 {
 		t.Fatalf("nodos junction sembrados: %d, esperado 1", n)
 	}
-	if n := countRows(t, ctx, pool, `SELECT count(*) FROM world.network_links WHERE mode = 'road'`); n != 4 {
-		t.Fatalf("enlaces road sembrados: %d, esperado 4 (bidireccionales Demo–junction–Norte)", n)
+	if n := countRows(t, ctx, pool, `SELECT count(*) FROM world.network_links WHERE mode = 'road'`); n != 6 {
+		t.Fatalf("enlaces road sembrados: %d, esperado 6 (bidireccionales Demo–junction–Norte y junction–ciudad)", n)
 	}
 
 	// ── Gateway real (ventanas de sorteo cortas; reloj sin caché) ────────────

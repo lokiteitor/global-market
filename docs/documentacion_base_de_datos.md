@@ -2,7 +2,7 @@
 
 ## MMO de simulación económica, industrial y logística en un mundo único persistente. Decenas de miles de jugadores humanos y una población permanente de bots comparten el mismo mapa, el mismo mercado (tablón global de contratos CCRI) y las mismas reglas, sobre un servidor autoritativo.
 
-**Versión:** 1.5 · **Fecha:** 2026-07-21 · **Fuentes normativas:** GDD/SAD v1.3 (`gdd.md`), Arquitectura v1.3 (`arquitectura_imperio_industrial.md`) y contrato OpenAPI v1.3.0 (`api/openapi.yaml`), con los ADR-016 a ADR-024. Ante discrepancia, prevalece el GDD.
+**Versión:** 1.6 · **Fecha:** 2026-07-21 · **Fuentes normativas:** GDD/SAD v1.3 (`gdd.md`), Arquitectura v1.3 (`arquitectura_imperio_industrial.md`) y contrato OpenAPI v1.3.0 (`api/openapi.yaml`), con los ADR-016 a ADR-024. Ante discrepancia, prevalece el GDD.
 
 > **Cambios de v1.2 (Incremento 1 — núcleo CCRI, Fase 0):** ADR-022 (`ledger.account_kind` = `world_source`, contrapartida física de `production_output`/`consumption`); nueva tabla `public.idempotency_keys` (cabecera `Idempotency-Key` del contrato v1.2.0); migración `0008_ccri_support`; e **interpretaciones operativas del CCRI** (entrega in situ de las ventas, `origin_node_id` del aceptante en las compras, TTL de publicaciones abiertas, reparto de garantía, OHLC por región de destino) — todas en las secciones marcadas *v1.2* más abajo.
 >
@@ -11,6 +11,8 @@
 > **Cambios de v1.4 (Incremento 3 — logística física, Fase 1 terrestre):** materializa el pilar *ningún bien se mueve sin transporte físico; nada se teletransporta, tampoco en los fallos* (GDD 7.1/5.3) sobre el grafo, la flota y los cargamentos que ya existían desde `0003_world`. **Dos migraciones nuevas, sin tablas ni enums nuevos:** `0009_fleet_transit` (añade `world.shipments.destination_node_id`/`deadline_sim`, tres índices de barrido y la función SQL vinculante `world.segment_travel_seconds`) y `0010_delivery_idempotency` (índice único `ux_contract_deliveries_shipment`). Documenta las **interpretaciones operativas de la logística**: ciclo de vida del cargamento (`in_warehouse`→`in_transit`→`delivered`/`released_in_situ`) y la coherencia física↔contable ampliada (stock físico = `building_inventories` + cargamentos en vuelo); posición analítica de vehículos (segmento + `t_entrada` + `advance_fn`, derivada bajo demanda; solo los hitos escriben); congestión EMA por segmento; avería `broken` + reparación (la carga espera a bordo); y la integración CCRI↔Logística **solo por outbox** (`contract.confirmed` de compra cross-node → `shipment_creator`; `shipment.arrived` → `delivery_confirmer` → liquidación; `contract.expired_undelivered` → liberación in situ) — todas en la sección *v1.4* más abajo.
 
 > **Cambios de v1.5 (Incremento 6a — cascada de insolvencia, Fase 1):** materializa los **dos últimos escalones** de la cascada *saldo = 0, nunca deuda* (GDD 5.9) que el Incremento 2 había dejado pendientes —la **degradación por mantenimiento impagado** (3º) y el ciclo **canon → gracia → embargo → subasta** (4º, GDD 11.2)— sobre las tablas de `world`/`ledger` que ya existían. **Dos migraciones nuevas, sin enums nuevos:** `0011_enforcement` (añade `world.buildings.maintenance_paid_until_sim`, `world.vehicles.maintenance_paid_until_sim` y `world.land_concessions.grace_until_sim`, más seis índices de barrido) y `0012_system_liquidation` (**una tabla nueva**, `ledger.system_liquidations`, idempotencia de la subasta pública por `building_id`). El motor de consecuencias físicas vive en `internal/world/enforcement` (subpaquete de `world`, proceso *engine*); la liquidación del stock embargado la hace el consumidor `contracts`/`system_liquidator`; el retiro de bots insolventes-inactivos lo hace el `RetirementJob` del orquestador (`cmd/bots`). Documenta las **interpretaciones operativas de la insolvencia/embargo**: máquinas de estado exactas de edificio (`operational`→`damaged`→`abandoned`→`seized`) y concesión (`active`→`delinquent`→`grace`→`reverted`) con sus disparadores y umbrales `II_*`; asientos `maintenance`/`canon` como sink, `auction` de la subasta y `bot_retirement` como absorción (`cash`→`emission`); la liquidación del stock vía **oferta sell del sistema** (proceeds al banco central = efecto sink); y el invariante `saldo ≥ 0` a lo largo de toda la cascada (el motor cobra **solo lo disponible**) — todas en la sección *v1.5* más abajo. **Refinamiento diferido a Fase 2:** el traspaso del edificio **en pie** con pujas; en 6a el embargo congela el edificio, liquida su stock y revierte el suelo.
+>
+> **Cambios de v1.6 (Incremento 6b — Economy Balancer, ciudades como consumidor final):** materializa el **faucet principal** de la economía (GDD 5.5/5.6) frente a los sinks del 6a, cerrando el bucle macro *emisión ↔ absorción*. El **Economy Balancer** (`internal/balancer`, GDD 18.1) es el **agente decisor de las ciudades**: recalcula sus curvas de demanda (`world.city_demand`), corre su máquina de niveles, publica sus **solicitudes de compra por la API estándar del Contract Service** (una ciudad es una cuenta de mercado más, **sin canal privilegiado**) y **consume** lo entregado (`city stock_free → world_source`, ADR-022) para que la ciudad sea sumidero final real sin acumular inventario. **Una migración nueva, sin tablas ni enums nuevos:** `0013_city_recent_supply` (añade `world.city_demand.recent_supply`, acumulador de la ventana de oferta reciente que alimenta la EMA). Documenta las **interpretaciones operativas del Economy Balancer**: el **modelo de entrega a ciudades** (cada ciudad tiene su propio **centro de distribución**, `owner = ciudad`, sobre concesión del sistema; destino de sus buys); el **consumo urbano final** (asiento `consumption`, ADR-022, con descuento del inventario físico); el **recálculo de la curva** (EMA de oferta con **suelo > 0**, `saturation_factor` acotado, `current_price` clampado en `[price_floor, price_ceiling]`, **dos clases de elasticidad** basic/luxury); el **pre-fondeo por emisión** de la caja de la ciudad (faucet: una ciudad nunca incumple el pago); la **máquina de niveles** (`supply_index`, umbrales escalados, desbloqueo de categorías por `unlocked_at_level`, decaimiento por abandono logístico, eventos `city.level_up`/`city.level_down`); la **fórmula laboral** (`base_salary` efectivo, GDD 5.7); la **analítica macro** (`region_stats`/`city_snapshots`/`economy_indicators` bucketizados; `money_supply = cash+escrow+guarantee`; emisión vs. absorción; PIB simulado; agotamiento); y el **lazo fiscal acotado** (banco central algorítmico, GDD 5.5: `tax_rate_bp`/`canon_base` un paso pequeño dentro de rango) — todas en la sección *v1.6* más abajo. **Sin ADR nuevo ni cambio de diseño del GDD.**
 
 ---
 
@@ -90,7 +92,7 @@ Funciones todo-o-nada:       2 documentadas (confirm_contract, settle_contract_p
 Funciones auxiliares SQL:    1 (segment_travel_seconds, IMMUTABLE — tiempo de viaje de un segmento, v1.4/0009)
 ```
 
-*(v1.2 añade `public.idempotency_keys` a las 43 tablas de v1.1 —que a su vez había añadido `auth.account_credentials` y `world.sim_clock` a las 41 de v1.0— y el `ledger.account_kind` `world_source` (ADR-022). **v1.3 (Incremento 2) no altera ningún conteo**: opera las tablas de `world` que ya existían desde `0003_world` sin migraciones nuevas. **v1.4 (Incremento 3) no altera el conteo de tablas ni de enums**: sus dos migraciones (`0009_fleet_transit`, `0010_delivery_idempotency`) solo añaden **dos columnas** a `world.shipments` (`destination_node_id`, `deadline_sim`), **cuatro índices** (tres parciales de barrido en `0009` más el único de idempotencia de entrega en `0010`) y **una función SQL** auxiliar (`world.segment_travel_seconds`). **v1.5 (Incremento 6a) añade una tabla** —`ledger.system_liquidations` (44→45; idempotencia de la subasta pública)— y **no añade enums**: sus dos migraciones (`0011_enforcement`, `0012_system_liquidation`) suman **tres columnas de estado del barrido** (`world.buildings.maintenance_paid_until_sim`, `world.vehicles.maintenance_paid_until_sim`, `world.land_concessions.grace_until_sim`) y **seis índices** de barrido de la cascada de insolvencia. La fuente de verdad de todos los conteos —tablas, índices, FKs, CHECKs— son las migraciones de `/backend/db/migrations`, aplicadas contra PostgreSQL 18 + PostGIS 3.6.)*
+*(v1.2 añade `public.idempotency_keys` a las 43 tablas de v1.1 —que a su vez había añadido `auth.account_credentials` y `world.sim_clock` a las 41 de v1.0— y el `ledger.account_kind` `world_source` (ADR-022). **v1.3 (Incremento 2) no altera ningún conteo**: opera las tablas de `world` que ya existían desde `0003_world` sin migraciones nuevas. **v1.4 (Incremento 3) no altera el conteo de tablas ni de enums**: sus dos migraciones (`0009_fleet_transit`, `0010_delivery_idempotency`) solo añaden **dos columnas** a `world.shipments` (`destination_node_id`, `deadline_sim`), **cuatro índices** (tres parciales de barrido en `0009` más el único de idempotencia de entrega en `0010`) y **una función SQL** auxiliar (`world.segment_travel_seconds`). **v1.5 (Incremento 6a) añade una tabla** —`ledger.system_liquidations` (44→45; idempotencia de la subasta pública)— y **no añade enums**: sus dos migraciones (`0011_enforcement`, `0012_system_liquidation`) suman **tres columnas de estado del barrido** (`world.buildings.maintenance_paid_until_sim`, `world.vehicles.maintenance_paid_until_sim`, `world.land_concessions.grace_until_sim`) y **seis índices** de barrido de la cascada de insolvencia. **v1.6 (Incremento 6b) no altera el conteo de tablas ni de enums**: su única migración (`0013_city_recent_supply`) añade **una columna**, `world.city_demand.recent_supply` (acumulador de la ventana de oferta reciente que alimenta la EMA de la curva de demanda; tracker interno del Balancer). La fuente de verdad de todos los conteos —tablas, índices, FKs, CHECKs— son las migraciones de `/backend/db/migrations`, aplicadas contra PostgreSQL 18 + PostGIS 3.6.)*
 
 ---
 
@@ -117,11 +119,14 @@ Orden lógico de las migraciones iniciales (en `/backend/db/migrations`):
 0010_delivery_idempotency → índice único ux_contract_deliveries_shipment — idempotencia estructural de la entrega del CCRI (Incremento 3)
 0011_enforcement → buildings/vehicles.maintenance_paid_until_sim + land_concessions.grace_until_sim + índices de barrido — cascada de insolvencia (Incremento 6a)
 0012_system_liquidation → tabla ledger.system_liquidations — idempotencia de la subasta pública del stock embargado (Incremento 6a)
+0013_city_recent_supply → world.city_demand.recent_supply — ventana de oferta reciente que alimenta la EMA de la curva de demanda (Incremento 6b)
 ```
 
 > **Migraciones `0009_fleet_transit` y `0010_delivery_idempotency` (Incremento 3 — logística física).** `0009` añade a `world.shipments` los dos datos del **contrato de origen** que el motor de tránsito necesita para validar el despacho y confirmar la entrega **sin cruzar al bounded context `contracts`** (la frontera entre contextos es de código Go; `world` y `contracts` se integran solo por el outbox, SAD §7 / ADR-006): `destination_node_id` (el nodo al que debe llegar el cargamento; su llegada física emite `shipment.arrived`) y `deadline_sim` (informativo para el motor; la puntualidad la decide el consumidor `contracts`). Ambas son **NULLABLE** —los cargamentos de retirada in situ no se despachan y las dejan sin poblar—. Añade tres índices parciales de barrido (`ix_vehicles_in_transit`, `ix_vehicles_broken`, `ix_shipments_destination`) y la función `world.segment_travel_seconds(advance_fn jsonb)` **`IMMUTABLE`**, fuente ÚNICA en SQL de la fórmula de tiempo de viaje de un segmento (la comparten la derivación analítica de la posición y el barrido de segmentos vencidos; el código Go no la reimplementa, la consulta). `0010` añade el índice único `ux_contract_deliveries_shipment` sobre `ledger.contract_deliveries(shipment_id)` que habilita el `INSERT … ON CONFLICT (shipment_id) DO NOTHING` del consumidor `delivery_confirmer`: reprocesar el mismo `shipment.arrived` (reintento del lote, redespliegue) no duplica la partida ni la cantidad entregada. Ambos `down` son reversibles (drop de columnas/índices/función); el detalle operativo está en la sección *v1.4* más abajo.
 
 > **Migraciones `0011_enforcement` y `0012_system_liquidation` (Incremento 6a — cascada de insolvencia).** `0011` añade las **columnas de estado** que barre el motor `internal/world/enforcement`, sin tocar el esquema base (los enums `world.building_status` y `world.concession_status` ya traían todos sus valores desde `0003_world`): `world.buildings.maintenance_paid_until_sim` y `world.vehicles.maintenance_paid_until_sim` (`sim_time NOT NULL DEFAULT 0` — sim-time hasta el que las obligaciones de mantenimiento/opex están **liquidadas**: pagadas en efectivo o saldadas por degradación, *nunca deuda*) y `world.land_concessions.grace_until_sim` (`sim_time` **NULLABLE** — vencimiento del periodo de gracia del canon; `NULL` mientras la concesión está al día). Añade seis índices de barrido: `ix_buildings_maintenance_due` (parcial `WHERE status IN ('operational','damaged')`), `ix_buildings_abandoned` (parcial `WHERE status='abandoned'`, base del conteo de gracia), `ix_buildings_concession` (localizar por concesión los edificios a congelar), `ix_concessions_grace` (parcial `WHERE status='delinquent'`), `ix_concessions_pending_seizure` (parcial `WHERE status='grace'`) y `ix_vehicles_maintenance_due`. El barrido de canon vencido reutiliza el `ix_concessions_expiry (expires_at_sim) WHERE status='active'` ya existente. `0012` añade la **tabla nueva** `ledger.system_liquidations` (PK `building_id`, sin FK a `world.buildings`: es un registro de auditoría/idempotencia del contexto de contratos, no una proyección del mundo — la frontera entre `contracts` y `world` es de código Go, SAD §7 / ADR-006) que garantiza que un `building.seized` se subasta **una sola vez** (defensa en profundidad sobre el exactly-once del cursor del outbox). Ambos `down` son reversibles (drop de columnas/índices y de la tabla); el detalle operativo —máquinas de estado, disparadores, asientos e invariante `saldo ≥ 0`— está en la sección *v1.5* más abajo.
+
+> **Migración `0013_city_recent_supply` (Incremento 6b — Economy Balancer).** Añade a `world.city_demand` la columna `recent_supply` (`stock_qty NOT NULL DEFAULT 0 CHECK (recent_supply >= 0)`): la oferta entregada a la ciudad para ese producto **desde el último recálculo** del Balancer. Alimenta la media móvil exponencial de la curva de demanda (`supply_ema`, GDD 5.6): el **consumer** `city_consumer` la **incrementa** al consumir cada entrega urbana y el `DemandWorker` la **pliega** en `supply_ema` y la **resetea a 0** en cada recálculo. Su valor a la hora del recálculo distingue **variedad** (era 0 antes de la primera entrega de la ventana → bono de `supply_index` por producto nuevo) y **abandono logístico** (suma 0 → decae `supply_index`). Es un **tracker interno del Balancer** (world es propiedad del motor Go): no forma parte del contrato de lectura de la curva (`world/catalog` no lo proyecta) y `ii_engine` ya tiene `ALL` sobre `world.*` (`0007`), sin GRANTs nuevos. El `down` es limpio (drop de la columna, sin dependencias externas); el detalle operativo está en la sección *v1.6* más abajo.
 
 > **Migración `0008_ccri_support` (Incremento 1).** Se aplica con la directiva `-- migrate:no-transaction`: `ALTER TYPE ... ADD VALUE 'world_source'` no puede usarse en la misma transacción que lo referencia, así que cada sentencia va en autocommit y **todas son re-ejecutables** (`IF EXISTS`/`IF NOT EXISTS` o drop+add emparejados). Los dos CHECK de `ledger.accounts` (`ck_accounts_non_negative`, `ck_accounts_asset`) se recrean con `NOT VALID` + `VALIDATE` para no escanear la tabla bajo `ACCESS EXCLUSIVE`; la nueva condición es estrictamente más permisiva, así que `VALIDATE` no puede fallar sobre datos existentes. El `down` **falla explícitamente** si existen filas `world_source` (su saldo negativo violaría los CHECK originales) y no puede eliminar el VALUE del enum (límite de PostgreSQL: no hay `ALTER TYPE ... DROP VALUE`), que queda inerte al restaurarse los CHECK.
 
@@ -474,11 +479,12 @@ CREATE INDEX ix_cities_location ON world.cities USING GIST (location);
 | `level` | INT | Sube al superar umbrales del índice de suministro; puede **bajar** por abandono logístico |
 | `supply_index` | NUMERIC | Índice de suministro histórico (cantidad y variedad sostenidas); decae con el tiempo |
 | `influence_radius_m` | INT | Radio de influencia logística y laboral: para vender a la ciudad debe existir infraestructura conectada dentro de él |
-| `base_salary` | `money_amount` | `salario_base(nivel_ciudad)` de la fórmula laboral (GDD 5.7), recalculado por el Balancer |
+| `base_salary` | `money_amount` | **Salario EFECTIVO** recalculado por el Balancer (fórmula laboral GDD 5.7); v1.6: `salario_base(nivel) × factor_saturación(ocupación_industrial_regional)` — ver nota v1.6 |
 
 #### Reglas de Negocio
 
-- Costo laboral **por fórmula, sin pool asignable** (decisión #30): `salario_efectivo = base_salary × factor_saturación(ocupación_industrial_regional)` — la saturación viene de `analytics.region_stats`.
+- Costo laboral **por fórmula, sin pool asignable** (decisión #30): la saturación viene de `analytics.region_stats.industrial_occupation`.
+- **DECISIÓN VINCULANTE (v1.6, Incremento 6b):** `base_salary` **almacena el salario efectivo** ya recalculado por el Balancer (`salario_base(nivel) × factor_saturación(ocupación)`), NO un salario nominal por nivel: el Balancer es su **única autoridad de escritura**. El detalle de la fórmula y su interacción con el sink `wage` del módulo de producción (v1.3) están en la sección *v1.6* más abajo.
 - Subir de nivel incrementa `D0`, ensancha la curva de demanda y desbloquea categorías de consumo (`city_demand.unlocked_at_level`).
 
 ### 12. `world.city_demand`
@@ -494,6 +500,9 @@ CREATE TABLE world.city_demand (
     saturation_factor   NUMERIC NOT NULL DEFAULT 1 CHECK (saturation_factor BETWEEN 0 AND 10),
     current_price       money_amount NOT NULL,
     unlocked_at_level   INT NOT NULL DEFAULT 1,
+    -- v1.6 (0013_city_recent_supply): oferta entregada a la ciudad para este
+    -- producto DESDE EL ÚLTIMO RECÁLCULO del Balancer (alimenta supply_ema).
+    recent_supply       stock_qty NOT NULL DEFAULT 0 CHECK (recent_supply >= 0),
     updated_at_sim      sim_time NOT NULL DEFAULT 0,
     PRIMARY KEY (city_id, product_id)
 );
@@ -503,6 +512,7 @@ CREATE TABLE world.city_demand (
 
 - **Acotación obligatoria en el esquema**: `supply_ema > 0` (media móvil exponencial con suelo — nunca cero) y `saturation_factor` acotado; `current_price` se acota además contra `products.price_floor/price_ceiling` en la capa de cálculo.
 - Inundar una ciudad por encima de su tasa de consumo hunde `current_price` progresivamente; la escasez lo sube. La estacionalidad queda fuera de v1 (decisión #31).
+- **`recent_supply` (v1.6, Incremento 6b):** acumulador de la **ventana de oferta reciente** que alimenta la EMA. El **consumer** del Balancer lo **incrementa** al consumir cada entrega urbana (`AddRecentSupply`); el **DemandWorker** lo **pliega** en `supply_ema` y lo **resetea a 0** en cada recálculo (`UpdateCityDemandCurve`). Su valor previo distingue **variedad** (era 0 antes de la primera entrega de la ventana → producto "nuevo", bono de `supply_index`) y **abandono logístico** (suma 0 en la ventana → decae `supply_index`). Es un **tracker interno del Balancer** (no lo proyecta el contrato de lectura de `world/catalog`). `updated_at_sim` es el **sello del último recálculo** por fila (marcador de la ventana), no del consumo. Detalle en la sección *v1.6* más abajo.
 
 ---
 
@@ -1771,6 +1781,172 @@ Motor `world/enforcement` (engine, `:8081/metrics`): `ii_maintenance_charged_tot
 
 ---
 
+## 🏙️ Interpretaciones operativas del Economy Balancer (v1.6 — Incremento 6b)
+
+Decisiones de diseño **vinculantes** con las que el Incremento 6b (ECONOMY BALANCER) materializa el **faucet principal** de la economía —las **ciudades como único consumidor final** (GDD 5.6)— y las palancas macro (curvas de demanda, costo laboral GDD 5.7, banco central algorítmico GDD 5.5, agente decisor de ciudades GDD 18.1), cerrando el bucle **emisión ↔ absorción** frente a los sinks del 6a. No cambian el diseño del GDD: fijan cómo lo opera el paquete `internal/balancer` (**Economy Balancer Service**), cuyo motor de ciudades (`DemandWorker` + `Consumer` `city_consumer`) y job macro (`AnalyticsWorker`) corren en el proceso *engine*. Añaden **una migración** (`0013_city_recent_supply`) —una columna, sin tablas ni enums nuevos—. Son coherentes con las invariantes SQL del ledger (`0004_ledger`), con ADR-022 (contrapartida física `world_source`) y con el contrato de eventos del incremento.
+
+> **La regla que gobierna el faucet:** una **ciudad nunca incumple el pago** (GDD 5.6). El Balancer **pre-fondea** su caja por **emisión del banco central** (`+cash / −emission`) ANTES de publicar si no cubre el escrow —este es el **faucet principal** (GDD 5.5): dinero nuevo que entra en circulación cuando la ciudad paga a sus vendedores—. En sentido inverso, la ciudad es **sumidero final real**: consume lo entregado (`city stock_free → world_source`, ADR-022) y **no acumula inventario**. Los precios y factores de la curva llevan **SIEMPRE** sus clamps (`price_floor ≤ current_price ≤ price_ceiling`, `saturation_factor` acotado, `supply_ema` con **suelo > 0**): sin ellos, una ciudad sin suministro produciría precios que tienden a infinito (GDD 5.6).
+
+### Modelo de entrega a ciudades — centro de distribución propio (decisión vinculante)
+
+Para que la **entrega estándar del CCRI** funcione sin canal especial, una ciudad compra por una **publicación `buy` estándar** con `destination_node_id` = el nodo de **su propio centro de distribución**. La entrega estándar exige un `warehouse_building_id` donde dejar el `stock_free`, así que **cada ciudad tiene un edificio `distribution_center` propio** (`owner_account_id` = la cuenta de la ciudad) sobre una **concesión del sistema** (holder = banco central), en su ubicación y dentro de su radio de influencia. Lo siembra `internal/seed/cities.go` (`ensureCityInfrastructure`), **idempotente por clave natural**:
+
+- **Tipo de edificación `distribution_center`** (`world.building_types`): infraestructura del sistema — `footprint_cells = 6`, `base_storage = 1_000_000`, `build_cost = 0` y `maintenance_cost = 0` (no es inversión del jugador ni entra en la cascada de mantenimiento del 6a).
+- **Concesión del sistema** (`world.land_concessions`, holder = banco central): `canon_amount = 1` (CHECK `> 0`), `period_sim_days = 36_000`, `expires_at_sim = 100 años-sim` — permanente a efectos de juego (no renueva ni entra en la cascada de canon del 6a).
+- **Edificio** (`world.buildings`, `status = 'operational'`, owner = ciudad) sobre esa concesión, y **nodo del grafo** (`world.network_nodes`, `kind = 'distribution_center'`, con `building_id` y `city_id`): es el **destino** de las buys de la ciudad (`GetCityDistributionNode`).
+- **Capital inicial de ciudad**: cada ciudad recibe una **emisión inicial holgada** (`CityInitialCapital = 10_000_000`, asiento `seed_capital` `+cash / −emission`, **una sola vez** — la existencia de la caja es la clave de idempotencia) para pre-fondear sus primeras compras; el Balancer la re-fondea en marcha por el faucet.
+
+Al liquidarse un contrato cuyo comprador es la ciudad, la entrega estándar deja el stock como **`stock_free` de la ciudad** en ese centro; el consumer del Balancer lo consume (abajo). Así la ciudad es sumidero final **sin canal privilegiado** y **sin acumular inventario**.
+
+### Consumo urbano final — el consumer `city_consumer` (`city stock_free → world_source`, ADR-022)
+
+El **`Consumer`** del Balancer (`consume.go`) es un consumidor del outbox suscrito a **`contract.settled`** con **cursor propio** (`city_consumer`, distinto del `ohlc_aggregator` que consume el mismo evento). El evento **no lleva** el comprador ni el destino: el consumer **relee el contrato** (`GetContractForConsume`: `buyer_account_id`, `product_id`, `destination_node_id`, `quantity_delivered`, `status`) —la fuente autoritativa es `ledger.contracts`—. Ignora (avanzando el cursor) los contratos `failed` (fill 0%), las entregas nulas y los compradores que **no son ciudad** (`IsCityAccount` sobre `auth.accounts.kind = 'city'`): el Balancer consume **solo** entregas urbanas. Para una entrega urbana efectiva, **en la misma tx del lote** (exactly-once por cursor):
+
+1. **Consumo contable** (asiento `consumption`, ADR-022): `+quantity_delivered world_source(producto)` / `−quantity_delivered stock_free(ciudad, producto, centro)`. El stock "vuelve al mundo"/se destruye: la ciudad es sumidero final.
+2. **Consumo físico**: descuenta el inventario del centro de distribución (`world.building_inventories`, `−quantity_delivered`) para mantener **físico↔contable** en sincronía (ADR-004).
+3. **Alimenta la EMA**: `recent_supply += quantity_delivered` (`AddRecentSupply`). Si el acumulado previo era 0, es el **primer suministro del producto en la ventana** → producto "nuevo" → **bono de variedad**.
+4. **Índice de suministro histórico**: `supply_index += quantity_delivered` (`AddCitySupplyIndex`), **ponderado por variedad** (`× (1 + variety_bonus_pct/100)` si es producto nuevo; default `+50%`). No toca `updated_at_sim` (ese sello es el del último **recálculo**, no del consumo).
+
+### Recálculo de la curva de demanda (`DemandWorker`, GDD 5.6)
+
+En cada barrido (`II_BALANCER_DEMAND_INTERVAL`), el `DemandWorker` recalcula **cada ciudad en su propia tx SERIALIZABLE** (`LockCity` `FOR UPDATE`): corre la máquina de niveles, escala `D0` si cambió de nivel y recalcula la curva de cada producto **activo** (`unlocked_at_level ≤ nivel`). Para cada `(ciudad, producto)`, con **todos los clamps obligatorios** (`recomputeCurve`):
+
+```
+window_sim   = simNow − city_demand.updated_at_sim   (≤ 0 → una jornada de juego)
+observed_rate = recent_supply × SimDay / window_sim          -- oferta normalizada a tasa/día-sim
+supply_ema    = α × observed_rate + (1−α) × supply_ema_previo -- EMA; SUELO obligatorio > 0
+raw_ratio     = D0(producto, nivel) / supply_ema             -- >1 escasez, <1 saturación
+saturation_factor = clamp(raw_ratio, [sat_min, sat_max])         -- multiplicador de demanda efectiva (default [0.1, 10.0])
+current_price = clamp(round(base_price × raw_ratio^elasticidad), [price_floor, price_ceiling])
+```
+
+- **Elasticidad en dos clases** (GDD 5.6), no un parámetro por producto: `basic` **inelástica** (exponente `< 1`: el precio se mueve poco) y `luxury` **elástica** (exponente `> 1`: muy sensible a la saturación), según `world.products.class`.
+- Tras escribir la curva (`UpdateCityDemandCurve`) se **resetea `recent_supply = 0`**: la ventana de oferta reciente arranca de nuevo, y `updated_at_sim` se sella con `simNow`.
+- **Objetivo de compra**: `buy_target_qty = round(D0 × buy_target_days × saturation_factor)` (suelo 0; `buy_target_days` default 2 días-sim). El factor de déficit escala la compra: escasez (`>1`) → compra más; saturación (`<1`) → compra menos, **frenando la inundación**.
+
+### City buys por la API estándar — pre-fondeo por emisión (faucet, GDD 5.5/18.1)
+
+Tras el recálculo, el Balancer publica los objetivos de compra **fuera** de la tx del recálculo (`buys.go`), manteniendo **UNA solicitud viva por `(ciudad, producto)`** en el tablón (`CountLiveCityBuys` cuenta las `kind='buy'` en `status IN ('draw_window','open','micro_window')`: no duplica demanda). Por cada objetivo, best-effort:
+
+1. **Pre-fondeo** (`prefundCity`, tx SERIALIZABLE): si la caja de la ciudad **no cubre** el escrow (`quantity × unit_price`, con guarda de desbordamiento `int64`), **emite el déficit** (asiento `seed_capital`, `+cash ciudad / −emission`) — la `emission` es la única cuenta monetaria que puede quedar negativa; la caja **jamás**. Es el faucet.
+2. **Publicación por el PORT** `PublicationCreator.CreateCityBuy`: el paquete `balancer` **no importa** `internal/contracts`; el composition root (`cmd/engine`, `cityBuyCreator`) implementa el PORT con `contracts.CreatePublication` —**mismo camino estándar** (validación, bloqueo de escrow, ventana de sorteo) que cualquier otra buy del tablón, **sin canal privilegiado** (GDD 18.1)—. Plazo de entrega `II_CITY_BUY_DEADLINE_SIM`.
+
+### Máquina de niveles de ciudad (`supply_index`, GDD 5.6)
+
+`decideLevel` decide **como mucho un cambio de nivel por ventana**, con histéresis (`maxCityLevel = 8`, alineado con el `max_level` de edificios, GDD 6.3):
+
+```
+decaimiento (solo si recent_supply total de la ventana == 0):
+    supply_index −= II_SUPPLY_INDEX_DECAY_PER_SIM_DAY × window/SimDay   (mín. 0)  -- abandono logístico
+subir  (level < 8 y supply_index ≥ II_CITY_LEVELUP_INDEX_BASE × nivel):
+    nivel+1; población +pop_growth_pct%; D0 +d0_growth_pct%  -- defaults +10% / +20%; desbloquea unlocked_at_level == nivel nuevo
+bajar  (level > 1 y supply_index < II_CITY_LEVELUP_INDEX_BASE × (nivel−1)):  -- histéresis
+    nivel−1; población y D0 reducidos simétricamente
+```
+
+- La máquina corre **antes** de recalcular la curva, para que los productos **desbloqueados** por una subida se recalculen y compren en la misma pasada. El escalado de `D0` es entero en puntos básicos (`d0 = d0 × factor_bp / 10000`; `+20%` = `12000`; la bajada usa el inverso `10000·10000/12000 ≈ 8333`).
+- Un cambio de nivel **emite `city.level_up` / `city.level_down`** por el outbox **en la misma tx** que el cambio (si esta se revierte, el evento desaparece): objetivo estratégico observable por todos los jugadores de la región.
+
+### Fórmula laboral — `base_salary` efectivo (GDD 5.7)
+
+El job macro recalcula el salario efectivo de cada ciudad y lo escribe en `world.cities.base_salary` (`labor.go`, tx SERIALIZABLE):
+
+```
+salario_base(nivel)     = II_SALARY_BASE × (1 + II_SALARY_PER_LEVEL_BP·(nivel−1)/10000)
+factor_saturación(occ)  = clamp(1 + II_LABOR_SATURATION_K · occ, [II_LABOR_SALARY_MIN_MULT, II_LABOR_SALARY_MAX_MULT])
+base_salary (efectivo)  = round(salario_base(nivel) × factor_saturación(occ))     (suelo 1)
+```
+
+donde `occ` = ocupación industrial regional = `analytics.region_stats.industrial_occupation` más reciente (que el paso de analítica escribe **antes** en el mismo barrido). Una región con mucha industria activa **puja al alza** los salarios; el clamp lo mantiene **acotado** (nunca dispara el sink a valores irreales).
+
+> **DECISIÓN VINCULANTE:** `cities.base_salary` **almacena el salario efectivo** (base × saturación) y el Balancer es su **única autoridad**. El sink `wage` del módulo de producción (v1.3) lee `base_salary`. **Interacción documentada (a reconciliar):** el `computeWage` de producción, en su forma del Incremento 2, multiplica además por `analytics.region_stats.industrial_occupation` (default 1.0). Con el Balancer activo, la saturación regional influye por dos vías (dentro de `base_salary` vía `1 + k·occ`, y en el factor del sink de producción); el estado final buscado es que producción lea `base_salary` **tal cual**. Se anota aquí con el criterio de divergencias honestas del documento; la mecánica de diseño (GDD 5.7) no cambia.
+
+### Analítica macro — `region_stats` / `city_snapshots` / `economy_indicators` (`AnalyticsWorker`)
+
+En cada barrido (`II_BALANCER_ANALYTICS_INTERVAL`), el `AnalyticsWorker` corre **tres pasos ordenados, cada uno en su tx SERIALIZABLE**: analítica → fórmula laboral → ajuste fiscal. La analítica es **monitoreo y regulación de parámetros, no movimiento de valor** (escribe `analytics.*` y `world` base_salary/fiscalidad; nunca partidas del ledger). Todo se **bucketiza por sim-time** (`bucket_start_sim = floor(simNow / II_BALANCER_ANALYTICS_BUCKET_SIM) × bucket`), con **UPSERT idempotente** por bucket (cada barrido recalcula el bucket completo y sobrescribe; converge conforme se acumulan transacciones):
+
+| Tabla | Campo | Cómo lo calcula el Balancer |
+|---|---|---|
+| `region_stats` | `industrial_occupation` | `edificios operativos / II_LABOR_CAPACITY_REF` (factor de saturación laboral normalizado) |
+| `region_stats` | `active_buildings` | Edificios `status='operational'` de la región |
+| `region_stats` | `contracts_settled` / `trade_volume` | Contratos `settled` del bucket atribuidos por su **nodo de destino** (evita doble conteo cross-región); `trade_volume = Σ quantity_delivered × unit_price` |
+| `city_snapshots` | `level`, `population`, `supply_index` | Foto de la ciudad al cierre del barrido |
+| `economy_indicators` | `money_supply` | **`Σ balance de cuentas cash + escrow + guarantee`** (ver decisión vinculante abajo) |
+| `economy_indicators` | `simulated_gdp` | `Σ quantity_delivered × unit_price` de los contratos `settled` del bucket (valor **entregado**, no pactado) |
+| `economy_indicators` | `emission_total` | **Faucet:** `−Σ` de las partidas sobre la cuenta `emission` en asientos del bucket (la emisión abona en negativo al crear dinero) |
+| `economy_indicators` | `absorption_total` | **Sinks:** `+Σ` de las partidas sobre las cuentas `sink` en asientos del bucket |
+| `economy_indicators` | `active_bot_count` / `active_human_count` | Cuentas `active` por rol (`auth.accounts`) |
+| `economy_indicators` | `global_depletion_rate` + `depletion_projection` | Ritmo global de agotamiento (`Σ extraído / días-sim transcurridos`) y proyección JSONB por recurso finito (media de vida; `depleted_within_horizon` sobre `II_DEPLETION_HORIZON_SIM_DAYS`) |
+
+> **DECISIÓN VINCULANTE (coherencia macro):** `money_supply` es **exactamente `cash + escrow + guarantee`** —el dinero en circulación más el bloqueado—. Se **excluye `custody`**: por el esquema `0004` una cuenta `custody` lleva `product_id NOT NULL`, es **stock** (mercancía de un CCRI-Flete), no dinero; sumarla mezclaría unidades y **rompería** la invariante. Por la doble entrada del ledger, el activo dinero balancea a cero sobre `cash+escrow+guarantee+sink+emission`, de modo que **`emission_total − absorption_total = Δmoney_supply` del bucket, siempre** — el bucle faucet/sink es contablemente cerrado y auditable.
+
+### Lazo fiscal acotado — banco central algorítmico (`fiscal.go`, GDD 5.5)
+
+El tercer paso regula la fiscalidad de las regiones con un **lazo suave y acotado** (nunca un salto brusco). La señal es `inflación = crecimiento(money_supply) − crecimiento(simulated_gdp)` sobre los **dos** `economy_indicators` más recientes (`crecimiento(x) = (x_nuevo − x_viejo)/max(x_viejo, 1)`):
+
+- `inflación > II_FISCAL_INFLATION_THRESHOLD` → **sube** impuestos un paso (más absorción por sinks fiscales).
+- `inflación < −umbral` → **baja** impuestos.
+- `|inflación| ≤ umbral` → **banda muerta** (anti-parpadeo): no actúa.
+
+Cada región mueve `tax_rate_bp += dir × II_TAX_STEP_BP` (clamp `[II_TAX_MIN_BP, II_TAX_MAX_BP]`) y `canon_base` un paso **proporcional** (`II_CANON_STEP_BP` del canon vigente, clamp `[II_CANON_MIN, II_CANON_MAX]`), todo en una tx SERIALIZABLE. El lazo **jamás** saca los parámetros de su rango (GDD 5.5). Con menos de dos buckets no hay tendencia medible: no actúa.
+
+### Asientos contables del Balancer
+
+| Asiento (`transaction_kind`) | Partidas | Lectura |
+|---|---|---|
+| **Fondeo de ciudad (faucet)** `seed_capital` | `+deficit cash(ciudad)` / `−deficit emission` | **Faucet principal** (GDD 5.5): pre-fondea el escrow de la buy de la ciudad por **emisión** del banco central. Reutiliza el kind `seed_capital` (mismo mecanismo que el capital semilla: **no** se añade un kind al enum). La `emission` puede quedar negativa; la caja jamás |
+| **Consumo urbano final** `consumption` | `+N world_source(producto)` / `−N stock_free(ciudad, producto, centro)` | **Sumidero final** (ADR-022): la ciudad destruye lo entregado (`N = quantity_delivered`), el stock "vuelve al mundo". Doble entrada por producto; en la misma tx se descuenta el inventario físico del centro |
+
+> El Balancer **no añade enums** al ledger (decisión del Incremento 6b): el faucet de ciudad reutiliza `seed_capital` y el consumo urbano usa el `consumption` de ADR-022. La analítica y el lazo fiscal **no asientan** en el ledger (regulan parámetros de `world`/`analytics`).
+
+### Parámetros de configuración del incremento
+
+Balancer (`balancer.OptionsFromEnv`, valores inválidos impiden el arranque). Motor de ciudades:
+
+| Variable | Default | Efecto |
+|---|---|---|
+| `II_BALANCER_DEMAND_INTERVAL` | `60s` | Cadencia (wall-clock, con jitter ±25%) del recálculo de curvas y publicación de buys |
+| `II_CITY_BUY_DEADLINE_SIM` | `172800` | Plazo de entrega de las buys de ciudad, en sim-time (2 días-sim) |
+| `II_SUPPLY_EMA_ALPHA` | `0.3` | Peso de la muestra reciente en la EMA de oferta (`0 < α ≤ 1`) |
+| `II_SUPPLY_EMA_FLOOR` | `1` | **Suelo** de la EMA de oferta (nunca 0, GDD 5.6) |
+| `II_CITY_LEVELUP_INDEX_BASE` | `100000` | Umbral base de `supply_index` para subir de nivel (escalado por nivel: `base × nivel`) |
+| `II_SUPPLY_INDEX_DECAY_PER_SIM_DAY` | `2000` | Decaimiento de `supply_index` por día-sim sin suministro |
+
+Macro (analítica, fórmula laboral, ajuste fiscal):
+
+| Variable | Default | Efecto |
+|---|---|---|
+| `II_BALANCER_ANALYTICS_INTERVAL` | `120s` | Cadencia del barrido macro (analítica + laboral + fiscal) |
+| `II_BALANCER_ANALYTICS_BUCKET_SIM` | `86400` | Tamaño del bucket de analítica en sim-time (1 día-sim) |
+| `II_LABOR_CAPACITY_REF` | `20` | Edificios operativos de referencia por región (ocupación = 1) |
+| `II_SALARY_BASE` | `100` | Salario efectivo base a nivel de ciudad 1 |
+| `II_SALARY_PER_LEVEL_BP` | `2500` | Incremento de salario por nivel extra, en bp del base (`+25%`/nivel) |
+| `II_LABOR_SATURATION_K` | `0.5` | Peso de la ocupación industrial en el salario (`1 + k·occ`) |
+| `II_LABOR_SALARY_MIN_MULT` / `II_LABOR_SALARY_MAX_MULT` | `1.0` / `3.0` | Cotas del multiplicador de saturación laboral |
+| `II_TAX_MIN_BP` / `II_TAX_MAX_BP` | `0` / `2000` | Rango del `tax_rate_bp` del lazo fiscal (0%–20%) |
+| `II_TAX_STEP_BP` | `50` | Paso de ajuste de `tax_rate_bp` por barrido (0,5%) |
+| `II_CANON_MIN` / `II_CANON_MAX` | `100` / `100000` | Rango del `canon_base` del lazo fiscal |
+| `II_CANON_STEP_BP` | `200` | Paso proporcional del `canon_base` por barrido (2% del vigente) |
+| `II_FISCAL_INFLATION_THRESHOLD` | `0.01` | Umbral (banda muerta) de la señal inflación/deflación (1%) |
+| `II_DEPLETION_HORIZON_SIM_DAYS` | `360` | Horizonte de la proyección de agotamiento (~12 meses de juego) |
+
+Los *knobs de forma de la curva* **no se leen del entorno**: tienen default documentado en `Options` (inyectables en tests): elasticidad `basic = 0.5` / `luxury = 1.5`; clamp de `saturation_factor` `[0.1, 10.0]`; crecimiento al subir de nivel `población +10%` / `D0 +20%`; bono de variedad `+50%`; horizonte de compra `buy_target_days = 2` días-sim.
+
+### Métricas Prometheus del incremento
+
+Balancer (proceso *engine*): motor de ciudades — `ii_city_buys_published_total{product}`, `ii_city_emission_total` (faucet), `ii_city_consumed_total{product}` (sumidero), `ii_city_level{city}`, `ii_city_level_changes_total{direction}`, `ii_balancer_recalc_duration_seconds`, `ii_balancer_money_supply`. Job macro — `ii_balancer_analytics_duration_seconds`, `ii_money_supply`, `ii_simulated_gdp`, `ii_global_depletion_rate`, `ii_tax_rate_bp{region}`.
+
+### Eventos de outbox del incremento (contratos de evento FIJOS)
+
+| Evento | Agregado | Emisor | Consumidor | Payload (dinero/stock como string; sim-time entero; uuid string) |
+|---|---|---|---|---|
+| `city.level_up` | `city` | `balancer`/`DemandWorker` | informativo/WS | `{city_id, old_level, new_level, population, direction:"up", changed_at_sim}` |
+| `city.level_down` | `city` | `balancer`/`DemandWorker` | informativo/WS | `{city_id, old_level, new_level, population, direction:"down", changed_at_sim}` |
+
+El Balancer **consume** además `contract.settled` (ya emitido por `contracts`) con su cursor propio **`city_consumer`** —solo las entregas cuyo comprador es una ciudad— para el consumo urbano final; es un consumidor **distinto** del `ohlc_aggregator`, que consume el mismo evento con su propio cursor.
+
+---
+
 ## 📈 Módulo Analítica (esquema `analytics`)
 
 Escrito por el job **Analytics** (batch de baja prioridad, deliberadamente separado de Persistence). Son los **agregados permanentes** del mundo que nunca se resetea: crecen lento y se conservan para siempre (GDD 17.2).
@@ -1848,6 +2024,9 @@ CREATE TABLE analytics.economy_indicators (
 
 - `money_supply` vs. `simulated_gdp`: la pareja que vigila el banco central algorítmico (ajuste de impuestos dentro de rangos, GDD 5.5).
 - `global_depletion_rate` + `depletion_projection`: proyección 6–12 meses del agotamiento de minerales finitos, para planificar expansiones territoriales con antelación (riesgo asumido, GDD §20).
+- **Autoría y bucketización (v1.6, Incremento 6b):** las tres tablas las escribe el **Economy Balancer** (`AnalyticsWorker`, proceso *engine*), **bucketizadas por sim-time** (`bucket_start_sim = floor(simNow / II_BALANCER_ANALYTICS_BUCKET_SIM) × bucket`, default 1 día-sim) con **UPSERT idempotente por bucket** (cada barrido recalcula el bucket completo y sobrescribe). No mueven valor del ledger: son monitoreo y regulación de parámetros.
+- **Invariante macro de `economy_indicators` (v1.6):** `money_supply = Σ(cash + escrow + guarantee)` —se **excluye `custody`** (es stock, no dinero)—, `emission_total = −Σ` de las partidas sobre `emission` del bucket (faucet) y `absorption_total = +Σ` de las partidas sobre `sink` del bucket (sinks). Por la doble entrada del ledger, **`emission_total − absorption_total = Δmoney_supply` del bucket, siempre**. `simulated_gdp = Σ quantity_delivered × unit_price` de los contratos `settled` del bucket (valor entregado).
+- **`region_stats.industrial_occupation` (v1.6):** `edificios operativos / II_LABOR_CAPACITY_REF`; es la entrada de la **fórmula laboral** (GDD 5.7) que el propio Balancer consume en el mismo barrido para recalcular `world.cities.base_salary` (salario efectivo). Detalle en la sección *v1.6* más arriba.
 
 ---
 
@@ -1882,9 +2061,10 @@ CREATE TABLE outbox.consumer_cursors (
 #### Reglas de Negocio
 
 - `seq` (`IDENTITY`) da el orden total de polling — la única PK no-UUID del sistema, por diseño; `event_id` conserva la identidad UUID global del evento.
-- Eventos típicos: `contract.settled`, `vehicle.arrived`, `batch.completed`, `city.level_up` — los hitos del motor event-driven. El Incremento 1 emite el ciclo del CCRI (`publication.*`, `acceptance.*`, `contract.confirmed/delivered/settled`; ver «Interpretaciones operativas del CCRI»); el Incremento 2, los del mundo/producción (`concession.*`, `building.*`, `batch.*`); el Incremento 3, los de la logística física (`vehicle.*`, `shipment.*`, `contract.expired_undelivered`; ver «Interpretaciones operativas de la logística»); el Incremento 6a, los de la cascada de insolvencia (`building.seized`, `concession.reverted`, `bot.retired`; ver «Interpretaciones operativas de la insolvencia/embargo»).
+- Eventos típicos: `contract.settled`, `vehicle.arrived`, `batch.completed`, `city.level_up` — los hitos del motor event-driven. El Incremento 1 emite el ciclo del CCRI (`publication.*`, `acceptance.*`, `contract.confirmed/delivered/settled`; ver «Interpretaciones operativas del CCRI»); el Incremento 2, los del mundo/producción (`concession.*`, `building.*`, `batch.*`); el Incremento 3, los de la logística física (`vehicle.*`, `shipment.*`, `contract.expired_undelivered`; ver «Interpretaciones operativas de la logística»); el Incremento 6a, los de la cascada de insolvencia (`building.seized`, `concession.reverted`, `bot.retired`; ver «Interpretaciones operativas de la insolvencia/embargo»); el Incremento 6b, los del crecimiento de ciudad (`city.level_up`, `city.level_down`; ver «Interpretaciones operativas del Economy Balancer»).
 - **Consumidores cross-context del Incremento 3** (patrón de integración event-driven entre bounded contexts, cada uno con su cursor propio): `shipment_creator` (módulo `world`, suscrito a `contract.confirmed`) materializa el cargamento de las compras cross-node; `delivery_confirmer` (módulo `contracts`, suscrito a `shipment.arrived`) confirma la entrega y liquida. `world` y `contracts` **nunca se importan**: toda su coordinación pasa por estos eventos.
 - **Consumidor cross-context del Incremento 6a**: `system_liquidator` (módulo `contracts`, suscrito a `building.seized`) subasta el stock libre del edificio embargado que emite `world/enforcement` — mismo patrón de fronteras firmes por outbox, sin imports cruzados. `bot.retired` lo emite el orquestador (`cmd/bots`, `RetirementJob`) al absorber la caja de un bot insolvente-inactivo; `concession.reverted` es informativo/WS.
+- **Consumidor del Incremento 6b**: `city_consumer` (módulo `balancer`, suscrito a `contract.settled`) consume las **entregas urbanas** —solo los contratos cuyo comprador es una ciudad— para el **consumo final** (`city stock_free → world_source`, ADR-022) y alimentar la curva/crecimiento de la ciudad. Comparte el tipo de evento `contract.settled` con el `ohlc_aggregator` pero **con su propio cursor** (cada consumidor lógico tiene su fila en `consumer_cursors`: exactly-once por consumidor). El Balancer **emite** además `city.level_up`/`city.level_down` (crecimiento de ciudad, informativo/WS) — mismo patrón de fronteras firmes por outbox, sin imports cruzados (`balancer` publica las buys de ciudad por un PORT, no importa `internal/contracts`).
 - **API del módulo (v1.2, materializada en el Incremento 1):** `outbox.Emit(ctx, tx, simTime, aggregateType, aggregateID, eventType, payload)` inserta el evento **en la misma transacción** que el cambio de estado que lo causa; `outbox.NewConsumer(pool, name, eventTypes)` con `Run(ctx, interval, handler)` procesa los eventos **en orden de `seq`** y **avanza el cursor en la misma transacción del handler** — de ahí el *exactly-once por consumidor*: reejecutar un lote no duplica su efecto. Cada consumidor lógico tiene su propia fila en `consumer_cursors`.
 - **Primer consumidor real: `ohlc_aggregator`** (módulo `market`), suscrito a `contract.settled`, que construye las velas `analytics.market_ohlc`.
 - Los eventos consumidos por todos los cursores se purgan en la ventana de mantenimiento diaria.
@@ -2053,6 +2233,7 @@ Notas:
 - **Logística física con posición analítica** (v1.4, Incremento 3): ningún bien se mueve sin transporte físico; el stock reservado viaja etiquetado por contrato (`world.shipments`) entre `building_inventories` y su destino, y la reconciliación física↔contable incluye los cargamentos en vuelo (`físico(edificio) + físico(en vuelo) = free + reserved`). La posición de un vehículo en tránsito se persiste como `(segmento, t_entrada, advance_fn)` y se **deriva** bajo demanda con `world.segment_travel_seconds`; solo los hitos escriben (coste ∝ eventos). La integración CCRI↔Logística cruza contextos **solo por outbox** (`shipment_creator` en `world`, `delivery_confirmer` en `contracts`), sin imports cruzados.
 - **Planificación sin estado de tránsito** (v1.4, ADR-006): `internal/logistics` planifica rutas (Dijkstra ponderado por congestión EMA) y define `world.routes`, pero no simula el movimiento — eso lo hace el shard (`internal/world`). HPA* (GDD 7.4) queda diferido como optimización por escala (no cambia la arquitectura; la interfaz `Planner` lo deja listo) — sin ADR nuevo.
 - **Insolvencia = parada progresiva, nunca deuda** (v1.5, Incremento 6a): la cascada `saldo = 0` → salarios → combustible → mantenimiento → canon → gracia → embargo → subasta (GDD 5.9/11.2) se completa con el motor `internal/world/enforcement`. El `cash` **jamás baja de 0** (trigger `ck_accounts_non_negative`): el motor cobra **solo lo disponible** y las obligaciones impagadas se saldan con el **patrimonio** (degradación → abandono → embargo del edificio; reversión del suelo) o se **condonan** (opex de flota), nunca como deuda. El stock embargado se subasta **vía CCRI estándar** (oferta `sell` del sistema, `system_liquidator`), con los proceeds absorbidos por el banco central (efecto sink); el retiro de un bot insolvente-inactivo **absorbe** su caja (`bot_retirement`, `cash`→`emission`). La integración `world/enforcement`↔`contracts` cruza contextos **solo por outbox** (`building.seized`), sin imports cruzados. El traspaso del edificio **en pie** con pujas es refinamiento de **Fase 2**.
+- **Ciudades como consumidor final = faucet principal, bucle macro cerrado** (v1.6, Incremento 6b): el **Economy Balancer** (`internal/balancer`, GDD 5.5/5.6/18.1) hace de las ciudades el **único consumidor final** y el **faucet** de la economía —pre-fondea su caja por **emisión** (`seed_capital`, `+cash/−emission`) para que **nunca incumplan el pago** y publica sus buys por la **API estándar del Contract Service, sin canal privilegiado**— cerrando el bucle frente a los **sinks** del 6a. La ciudad es sumidero final real: consume lo entregado (`consumption`, `city stock_free → world_source`, ADR-022) sin acumular inventario, con entrega estándar a su **centro de distribución** propio (`owner = ciudad`). La curva de demanda lleva **siempre** sus clamps (`price_floor ≤ current_price ≤ price_ceiling`, `saturation_factor` acotado, `supply_ema` con suelo `> 0`). La coherencia macro es contable: **`emission_total − absorption_total = Δmoney_supply`** por bucket (`money_supply = cash+escrow+guarantee`, `custody` excluido). El paquete `balancer` **no importa** `internal/contracts` (publica por un PORT); su único añadido de esquema es `0013_city_recent_supply`.
 - **Idempotencia de comandos que mueven valor** (contrato v1.2.0): la cabecera `Idempotency-Key` se persiste por `(key, account_id)` en `public.idempotency_keys`; misma clave ⇒ misma respuesta reproducida (solo `status < 500`), reintentos seguros sin doble ejecución.
 - **El esquema físico no impone la topología**: las cajas lógicas (shards, Contract Service, Balancer) comparten instancia con fronteras por esquema y credenciales por servicio; la extracción a procesos/instancias separadas es una decisión medida posterior (ADR-008), y este modelo de datos no la bloquea.
 - **Casos borde conocidos** (a resolver en la capa de orquestación, documentados aquí deliberadamente):

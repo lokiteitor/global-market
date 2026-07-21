@@ -201,7 +201,7 @@ DROP INDEX CONCURRENTLY migratetest.items_name_upper_idx;
 		t.Fatalf("re-Up tras down total: %v", err)
 	}
 
-	// Reset en dev: down de todo + up de todo.
+	// Reset en dev: clean-slate (barrido de esquemas/objetos) + up de todo.
 	if err := r.Reset(ctx); err != nil {
 		t.Fatalf("Reset: %v", err)
 	}

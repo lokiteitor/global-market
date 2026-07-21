@@ -138,6 +138,13 @@ const (
 	cityBaseSalary       int64 = 30
 	cityLocX             int64 = 20_000
 	cityLocY             int64 = 22_000
+	// citySupplyIndex es el índice de suministro histórico inicial: un mundo
+	// sembrado representa una ciudad YA desarrollada, así que su índice debe ser
+	// COHERENTE con su nivel para que el Balancer no la degrade de inmediato. Se
+	// sitúa en la banda estable del nivel 2 bajo el II_CITY_LEVELUP_INDEX_BASE por
+	// defecto (100000): umbral de bajada base*(nivel-1)=100000, umbral de subida
+	// base*nivel=200000 → 150000 la mantiene estable (GDD 5.6, Incremento 6b).
+	citySupplyIndex int64 = 150_000
 )
 
 // Zona industrial libre: el yacimiento de iron_ore se sitúa aquí, en suelo sin
@@ -412,9 +419,9 @@ func ensureCity(ctx context.Context, pool *pgxpool.Pool, regionID uuid.UUID, cit
 		INSERT INTO world.cities
 		       (id, region_id, account_id, name, location, level, population,
 		        supply_index, influence_radius_m, base_salary)
-		VALUES ($1, $2, $3, $4, ST_GeomFromText($5, 0), $6, $7, 0, $8, $9)`,
+		VALUES ($1, $2, $3, $4, ST_GeomFromText($5, 0), $6, $7, $8, $9, $10)`,
 		id, regionID, cityAcct.ID, cityName, pointWKT(cityLocX, cityLocY),
-		cityLevel, cityPopulation, cityInfluenceRadiusM, cityBaseSalary); err != nil {
+		cityLevel, cityPopulation, citySupplyIndex, cityInfluenceRadiusM, cityBaseSalary); err != nil {
 		return uuid.Nil, fmt.Errorf("seed: creando la ciudad %q: %w", cityName, err)
 	}
 	logger.Info("ciudad creada",

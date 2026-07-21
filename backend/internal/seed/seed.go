@@ -248,6 +248,15 @@ func Run(ctx context.Context, pool *pgxpool.Pool, opts Options, logger *slog.Log
 		if err := ensureLogisticsNetwork(ctx, pool, cat, sites[demo.ID], sites[trader.ID], logger); err != nil {
 			return err
 		}
+
+		// (h) Infraestructura urbana del Incremento 6b (ECONOMY BALANCER): por
+		// cada ciudad, su centro de distribución (concesión del sistema + edificio
+		// de la ciudad + nodo del grafo) —destino de las buys que publica el
+		// Balancer— y su caja con capital inicial (faucet). Depende de la ciudad
+		// del mundo industrial (por eso comparte su gate).
+		if err := ensureCityInfrastructure(ctx, pool, ledgerSvc, bank, emission, cat, simNow, logger); err != nil {
+			return err
+		}
 	}
 
 	logger.Info("seed completado")
