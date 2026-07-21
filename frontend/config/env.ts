@@ -25,6 +25,21 @@ export const publicRuntimeConfigSchema = z.object({
       'apiBase debe ser una ruta absoluta ("/api/v1") o una URL http(s) completa',
     )
     .refine((value) => !value.endsWith('/'), 'apiBase no debe terminar en "/"'),
+
+  /**
+   * URL completa del gateway WS (ADR-023). Vacío (default) = derivarla del
+   * apiBase sobre el mismo origen (`/api/v1` → `ws(s)://host/api/v1/ws`),
+   * que es la forma de producción (Caddy proxya el upgrade). En dev se apunta
+   * directo al gateway Go (nuxt.config `$development`) porque el devProxy de
+   * Nitro no proxya upgrades WebSocket.
+   */
+  wsBase: z
+    .string()
+    .refine(
+      (value) => value === '' || value.startsWith('ws://') || value.startsWith('wss://'),
+      'wsBase debe estar vacío (derivar de apiBase) o ser una URL ws(s):// completa',
+    )
+    .refine((value) => !value.endsWith('/'), 'wsBase no debe terminar en "/"'),
 })
 
 export type PublicRuntimeConfig = z.infer<typeof publicRuntimeConfigSchema>

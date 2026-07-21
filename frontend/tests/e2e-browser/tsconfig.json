@@ -1,0 +1,21 @@
+{
+  "$comment": "Proyecto TS de los smoke E2E de Playwright (navegador real). Fuera del grafo de Nuxt y del kernel: se typechequea aparte con las mismas opciones estrictas del FAD §23.2 (tercer paso del script `typecheck`). Incluye también playwright.config.ts, que ningún otro proyecto cubre.",
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "forceConsistentCasingInFileNames": true
+  },
+  "include": ["./**/*.ts", "../../playwright.config.ts"]
+}

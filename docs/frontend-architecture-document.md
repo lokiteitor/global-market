@@ -17,6 +17,8 @@
 
 > **Naturaleza de este documento.** El FAD es un documento de arquitectura *pre-desarrollo*. Define estructura, límites, contratos internos, patrones y decisiones — no implementación. No contiene código de producción; los pocos fragmentos ilustrativos que aparecen son *pseudo-firmas de interfaz* o *contratos de tipos*, presentes solo para fijar un límite sin ambigüedad, nunca como guía de implementación. Todo lo que aquí se decide es vinculante para el equipo de frontend salvo revisión formal vía ADR.
 
+> **Estado de implementación (Incremento 5 — cliente jugable v1).** Existe una primera implementación del cliente jugable (`/play`: Phaser top-down + HUD + loop construir → producir → publicar/aceptar → liquidar) conforme a este documento. Sus **simplificaciones conscientes** están anotadas *inline* en las secciones afectadas con notas «**Estado implementado (Incremento 5)**»: arte placeholder por texturas runtime (§14), terreno plano por bioma (§14.3/§16.3), sincronización por invalidación dirigida + refetch (§12.5), overlays como capa de WorldScene (§11.9) y ausencia de predicción optimista (§13.6). La cobertura del roadmap se marca en §26.1. Cada nota incluye el plan de evolución; la arquitectura objetivo descrita en el cuerpo del documento no cambia.
+
 ---
 
 ## Índice
@@ -1078,6 +1080,8 @@ Overlays viven en **OverlayScene** (paralela) para alternarse sin repintar el mu
 
 Solo **un overlay analítico primario** activo a la vez (más selección/hover que son permanentes). Los overlays se dibujan con geometría vectorial de Phaser (`Graphics`) o tiles teñidos, con su propio presupuesto de draw calls (§21.3).
 
+> **Estado implementado (Incremento 5).** Los overlays v1 viven como **capa `overlays` dentro de WorldScene** (un `Layer` con orden fijo, gestionado por `game/overlays/controller.ts`), no en una OverlayScene paralela: con dos overlays vectoriales (bordes/coropleta de **regiones** y **radios de influencia** de ciudades) el repintado es barato y una escena aparte no aporta aún. La **congestión** no es un overlay conmutable: se pinta permanentemente como tinte por tramo en la capa de red logística (tier presentacional en `game/bridge/vm.ts`). *Plan:* extraer OverlayScene paralela (alternar sin repintar el mundo, §16.7) cuando haya presión de render medida o lleguen los overlays de heatmap (demanda, cobertura, fiscalidad, recursos).
+
 ### 11.10 Selección, hover y menú contextual
 - **Hover**: picking por frame limitado (throttle) que resalta el sprite bajo el puntero y muestra tooltip (DOM anclado, §15.7).
 - **Selección**: single (clic) y **múltiple** (rubber-band / shift-clic) para operaciones de flota masiva (GDD §8). La selección vive en un `selection.store` (o slice de UI), leída por OverlayScene para dibujar el highlight y por la UI para poblar el inspector.
@@ -1203,6 +1207,8 @@ graph LR
 - **Ordenación**: un buffer reordena patches que llegan fuera de orden dentro de una ventana; pasado un umbral, se fuerza *resync*.
 - **Dedup + idempotencia** (P6): reaplicar un patch ya visto es un no-op. Esto es lo que hace segura la reconexión.
 - **Detección de huecos**: si falta un `sequence`, no se "adivina": se pide snapshot de esa room (barato y correcto, coherente con el backend que ya trabaja por snapshots + reconciliación).
+
+> **Estado implementado (Incremento 5).** El protocolo real (ADR-023, `docs/api/ws-protocol.md`) no envía snapshots por WS ni tiene replay: el modelo v1 es **bootstrap por REST (pull) + deltas por la room `corp`**, orquestado en `app/composables/useGameSync.ts` sobre el `GatewayTransportAdapter`. Cada `DomainEvent` recibido se trata como **invalidación dirigida**: no se aplica su payload, se **re-consulta por REST** el aggregate afectado (GET puntual) y la respuesta entra a las stores con applies idempotentes — la respuesta REST es siempre la verdad más fresca, correcto bajo entrega at-least-once (P6). El **watermark del `join`** y la detección de **huecos de `seq`** (o `onResync` tras reconexión) disparan el re-bootstrap REST completo del estado propio; lo ajeno (tablón, mundo de otros) es pull bajo demanda + refresco periódico suave. *Plan:* pipeline de patches granular (aplicar las `ops` de los payloads del outbox con ordenación/dedup como describe esta sección) como optimización de tráfico cuando el volumen de eventos lo justifique; el punto de inserción es el mismo (`useGameSync` + applies idempotentes), sin cambiar stores ni UI.
 
 ### 12.6 Snapshots y bootstrap del estado
 
@@ -1513,6 +1519,8 @@ La predicción existe **solo** para latencia percibida y está gobernada por `Pr
 4. **Reconciliación por identidad.** La confirmación se casa con la predicción por la `Idempotency-Key`/`PredictionId`, no por heurística.
 5. **Presupuesto de vida.** Una predicción sin confirmar más de `T` (p. ej. 10 s) se marca *en duda* y dispara consulta/resync; nunca queda colgada indefinidamente.
 
+> **Estado implementado (Incremento 5).** **Sin predicción optimista en v1**: todo comando espera la respuesta del servidor (la UI muestra estado de petición en vuelo — botón deshabilitado/spinner — nunca un resultado anticipado) y el estado replicado solo se escribe aplicando respuestas/eventos del servidor. Con el backend en localhost y comandos de gestión (no twitch), la latencia percibida no lo justifica todavía. Las reglas duras de esta sección quedan como contrato vinculante para el día en que se introduzca `PredictionPolicy`; hasta entonces, el estado `pending` de §13.9 solo describe peticiones en vuelo, no entidades predichas.
+
 ### 13.7 Mapeo de errores del backend a UX
 
 El backend define una taxonomía de `error.code` (SAD §10: `INSUFFICIENT_COLLATERAL`, y HTTP 400/401/403/404/409/422/429/503). El cliente mantiene un **diccionario único** `error.code → { mensaje i18n, severidad, acción sugerida, ¿revierte predicción? }`:
@@ -1549,6 +1557,8 @@ Estos cuatro estados son de primera clase en el modelo de vista (§20.7) y se pi
 
 Los assets del cliente se dividen en dos universos que **no deben mezclarse**: (a) **assets de UI** (fuentes, iconos SVG, imágenes de portal) procesados por el build de Nuxt/Vite; y (b) **assets de juego** (spritesheets, atlases, tilemaps, audio) cargados en runtime por el **Loader de Phaser**. Esta sección cubre spritesheets, tilemaps, audio, fuentes, lazy loading, caché y versionado.
 
+> **Estado implementado (Incremento 5).** **Arte placeholder consciente: no hay binarios de arte en esta fase.** Todas las texturas del mundo se **generan en runtime** con `Phaser.GameObjects.Graphics` + `generateTexture` (formas geométricas planas con la paleta espejo de los tokens Sass de `app/assets/styles/settings/_colors.scss`), centralizadas en `game/textures.ts` (+ `game/entities/textures-extra.ts`). Los consumidores referencian **claves lógicas** (`TEXTURES`, `biomeTextureKey`, `buildingTextureKey`), nunca literales, de modo que el pipeline completo de esta sección (atlases empaquetados §14.2, manifiesto con content-hash §14.6, `build:assets` §14.8) queda **pendiente de arte real** y su introducción será local: sustituir la fábrica runtime por el Loader + atlas sin tocar renderers. Audio, bitmap fonts y regresión de presupuestos de atlas quedan igualmente diferidos con el arte.
+
 ### 14.1 Taxonomía de assets
 
 | Clase | Ejemplos | Pipeline | Cargador |
@@ -1576,6 +1586,8 @@ Regla: **nada espacial se carga como asset de build; nada de UI se carga por el 
 - El terreno se define como **tilemap ortogonal (top-down)** troceado en **chunks** (§16.3). Cada chunk es un tilemap (o capa) cargado bajo demanda según el viewport (streaming, §16.8).
 - **Fuente de la geometría**: el mundo es procedural pero **ya persistido** en el servidor (GDD §9). El cliente **no** genera terreno; recibe la definición de la región (biomas, elevación, ríos, red) por REST/snapshot y la materializa en tiles. Para el *arte*, usa tilesets locales; para la *disposición*, los datos del servidor.
 - **Capas de tilemap**: base (terreno/bioma), agua/ríos, red logística (enlaces), decoración. Culling por capa (§16.5).
+
+> **Estado implementado (Incremento 5).** El backend **aún no expone terreno por tile**: v1 pinta **suelo plano por bioma de región** (ver nota en §16.3). No hay tilesets ni Tiled JSON todavía; las texturas de bioma por tile ya existen en `game/textures.ts` para el día en que lleguen datos por tile.
 
 ### 14.4 Audio
 
@@ -1803,6 +1815,8 @@ stateDiagram-v2
     Cached --> Unloaded: fuera del radio de retención (libera GL)
     Loading --> Unloaded: cancelado (viewport cambió rápido)
 ```
+
+> **Estado implementado (Incremento 5).** Chunks de **32×32 tiles** (constantes en `shared/geometry/grid.ts`: 250 m/tile, 32 px/tile ⇒ mundo Askadia 200×200 tiles, rejilla 7×7 de chunks con borde parcial). Como el backend **no expone terreno por tile todavía**, cada chunk se materializa como **un rectángulo del color del bioma** de la región que contiene su centro (lookup por bounds de región inyectado desde la app: suelo plano por bioma). El resto del sistema es real y queda ejercitado: `ChunkManager` (`game/map/chunks.ts` + lógica pura testeada en `chunk-logic.ts`) calcula visibles + anillo de histéresis desde el viewport, hace diffing, cachea ocultos y desaloja por **LRU** — listo para sustituir el rectángulo por tiles reales sin cambiar el ciclo de vida. *Plan:* datos por tile del backend → materializar capas de tilemap por chunk (§14.3/§16.4) sobre este mismo manager.
 
 ### 16.4 Capas del mapa (layers)
 
@@ -2351,6 +2365,8 @@ Es el conjunto de tests **más crítico** del frontend por el riesgo de la §4.4
 - Se ejecutan contra un **backend mock** (que sirve `openapi.yaml` con respuestas deterministas + un Gateway falso guionizado) y, en un job aparte, contra **staging** real cuando exista.
 - **Regresión visual** (opcional, screenshots de UI DOM; el mundo WebGL es más difícil y se cubre con QA + tests de render headless).
 
+> **Estado implementado (Incremento 5).** Existe un **smoke Playwright** (`npm run test:e2e` en `/frontend`) que recorre el flujo de oro mínimo (login → `/play` → mundo renderizado → panel operativo). Corre contra el **stack vivo local** (BD + backend + seed + frontend dev), no contra mock: es un gate manual de humo, no parte de `make test` (ver `docs/guias/desarrollo.md`). El backend mock guionizado y la suite E2E completa de flujos de oro quedan pendientes (FE 9).
+
 ### 22.8 Datos de prueba y fixtures
 
 - **Fixtures derivadas del contrato**: DTOs, snapshots y secuencias de patches generados desde `docs/api/openapi.yaml` y de escenarios de dominio (un ciclo CCRI completo, una avería, una subida de nivel de ciudad).
@@ -2639,6 +2655,8 @@ flowchart TB
 
 Estas son **fases de construcción del frontend** (entregables internos del equipo cliente), distintas de las fases de producto del GDD (§21: Fase 0 prototipo → Fase 4 meta-juego). Se alinean así: las Fases FE 1–5 sostienen el **vertical slice jugable** del GDD (su Fase 1); las Fases FE 6–7 acompañan el multi-región y gameplay ampliado (GDD Fase 2); las FE 8–10 escalan y pulen (GDD Fases 3–4). El orden es incremental y cada fase deja algo **verificable**.
 
+> **Estado (Incremento 5 — cliente jugable v1).** Sobre la base ya entregada de FE 1–2 (kernel probado, tipos del contrato, login/lobby reales, SimClock), el Incremento 5 cubre **FE 3 en lo esencial**, **FE 4 parcial**, el **núcleo de FE 5** (loop completo jugable, su entregable) y **FE 6 parcial**. El detalle por fase está marcado abajo; las simplificaciones conscientes remiten a las notas de §11.9, §12.5, §13.6, §14 y §16.3.
+
 > **Nota de secuencia sobre Networking (Fase FE 4).** Aunque Networking es la Fase FE 4, la **validación con el equipo de backend de ADR-FE-004** (§4.4) debe ocurrir *antes*, idealmente durante la Fase FE 1: es la dependencia inter-equipo de mayor riesgo. Las Fases FE 3–4 pueden desarrollarse contra el **mock server** (§23.8) en paralelo, pero no se consideran "hechas" hasta pasar los contract-tests (§22.6) contra el protocolo real.
 
 ### 26.1 Fases
@@ -2667,6 +2685,7 @@ Estas son **fases de construcción del frontend** (entregables internos del equi
 - Sprites base (edificio/vehículo/ciudad) desde atlases; bridge Pinia↔Phaser con VMs sintéticos (§11.6).
 - Playground de escenas (`/dev/world-sandbox`).
 - *Entregable:* un mundo navegable con datos **sintéticos**, 60 FPS con culling, render testeado headless.
+- **Estado (Incremento 5): cubierta en lo esencial.** Bootstrap client-only en `/play` (BootScene/WorldScene), `GridProjection` en render, chunks + culling + LRU, cámara (zoom/pan/bounds/follow), pools y bridge de VMs con diffs y coalescing. Desviaciones: texturas runtime en lugar de atlases (§14), terreno plano por bioma (§16.3) y datos reales desde el arranque (los fixtures sintéticos viven en `game/testing/`, sin playground `/dev/world-sandbox`).
 
 #### Fase FE 4 — Networking
 - Puerto `NetworkTransport`; `GatewayTransportAdapter` (ACL sobre el WS real) + `MockTransportAdapter` (dev/test).
@@ -2675,6 +2694,7 @@ Estas son **fases de construcción del frontend** (entregables internos del equi
 - Cliente REST completo (comandos + pull) con idempotencia y mapeo de errores (§13.7).
 - **Contract-tests** verdes (§22.6). Interpolación de vehículos desde eventos reales (§11.7).
 - *Entregable:* el mundo se puebla con **estado real del servidor**; reconexión/mantenimiento manejados; el mundo sintético de FE 3 pasa a datos reales.
+- **Estado (Incremento 5): parcial.** `GatewayTransportAdapter` sobre el WS real de ADR-023 (join `corp` + watermark, heartbeat, reconexión con backoff, resync), cliente REST completo con idempotencia y mapeo de errores, extrapolación analítica de vehículos con el SimClock. Simplificación: **invalidación dirigida + refetch REST** en lugar del pipeline granular de patches (§12.5); sin rooms `viewport` (el protocolo v1 solo expone la room de corporación); los tests del adaptador corren contra dobles del protocolo documentado, no contra un mock server guionizado.
 
 #### Fase FE 5 — UI (sistema de gestión)
 - HUD completo (top/bottom/side bar, inspector, minimapa) (§15).
@@ -2683,6 +2703,7 @@ Estas son **fases de construcción del frontend** (entregables internos del equi
 - Notificaciones y alertas configurables; tooltips; menú contextual; drag-drop de construcción (§18.5).
 - Accesibilidad, teclado, i18n scaffolding, temas.
 - *Entregable:* **loop completo jugable** (construir → producir → publicar/aceptar → ver liquidación) — cubre el vertical slice del GDD Fase 1.
+- **Estado (Incremento 5): núcleo cubierto — el entregable (loop completo jugable) está en pie.** HUD con top bar, sidebar e inspector contextual (edificio/ciudad/vehículo); paneles del vertical slice: construcción, industria (recetas/colas), flota (compra/despacho), finanzas/ledger, concesiones y mercado (tablón pull + publicar/aceptar con ventana de sorteo + OHLC); diálogos de confirmación; i18n (`shared/i18n`) y temas operativos. Pendiente de FE 5: WindowManager completo (v1: **un** panel flotante a la vez, sin persistencia de layout), bottom bar y minimapa, drag & drop de construcción (v1: modo construir + clic + confirmación), menú contextual y notificaciones configurables.
 
 #### Fase FE 6 — Mapa (mundo a escala)
 - Streaming completo de chunks (datos + assets on-demand, prefetch por dirección) (§16.8).
@@ -2690,6 +2711,7 @@ Estas son **fases de construcción del frontend** (entregables internos del equi
 - Minimapa con RenderTexture del mundo agregado; modelo agregado por región (§16.9).
 - Bounds dinámicos para expansión de mundo (GDD Fase 4).
 - *Entregable:* mundo multi-región navegable a cualquier escala dentro de presupuesto (acompaña GDD Fase 2).
+- **Estado (Incremento 5): parcial.** Streaming/culling de chunks con anillo de histéresis y evicción LRU sobre suelo plano por bioma (§16.3); overlays de regiones e influencia urbana como capa de WorldScene (§11.9); congestión pintada por tramo en la red logística; culling de etiquetas de ciudad por zoom. Pendiente de FE 6: LOD por zoom con clustering, minimapa con modelo agregado, prefetch por dirección de pan, heatmaps analíticos (demanda/cobertura/fiscalidad/recursos) y bounds dinámicos.
 
 #### Fase FE 7 — Gameplay (ampliación de features)
 - Logística avanzada: diseñador de rutas, ETAs (`/logistics/route-plans`), multimodal, terminales y **slots de prioridad**; congestión en overlay y en decisiones de UI.

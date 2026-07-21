@@ -107,6 +107,7 @@ async function onLogout(): Promise<void> {
     <header class="lobby__header o-cluster">
       <h1 class="lobby__title">{{ t('lobby.title') }}</h1>
       <div class="lobby__actions o-cluster">
+        <NuxtLink class="lobby__enter-link" to="/play">{{ t('lobby.enterWorld') }}</NuxtLink>
         <NuxtLink class="lobby__settings-link" to="/settings">{{ t('lobby.settings') }}</NuxtLink>
         <BaseButton variant="ghost" :loading="loggingOut" @click="onLogout">
           {{ t('login.logout') }}
@@ -181,6 +182,17 @@ async function onLogout(): Promise<void> {
 
   &:hover {
     color: var(--color-text);
+  }
+}
+
+.lobby__enter-link {
+  color: var(--color-accent);
+  font-weight: s.$font-weight-medium;
+
+  @include t.focus-ring;
+
+  &:hover {
+    color: var(--color-accent-hover);
   }
 }
 

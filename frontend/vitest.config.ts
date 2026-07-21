@@ -1,6 +1,6 @@
 import { fileURLToPath } from 'node:url'
 import vue from '@vitejs/plugin-vue'
-import { defineConfig } from 'vitest/config'
+import { configDefaults, defineConfig } from 'vitest/config'
 
 /**
  * Vitest — tests unitarios del kernel y de la app (FAD §22.1).
@@ -45,10 +45,16 @@ export default defineConfig({
     include: [
       'shared/**/*.spec.ts',
       'domain/**/*.spec.ts',
+      // game/: SOLO lógica pura (grid/chunks/pool/camera-math); Phaser no se
+      // monta en vitest (los módulos con Phaser lo importan solo como tipos).
+      'game/**/*.spec.ts',
       'network/**/*.spec.ts',
       'app/**/*.spec.ts',
       'config/**/*.spec.ts',
       'tests/**/*.spec.ts',
     ],
+    // Los smoke E2E de navegador real son de Playwright (`npm run test:e2e`,
+    // playwright.config.ts), no de vitest: fuera del runner unitario.
+    exclude: [...configDefaults.exclude, 'tests/e2e-browser/**'],
   },
 })

@@ -134,6 +134,71 @@ export default withNuxt(
     },
   },
   {
+    // game/ es la Rendering Layer (FAD §11.1): Phaser encapsulado, jamás
+    // conoce Vue/Nuxt/Pinia, la capa app/ ni la red. Entrada: deps inyectadas
+    // + bridge; salida: eventos tipados. Violación = build roto.
+    name: 'imperio/game-boundaries',
+    files: ['game/**/*.{ts,tsx}'],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            {
+              group: [
+                'vue',
+                'vue/*',
+                'vue-router',
+                'vue-router/*',
+                '@vue/*',
+                'nuxt',
+                'nuxt/*',
+                '#app',
+                '#app/*',
+                '#imports',
+                '#components',
+                'pinia',
+                '@pinia/*',
+              ],
+              message:
+                'game/ (Rendering Layer) es framework-agnostic (FAD §11.1): prohibido importar Vue/Nuxt/Pinia.',
+            },
+            {
+              group: ['~/**', '~~/**', '@/**', '@@/**', '**/app/**', '../app/**', '../../app/**'],
+              message:
+                'game/ no importa de app/ (FAD §11.1: Phaser no conoce la UI; comunicación solo por bridge y eventos).',
+            },
+            {
+              group: ['~network/**', '**/network/**'],
+              message:
+                'game/ no toca la red (FAD §11.1: no fetch, no socket); el estado llega por el bridge.',
+            },
+          ],
+        },
+      ],
+    },
+  },
+  {
+    // La UI solo accede al juego por el entrypoint game/index.ts (host de
+    // /play, carga perezosa): el interior de game/** es privado del motor.
+    name: 'imperio/app-no-game-internals',
+    files: ['app/components/**/*.{ts,vue}', 'app/pages/**/*.{ts,vue}'],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            {
+              group: ['**/game/**', '!**/game/index'],
+              message:
+                'app/components|pages solo acceden al motor por el entrypoint game/index.ts (frontera FAD §11.1; import dinámico en el host de /play).',
+            },
+          ],
+        },
+      ],
+    },
+  },
+  {
     // Los tipos generados del contrato no se lintan (no se editan a mano, ADR-021).
     ignores: ['types/api.d.ts'],
   },

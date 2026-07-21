@@ -1,5 +1,5 @@
 {
-  "$comment": "Proyecto TS del kernel framework-agnostic (shared/, domain/, network/, config/): se typechequea sin Nuxt con las opciones estrictas del FAD §23.2. Complementa a `nuxt typecheck` (ver script typecheck).",
+  "$comment": "Proyecto TS del kernel framework-agnostic (shared/, domain/, network/, config/) MÁS game/ (Rendering Layer: usa Phaser pero jamás Vue/Nuxt/Pinia y vive fuera de app/, así que Nuxt no lo typechequea): se typechequea sin Nuxt con las opciones estrictas del FAD §23.2. Complementa a `nuxt typecheck` (ver script typecheck).",
   "compilerOptions": {
     "target": "ES2022",
     "lib": ["ES2022", "DOM"],
@@ -28,6 +28,7 @@
     "shared/**/*.ts",
     "shared/**/*.json",
     "domain/**/*.ts",
+    "game/**/*.ts",
     "network/**/*.ts",
     "config/**/*.ts",
     "vitest.config.ts"

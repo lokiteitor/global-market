@@ -26,6 +26,13 @@ export default defineNuxtConfig({
   css: ['~/assets/styles/index.scss'],
 
   vite: {
+    // Pre-bundling explícito (solo afecta a dev): si Vite descubre estas
+    // dependencias en runtime (phaser se importa perezosamente al entrar a
+    // /play) fuerza una recarga completa de la página, que pierde el token en
+    // memoria (FAD §24.2) y rebota al login a mitad de sesión.
+    optimizeDeps: {
+      include: ['phaser', 'zod'],
+    },
     css: {
       preprocessorOptions: {
         scss: {
@@ -42,6 +49,23 @@ export default defineNuxtConfig({
       // Prefijo del contrato REST v1.1.0. Sobreescribible por entorno con
       // NUXT_PUBLIC_API_BASE. Validado con zod en config/env.ts (FAD §23.7).
       apiBase: '/api/v1',
+      // URL del gateway WS (ADR-023). Vacío = derivar de apiBase sobre el
+      // mismo origen (producción: Caddy proxya el upgrade). Sobreescribible
+      // con NUXT_PUBLIC_WS_BASE. Validado en config/env.ts.
+      wsBase: '',
+    },
+  },
+
+  // Overrides SOLO de dev (entorno `$development`, Nuxt 4).
+  $development: {
+    runtimeConfig: {
+      public: {
+        // El devProxy de Nitro no proxya upgrades WebSocket, así que en dev
+        // el cliente conecta directo al gateway Go. El gateway debe permitir
+        // el origen del dev server: II_WS_ALLOWED_ORIGINS=localhost:3000
+        // (lo exporta scripts/run-backend.sh; ver docs/runbooks/local.md).
+        wsBase: 'ws://localhost:8080/api/v1/ws',
+      },
     },
   },
 
@@ -52,6 +76,8 @@ export default defineNuxtConfig({
       '/api': {
         target: 'http://localhost:8080/api',
         changeOrigin: true,
+        // OJO: el devProxy NO proxya upgrades WebSocket; el WS de dev va
+        // directo al gateway vía `wsBase` (ver runtimeConfig `$development`).
       },
     },
   },

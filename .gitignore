@@ -16,3 +16,7 @@ coverage/
 .vscode/
 *.swp
 .DS_Store
+
+# Playwright (smoke E2E del frontend: screenshots y resultados, npm run test:e2e)
+frontend/tests/e2e-browser/artifacts/
+frontend/tests/e2e-browser/test-results/

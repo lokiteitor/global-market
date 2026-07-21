@@ -27,6 +27,7 @@ Login de desarrollo: corporación `Demo` / secret `demo-secret-dev` (configurabl
 - **401 UNAUTHORIZED en todo** → token expirado (24 h) o sesión cerrada: re-login. **429 RATE_LIMITED** → respeta `Retry-After` (límites idénticos para humanos y bots por diseño).
 - **El sim-time no avanza** → el engine no corre o el reloj está `frozen`: `curl :8081/metrics | grep ii_sim_clock_frozen`; el ancla vive en `world.sim_clock` (fila única id=1).
 - **El frontend no ve la API** → el gateway no está en :8080 o el proxy dev no arrancó: reinicia `make frontend` con el gateway ya levantado.
+- **El HUD queda en «Reconectando…»** → el WS no conecta. En dev el cliente conecta el WS DIRECTO a `ws://localhost:8080/api/v1/ws` (el devProxy de Nitro no proxya upgrades WebSocket) y el gateway debe permitir el origen del dev server: `II_WS_ALLOWED_ORIGINS=localhost:3000` (lo exporta `scripts/run-backend.sh`; si arrancas `go run ./cmd/gateway` a mano, expórtalo tú).
 - **Invariantes del ledger** → `./scripts/db-smoke.sh` (9/9 PASS esperado). Cualquier FAIL es bloqueante: el valor económico está comprometido.
 
 ## Reset / limpieza

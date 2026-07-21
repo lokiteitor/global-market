@@ -21,8 +21,13 @@
 
 import type { SimClock } from '~domain/simclock'
 import { createAuthApi } from '~network/auth.api'
+import { createFleetApi } from '~network/fleet.api'
+import { createLedgerApi } from '~network/ledger.api'
+import { createLogisticsApi } from '~network/logistics.api'
+import { createMarketApi } from '~network/market.api'
 import type { HttpTransport } from '~network/rest'
 import { createRestClient } from '~network/rest'
+import { createWorldApi } from '~network/world.api'
 import { useSessionStore } from '../stores/session.store'
 
 export default defineNuxtPlugin((nuxtApp) => {
@@ -68,6 +73,13 @@ export default defineNuxtPlugin((nuxtApp) => {
     provide: {
       restClient,
       authApi,
+      // Puertos REST del juego (Incremento 5): mismos patrones que authApi.
+      // La UI los consume vía useGameApis() — nunca importa network/ directo.
+      worldApi: createWorldApi(restClient),
+      marketApi: createMarketApi(restClient),
+      fleetApi: createFleetApi(restClient),
+      logisticsApi: createLogisticsApi(restClient),
+      ledgerApi: createLedgerApi(restClient),
     },
   }
 })

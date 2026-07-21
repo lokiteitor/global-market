@@ -47,6 +47,30 @@ Audiencia: cualquier desarrollador que se incorpora al proyecto. Complementa (no
 - Textos SOLO vía `shared/i18n` (`locales/es.json`). El token de sesión vive solo en memoria.
 - En dev, Nuxt proxya `/api` → `localhost:8080` (mismo origen, sin CORS); en producción lo hace Caddy.
 
+### Cliente de juego (`/play`, Incremento 5)
+
+Mapa Phaser top-down cenital (ADR-019) + HUD Vue. El estado implementado y sus simplificaciones conscientes están anotados en el FAD (notas «Estado implementado (Incremento 5)» en §11.9, §12.5, §13.6, §14, §16.3 y §26.1).
+
+**Arquitectura de `game/`** (motor de render, sin Vue/Nuxt/Pinia/red; fronteras en ESLint):
+
+- **Entrada única**: `game/index.ts` (`createGame`). La app lo carga perezosamente (`await import('~~/game')` en `GameCanvasHost.vue`): Phaser jamás entra en el bundle del portal.
+- **`shared/geometry/grid.ts` — GridProjection**: ÚNICO punto de conversión mundo ↔ pantalla (la API habla metros planos `[x_m, y_m]`, SRID 0). 1 tile = 250 m = 32 px; mundo Askadia 50 000 × 50 000 m = 200 × 200 tiles; chunks de 32 × 32 tiles. Prohibida la matemática de proyección fuera de aquí.
+- **`game/map/` — ChunkManager**: streaming + culling + LRU de chunks según viewport (lógica pura testeada en `chunk-logic.ts`). Terreno placeholder: suelo plano coloreado por bioma de región (el backend aún no expone terreno por tile).
+- **`game/bridge/`**: deriva **view-models planos** (metros, solo lo que el sprite necesita) de lo VISIBLE, desde el puerto `WorldStateSource` que la app implementa sobre las stores Pinia (`app/composables/useWorldLive.ts`); diffs por identidad y ≤1 recomputación por frame.
+- **Capas y renderers**: orden de dibujo fijo por capas (`LAYER_ORDER`: terreno → red → recursos → edificios → vehículos → efectos → overlays → etiquetas); un renderer con **pooling** por tipo de entidad en `game/entities/`, ensamblados en `game/world-live.ts`. Texturas **generadas en runtime** (`game/textures.ts`, claves lógicas, paleta espejo de los tokens Sass) — sin binarios de arte en esta fase.
+- **Sincronización**: `app/composables/useGameSync.ts` — bootstrap por REST + deltas por la room WS `corp` (ADR-023); cada evento invalida y **re-consulta** por REST; hueco de `seq`/reconexión → re-bootstrap propio; vehículos extrapolados analíticamente con el `SimClock`.
+
+**Añadir una entidad al mapa** (VM + textura + capa):
+
+1. Exponer el dato en su store replicada (escrita solo con respuestas/eventos del servidor) y en el puerto `WorldStateSource` (`useWorldLive.ts`).
+2. Definir su VM plano en `game/bridge/vm.ts` y su derivación desde el source en `game/bridge/derive.ts` (funciones puras, con test).
+3. Registrar su textura runtime con clave lógica en `game/textures.ts` (o `game/entities/textures-extra.ts`).
+4. Escribir el renderer con pooling en `game/entities/` y ensamblarlo en `game/world-live.ts` dentro de su capa (el orden de creación de containers es el z-order).
+
+**Añadir un panel al HUD**: registra el nombre en `GAME_PANELS` (`app/stores/panels.store.ts`), crea el componente en `app/components/play/` sobre `FloatingPanel` + componentes base (`app/components/base/`), textos SOLO vía `t()` (`shared/i18n/locales/es.json`), botón en `HudSidebar.vue`; datos y comandos vía `useGameApis` → módulos `network/*.api` (patrón `auth.api.ts`) con mappers (los DTO no salen de `network/`); test de componente en `tests/nuxt/`.
+
+**Smoke E2E (Playwright)**: `npm run test:e2e` en `/frontend`. **Prerrequisito: stack vivo** — backend dev en :8080 (`make dev` + `make backend`, opcionalmente `make bots`) y frontend dev en :3000 (`make frontend`); el spec se salta limpiamente si `/healthz` no responde. Flujo de solo lectura: login Demo → `/play` → mundo renderizado → HUD → panel Mercado, con screenshots en `tests/e2e-browser/`. No forma parte de `make test` (los tests unitarios no asumen backend corriendo).
+
 ## 4. Observabilidad
 
 - Logging estructurado (slog JSON) con `request_id`; métricas Prometheus en ambos binarios (`ii_http_*`, `ii_sim_time_seconds`, `ii_rate_limited_total`, pool de BD); dashboard base en Grafana (`infra/grafana/dashboards/`).

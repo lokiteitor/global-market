@@ -16,7 +16,8 @@ Los tres invariantes que gobiernan todo el diseño:
               oficial de bots (pkg/botsdk). Módulo único con bounded contexts sin
               imports cruzados (internal/{auth,ledger,sim,...}).
 /frontend     Cliente web autónomo: Nuxt 4 + Vue 3 + TypeScript estricto + Pinia +
-              Sass propio (sin frameworks CSS) + Phaser (top-down, Incremento 5).
+              Sass propio (sin frameworks CSS) + Phaser. Cliente jugable en /play:
+              mapa top-down cenital (ADR-019) + HUD de gestión (Incremento 5).
 /infra        Docker Compose (PostgreSQL 18 + PostGIS, Prometheus, Grafana, Caddy),
               Dockerfiles y provisioning de dashboards.
 /docs         Documentación viva: GDD v1.3, SAD v1.1, FAD v1.1, modelo de datos,
@@ -38,6 +39,8 @@ make frontend   # cliente Nuxt en http://localhost:3000  [otra terminal]
 
 Credenciales de desarrollo tras el seed: corporación `Demo` / `demo-secret-dev`.
 
+El **cliente jugable** vive en `http://localhost:3000/play` (tras login): mapa Phaser top-down del mundo Askadia (chunks + culling, texturas generadas en runtime como placeholder de arte) con el loop completo construir → producir → publicar/aceptar en el tablón CCRI → ver liquidación. Con `make bots` corriendo, el tablón y las carreteras cobran vida.
+
 Stack completo en Docker: `make run` (perfil `full`, entra por Caddy en :80).
 
 ## Tareas principales
@@ -51,6 +54,7 @@ Stack completo en Docker: `make run` (perfil `full`, entra por Caddy en :80).
 | `make seed` | Datos mínimos de desarrollo (idempotente) |
 | `make bots` | Bot Orchestration Service (`cmd/bots`, ADR-024): aprovisiona y ejecuta la población de bots jugando por la API pública vía `pkg/botsdk` (densidad con `II_BOTS_*`; métricas en :8082) |
 | `make infra-core` / `infra-down` / `infra-logs` | Infraestructura local |
+| `npm run test:e2e` (en `/frontend`) | Smoke E2E Playwright del cliente jugable contra el stack vivo local (se salta limpiamente si el backend no responde; ver `docs/guias/desarrollo.md`) |
 
 ## Observabilidad
 
