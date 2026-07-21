@@ -242,11 +242,21 @@ func run() error {
 		return err
 	}
 
+	// Tick del mercado spot eléctrico (Fase 3, GDD 5.8/18.1, ADR-025): por cada
+	// región con líneas operativas y bucket vencido casa oferta y demanda por
+	// orden de mérito, liquida los pagos (asiento power_spot al precio de
+	// cierre uniforme), quema el combustible de las térmicas (ADR-022) y
+	// pausa/reanuda la producción de los consumidores según el resultado.
+	powerWorker, err := balancer.NewPowerWorker(app.Pool(), clockSimSource{clk}, balancerOpts, balancerMetrics, app.Logger())
+	if err != nil {
+		return err
+	}
+
 	// ── Arranque de los procesos en segundo plano ────────────────────────────
 	// Comparten el ctx de la señal: al apagar, los bucles observan ctx.Done() y
 	// retornan nil (parada limpia). wg los sincroniza antes de cerrar el pool.
 	var wg sync.WaitGroup
-	wg.Add(14)
+	wg.Add(15)
 	go func() {
 		defer wg.Done()
 		if err := worker.Run(ctx); err != nil {
@@ -331,6 +341,12 @@ func run() error {
 			app.Logger().Error("balancer: el job macro terminó con error", slog.Any("error", err))
 		}
 	}()
+	go func() {
+		defer wg.Done()
+		if err := powerWorker.Run(ctx); err != nil {
+			app.Logger().Error("balancer: el tick del mercado spot eléctrico terminó con error", slog.Any("error", err))
+		}
+	}()
 
 	app.Logger().Info("procesos del motor en marcha",
 		slog.Duration("contracts_sweep_interval", workerOpts.SweepInterval),
@@ -365,7 +381,11 @@ func run() error {
 		slog.Duration("balancer_demand_interval", balancerOpts.DemandInterval),
 		slog.Duration("balancer_analytics_interval", balancerOpts.AnalyticsInterval),
 		slog.Int64("city_buy_deadline_sim", int64(balancerOpts.CityBuyDeadlineSim)),
-		slog.String("city_consumer", balancer.ConsumerName))
+		slog.String("city_consumer", balancer.ConsumerName),
+		slog.Int64("power_spot_interval_sim", balancerOpts.PowerSpotIntervalSim),
+		slog.Duration("power_spot_sweep_interval", balancerOpts.PowerSpotSweepInterval),
+		slog.Int64("power_connect_radius_m", balancerOpts.PowerConnectRadiusM),
+		slog.Int64("power_line_maint_per_km_day", enforcementWorkerOpts.PowerLineMaintPerKmDay))
 
 	// Sirve HTTP (sondas/métricas) hasta la señal; entonces app.Run apaga el
 	// servidor de forma graceful. Al retornar, el ctx ya está cancelado y los

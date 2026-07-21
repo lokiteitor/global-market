@@ -55,11 +55,14 @@ LIMIT sqlc.arg(page_limit);
 -- ListBuildingTypes devuelve el catálogo de tipos de edificio con sus reglas de
 -- emplazamiento y curva de niveles (JSONB → bytes crudos que el handler embebe).
 -- name: ListBuildingTypes :many
-SELECT id, code, name, footprint_cells, max_level, base_storage,
-       placement_rules, level_curve, build_cost, maintenance_cost
-FROM world.building_types
-WHERE (sqlc.narg(after_id)::uuid IS NULL OR id > sqlc.narg(after_id)::uuid)
-ORDER BY id
+SELECT bt.id, bt.code, bt.name, bt.footprint_cells, bt.max_level, bt.base_storage,
+       bt.placement_rules, bt.level_curve, bt.build_cost, bt.maintenance_cost,
+       ppt.capacity AS power_capacity, ppt.fuel_product_id AS power_fuel_product_id,
+       ppt.fuel_per_unit AS power_fuel_per_unit
+FROM world.building_types bt
+LEFT JOIN world.power_plant_types ppt ON ppt.building_type_id = bt.id
+WHERE (sqlc.narg(after_id)::uuid IS NULL OR bt.id > sqlc.narg(after_id)::uuid)
+ORDER BY bt.id
 LIMIT sqlc.arg(page_limit);
 
 -- ─── Recetas ─────────────────────────────────────────────────────────────────
@@ -70,7 +73,7 @@ LIMIT sqlc.arg(page_limit);
 -- página, para no duplicar filas de receta en el JOIN.
 -- name: ListRecipes :many
 SELECT r.id, r.building_type_id, r.code, r.name, r.batch_sim_seconds,
-       r.fuel_product_id, r.fuel_per_batch, r.workers_required,
+       r.fuel_product_id, r.fuel_per_batch, r.power_per_hour, r.workers_required,
        r.min_city_level, r.changeover_seconds
 FROM world.recipes r
 WHERE (sqlc.narg(building_type_id)::uuid IS NULL OR r.building_type_id = sqlc.narg(building_type_id)::uuid)

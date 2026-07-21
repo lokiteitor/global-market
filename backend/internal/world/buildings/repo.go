@@ -193,6 +193,15 @@ func (r *Repo) NodeKindPresentInRegion(ctx context.Context, regionID uuid.UUID, 
 	return present, nil
 }
 
+// RegionBiome devuelve el bioma de la región (regla requires_biome, ADR-025).
+func (r *Repo) RegionBiome(ctx context.Context, regionID uuid.UUID) (string, error) {
+	biome, err := r.q.GetRegionBiome(ctx, regionID)
+	if err != nil {
+		return "", fmt.Errorf("world/buildings: leyendo el bioma de la región %s: %w", regionID, err)
+	}
+	return string(biome), nil
+}
+
 // ─── Construcción ────────────────────────────────────────────────────────────
 
 // insertBuildingParams son los parámetros de InsertBuilding.

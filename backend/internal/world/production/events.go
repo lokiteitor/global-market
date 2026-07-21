@@ -23,6 +23,7 @@ const (
 const (
 	reasonNoFuel      = "no_fuel"
 	reasonNoWorkers   = "no_workers"
+	reasonNoPower     = "no_power"
 	reasonNoInputs    = "no_inputs"
 	reasonNoDeposit   = "no_deposit"
 	reasonStorageFull = "storage_full"

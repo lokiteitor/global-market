@@ -78,6 +78,7 @@
   "status.batch.running": "En producción",
   "status.batch.paused_no_fuel": "Pausado: sin combustible",
   "status.batch.paused_no_workers": "Pausado: sin trabajadores",
+  "status.batch.paused_no_power": "Pausado: sin suministro eléctrico",
   "status.batch.completed": "Completado",
   "status.batch.cancelled": "Cancelado",
 

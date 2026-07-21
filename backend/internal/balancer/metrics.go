@@ -19,6 +19,14 @@ type Metrics struct {
 	simulatedGDP        prometheus.Gauge     // ii_simulated_gdp
 	globalDepletionRate prometheus.Gauge     // ii_global_depletion_rate
 	taxRateBP           *prometheus.GaugeVec // ii_tax_rate_bp{region}
+
+	// Mercado spot eléctrico (Fase 3, ADR-025).
+	powerSpotPrice      *prometheus.GaugeVec   // ii_power_spot_price{region}
+	powerSupplied       *prometheus.CounterVec // ii_power_supplied_units_total{region}
+	powerCurtailedUnits *prometheus.CounterVec // ii_power_curtailed_units_total{region}
+	powerCurtailments   *prometheus.CounterVec // ii_power_curtailments_total{region}
+	powerFuelBurned     *prometheus.CounterVec // ii_power_fuel_burned_total{product}
+	powerTickDuration   prometheus.Histogram   // ii_power_spot_tick_duration_seconds
 }
 
 // NewMetrics construye e (si reg != nil) registra las métricas del Balancer.
@@ -74,11 +82,38 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 			Name: "ii_tax_rate_bp",
 			Help: "Tipo impositivo vigente por región tras el ajuste fiscal, en puntos básicos.",
 		}, []string{"region"}),
+		powerSpotPrice: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "ii_power_spot_price",
+			Help: "Precio de cierre del último tick del mercado spot eléctrico, por región (0 = sin despacho).",
+		}, []string{"region"}),
+		powerSupplied: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "ii_power_supplied_units_total",
+			Help: "Unidades de energía despachadas por el mercado spot, por región.",
+		}, []string{"region"}),
+		powerCurtailedUnits: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "ii_power_curtailed_units_total",
+			Help: "Unidades de energía demandadas y NO servidas (déficit + insolvencia), por región.",
+		}, []string{"region"}),
+		powerCurtailments: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "ii_power_curtailments_total",
+			Help: "Edificios recortados por tick del spot (recorte rotatorio, GDD 5.8), por región.",
+		}, []string{"region"}),
+		powerFuelBurned: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "ii_power_fuel_burned_total",
+			Help: "Combustible físico quemado por las térmicas despachadas, por producto (ADR-022).",
+		}, []string{"product"}),
+		powerTickDuration: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Name:    "ii_power_spot_tick_duration_seconds",
+			Help:    "Duración de la liquidación de cada tick del mercado spot (por región).",
+			Buckets: prometheus.DefBuckets,
+		}),
 	}
 	if reg != nil {
 		reg.MustRegister(m.buysPublished, m.cityEmission, m.consumed, m.cityLevel,
 			m.levelChanges, m.recalcDuration, m.moneySupply,
-			m.analyticsDuration, m.macroMoneySupply, m.simulatedGDP, m.globalDepletionRate, m.taxRateBP)
+			m.analyticsDuration, m.macroMoneySupply, m.simulatedGDP, m.globalDepletionRate, m.taxRateBP,
+			m.powerSpotPrice, m.powerSupplied, m.powerCurtailedUnits, m.powerCurtailments,
+			m.powerFuelBurned, m.powerTickDuration)
 	}
 	return m
 }
@@ -152,5 +187,40 @@ func (m *Metrics) setGlobalDepletionRate(v float64) {
 func (m *Metrics) setTaxRateBP(region string, bp int32) {
 	if m != nil {
 		m.taxRateBP.WithLabelValues(region).Set(float64(bp))
+	}
+}
+
+func (m *Metrics) setPowerSpotPrice(region string, price int64) {
+	if m != nil {
+		m.powerSpotPrice.WithLabelValues(region).Set(float64(price))
+	}
+}
+
+func (m *Metrics) addPowerSupplied(region string, units int64) {
+	if m != nil && units > 0 {
+		m.powerSupplied.WithLabelValues(region).Add(float64(units))
+	}
+}
+
+func (m *Metrics) addPowerCurtailed(region string, units int64, buildings int) {
+	if m != nil {
+		if units > 0 {
+			m.powerCurtailedUnits.WithLabelValues(region).Add(float64(units))
+		}
+		if buildings > 0 {
+			m.powerCurtailments.WithLabelValues(region).Add(float64(buildings))
+		}
+	}
+}
+
+func (m *Metrics) addPowerFuelBurned(product string, units int64) {
+	if m != nil && units > 0 {
+		m.powerFuelBurned.WithLabelValues(product).Add(float64(units))
+	}
+}
+
+func (m *Metrics) observePowerTick(seconds float64) {
+	if m != nil {
+		m.powerTickDuration.Observe(seconds)
 	}
 }

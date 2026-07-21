@@ -33,6 +33,7 @@ export const BATCH_STATUSES = [
   'running',
   'paused_no_fuel',
   'paused_no_workers',
+  'paused_no_power',
   'completed',
   'cancelled',
 ] as const

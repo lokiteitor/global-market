@@ -176,6 +176,8 @@ El fan-out lo alimenta el consumidor de outbox **`notification_gateway`** (proce
 | `batch.queued` / `.completed` / `.paused` / `.cancelled` | el dueño |
 | `concession.granted` / `.renewed` | el titular |
 | `concession.transferred` | ambas partes del traspaso |
+| `power.curtailed` | el dueño del edificio recortado (ADR-025; el resultado agregado del spot es pull por REST) |
+| `power_line.abandoned` | el dueño de la línea que dejó de conducir |
 
 Cuando el payload no contiene las cuentas necesarias, el router las resuelve con lecturas puntuales a la BD (caché con TTL corto: la titularidad puede cambiar). El cursor del consumidor **avanza siempre** tras el fan-out: los sockets son efímeros y un cliente ausente bootstrapea por REST — la entrega hacia clientes no es (ni debe ser) exactly-once.
 

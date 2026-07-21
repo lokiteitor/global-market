@@ -475,21 +475,28 @@ func toProductJSON(p Product) productJSON {
 	}
 }
 
+type powerGenerationJSON struct {
+	CapacityPerHour string `json:"capacity_per_hour"`
+	FuelProductID   string `json:"fuel_product_id,omitempty"`
+	FuelPerUnit     string `json:"fuel_per_unit"`
+}
+
 type buildingTypeJSON struct {
-	ID              string          `json:"id"`
-	Code            string          `json:"code"`
-	Name            string          `json:"name"`
-	FootprintCells  int32           `json:"footprint_cells"`
-	MaxLevel        int32           `json:"max_level"`
-	BaseStorage     string          `json:"base_storage"`
-	PlacementRules  json.RawMessage `json:"placement_rules,omitempty"`
-	LevelCurve      json.RawMessage `json:"level_curve,omitempty"`
-	BuildCost       string          `json:"build_cost"`
-	MaintenanceCost string          `json:"maintenance_cost"`
+	ID              string               `json:"id"`
+	Code            string               `json:"code"`
+	Name            string               `json:"name"`
+	FootprintCells  int32                `json:"footprint_cells"`
+	MaxLevel        int32                `json:"max_level"`
+	BaseStorage     string               `json:"base_storage"`
+	PlacementRules  json.RawMessage      `json:"placement_rules,omitempty"`
+	LevelCurve      json.RawMessage      `json:"level_curve,omitempty"`
+	BuildCost       string               `json:"build_cost"`
+	MaintenanceCost string               `json:"maintenance_cost"`
+	PowerGeneration *powerGenerationJSON `json:"power_generation,omitempty"`
 }
 
 func toBuildingTypeJSON(t BuildingType) buildingTypeJSON {
-	return buildingTypeJSON{
+	out := buildingTypeJSON{
 		ID: t.ID.String(), Code: t.Code, Name: t.Name,
 		FootprintCells: t.FootprintCells, MaxLevel: t.MaxLevel,
 		BaseStorage:    fixed(t.BaseStorage),
@@ -497,6 +504,14 @@ func toBuildingTypeJSON(t BuildingType) buildingTypeJSON {
 		LevelCurve:     rawObject(t.LevelCurve),
 		BuildCost:      fixed(t.BuildCost), MaintenanceCost: fixed(t.MaintenanceCost),
 	}
+	if t.PowerGeneration != nil {
+		out.PowerGeneration = &powerGenerationJSON{
+			CapacityPerHour: fixed(t.PowerGeneration.Capacity),
+			FuelProductID:   uuidPtrOrEmpty(t.PowerGeneration.FuelProductID),
+			FuelPerUnit:     fixed(t.PowerGeneration.FuelPerUnit),
+		}
+	}
+	return out
 }
 
 type recipeIngredientJSON struct {
@@ -513,6 +528,7 @@ type recipeJSON struct {
 	BatchSimSeconds   int64                  `json:"batch_sim_seconds"`
 	FuelProductID     string                 `json:"fuel_product_id,omitempty"`
 	FuelPerBatch      string                 `json:"fuel_per_batch"`
+	PowerPerHour      string                 `json:"power_per_hour"`
 	WorkersRequired   int32                  `json:"workers_required"`
 	MinCityLevel      int32                  `json:"min_city_level"`
 	ChangeoverSeconds int64                  `json:"changeover_seconds"`
@@ -532,6 +548,7 @@ func toRecipeJSON(rc Recipe) recipeJSON {
 		ID: rc.ID.String(), BuildingTypeID: rc.BuildingTypeID.String(),
 		Code: rc.Code, Name: rc.Name, BatchSimSeconds: rc.BatchSimSeconds,
 		FuelProductID: uuidPtrOrEmpty(rc.FuelProductID), FuelPerBatch: fixed(rc.FuelPerBatch),
+		PowerPerHour:    fixed(rc.PowerPerHour),
 		WorkersRequired: rc.WorkersRequired, MinCityLevel: rc.MinCityLevel,
 		ChangeoverSeconds: rc.ChangeoverSeconds, Ingredients: ings,
 	}

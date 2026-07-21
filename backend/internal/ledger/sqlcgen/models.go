@@ -83,6 +83,7 @@ const (
 	LedgerTransactionKindTransfer             LedgerTransactionKind = "transfer"
 	LedgerTransactionKindAuction              LedgerTransactionKind = "auction"
 	LedgerTransactionKindReconciliation       LedgerTransactionKind = "reconciliation"
+	LedgerTransactionKindPowerSpot            LedgerTransactionKind = "power_spot"
 )
 
 func (e *LedgerTransactionKind) Scan(src interface{}) error {

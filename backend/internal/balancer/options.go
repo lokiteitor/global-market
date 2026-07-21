@@ -73,6 +73,20 @@ const (
 	// (crecimiento de masa monetaria − crecimiento del PIB) por encima del cual el
 	// lazo fiscal actúa. Default 0.01 (1%).
 	EnvFiscalInflationThreshold = "II_FISCAL_INFLATION_THRESHOLD"
+	// EnvPowerSpotIntervalSim es el intervalo del tick del mercado spot
+	// eléctrico por región, en sim-time (múltiplo de 3600 para que la energía
+	// por tick sea entera exacta). Default 3600 (1 hora-sim).
+	EnvPowerSpotIntervalSim = "II_POWER_SPOT_INTERVAL_SIM"
+	// EnvPowerSpotSweepInterval es el periodo wall-clock del barrido del
+	// PowerWorker que busca buckets vencidos (time.ParseDuration). Default 5s.
+	EnvPowerSpotSweepInterval = "II_POWER_SPOT_SWEEP_INTERVAL"
+	// EnvPowerConnectRadiusM es el radio de conexión al pool regional: un
+	// edificio participa si está a <= este radio (metros de mundo) de una línea
+	// operativa de su región (ADR-025 §3). Default 2000.
+	EnvPowerConnectRadiusM = "II_POWER_CONNECT_RADIUS_M"
+	// EnvPowerDefaultBidPrice es la puja máxima por unidad de energía de los
+	// consumidores SIN puja explícita (world.power_bids). Default 200.
+	EnvPowerDefaultBidPrice = "II_POWER_DEFAULT_BID_PRICE"
 	// EnvDepletionHorizonSimDays es el horizonte de la proyección de agotamiento
 	// de recursos finitos, en días de juego. Default 360 (~12 meses de juego).
 	EnvDepletionHorizonSimDays = "II_DEPLETION_HORIZON_SIM_DAYS"
@@ -127,6 +141,12 @@ const (
 	DefaultCanonStepBP              int64 = 200 // 2% por barrido
 	DefaultFiscalInflationThreshold       = 0.01
 	DefaultDepletionHorizonSimDays  int64 = 360 // ~12 meses de juego
+
+	// ── Mercado spot eléctrico (Fase 3, ADR-025) ──
+	DefaultPowerSpotIntervalSim   int64 = 3_600 // 1 hora-sim (~2,5 min reales)
+	DefaultPowerSpotSweepInterval       = 5 * time.Second
+	DefaultPowerConnectRadiusM    int64 = 2_000
+	DefaultPowerDefaultBidPrice   int64 = 200
 )
 
 // Options es la configuración del Balancer.
@@ -190,6 +210,18 @@ type Options struct {
 	FiscalInflationThreshold float64
 	// DepletionHorizonSimDays: horizonte de la proyección de agotamiento (> 0).
 	DepletionHorizonSimDays int64
+
+	// ── Mercado spot eléctrico (Fase 3, ADR-025) ──
+
+	// PowerSpotIntervalSim: intervalo del tick del spot por región, sim-time
+	// (> 0 y múltiplo de 3600: energía por tick entera exacta).
+	PowerSpotIntervalSim int64
+	// PowerSpotSweepInterval: periodo wall-clock del barrido de buckets (> 0).
+	PowerSpotSweepInterval time.Duration
+	// PowerConnectRadiusM: radio de conexión al pool regional, metros (> 0).
+	PowerConnectRadiusM int64
+	// PowerDefaultBidPrice: puja default por unidad de energía (> 0).
+	PowerDefaultBidPrice int64
 }
 
 // DefaultOptions devuelve la configuración por defecto del Balancer.
@@ -226,6 +258,11 @@ func DefaultOptions() Options {
 		CanonStepBP:              DefaultCanonStepBP,
 		FiscalInflationThreshold: DefaultFiscalInflationThreshold,
 		DepletionHorizonSimDays:  DefaultDepletionHorizonSimDays,
+
+		PowerSpotIntervalSim:   DefaultPowerSpotIntervalSim,
+		PowerSpotSweepInterval: DefaultPowerSpotSweepInterval,
+		PowerConnectRadiusM:    DefaultPowerConnectRadiusM,
+		PowerDefaultBidPrice:   DefaultPowerDefaultBidPrice,
 	}
 }
 
@@ -298,6 +335,18 @@ func OptionsFromEnv() (Options, error) {
 		return Options{}, err
 	}
 	if err := readInt64(EnvDepletionHorizonSimDays, &opts.DepletionHorizonSimDays); err != nil {
+		return Options{}, err
+	}
+	if err := readInt64(EnvPowerSpotIntervalSim, &opts.PowerSpotIntervalSim); err != nil {
+		return Options{}, err
+	}
+	if err := readDuration(EnvPowerSpotSweepInterval, &opts.PowerSpotSweepInterval); err != nil {
+		return Options{}, err
+	}
+	if err := readInt64(EnvPowerConnectRadiusM, &opts.PowerConnectRadiusM); err != nil {
+		return Options{}, err
+	}
+	if err := readInt64(EnvPowerDefaultBidPrice, &opts.PowerDefaultBidPrice); err != nil {
 		return Options{}, err
 	}
 	if err := opts.Validate(); err != nil {
@@ -376,6 +425,18 @@ func (o Options) Validate() error {
 	}
 	if o.DepletionHorizonSimDays <= 0 {
 		return fmt.Errorf("balancer: %s debe ser > 0 (actual %d)", EnvDepletionHorizonSimDays, o.DepletionHorizonSimDays)
+	}
+	if o.PowerSpotIntervalSim <= 0 || o.PowerSpotIntervalSim%3600 != 0 {
+		return fmt.Errorf("balancer: %s debe ser > 0 y múltiplo de 3600 (actual %d)", EnvPowerSpotIntervalSim, o.PowerSpotIntervalSim)
+	}
+	if o.PowerSpotSweepInterval <= 0 {
+		return fmt.Errorf("balancer: %s debe ser una duración positiva (actual %s)", EnvPowerSpotSweepInterval, o.PowerSpotSweepInterval)
+	}
+	if o.PowerConnectRadiusM <= 0 {
+		return fmt.Errorf("balancer: %s debe ser > 0 (actual %d)", EnvPowerConnectRadiusM, o.PowerConnectRadiusM)
+	}
+	if o.PowerDefaultBidPrice <= 0 {
+		return fmt.Errorf("balancer: %s debe ser > 0 (actual %d)", EnvPowerDefaultBidPrice, o.PowerDefaultBidPrice)
 	}
 	return nil
 }

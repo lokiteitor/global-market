@@ -108,11 +108,14 @@ func (q *Queries) GetRegion(ctx context.Context, id uuid.UUID) (GetRegionRow, er
 
 const listBuildingTypes = `-- name: ListBuildingTypes :many
 
-SELECT id, code, name, footprint_cells, max_level, base_storage,
-       placement_rules, level_curve, build_cost, maintenance_cost
-FROM world.building_types
-WHERE ($1::uuid IS NULL OR id > $1::uuid)
-ORDER BY id
+SELECT bt.id, bt.code, bt.name, bt.footprint_cells, bt.max_level, bt.base_storage,
+       bt.placement_rules, bt.level_curve, bt.build_cost, bt.maintenance_cost,
+       ppt.capacity AS power_capacity, ppt.fuel_product_id AS power_fuel_product_id,
+       ppt.fuel_per_unit AS power_fuel_per_unit
+FROM world.building_types bt
+LEFT JOIN world.power_plant_types ppt ON ppt.building_type_id = bt.id
+WHERE ($1::uuid IS NULL OR bt.id > $1::uuid)
+ORDER BY bt.id
 LIMIT $2
 `
 
@@ -122,16 +125,19 @@ type ListBuildingTypesParams struct {
 }
 
 type ListBuildingTypesRow struct {
-	ID              uuid.UUID
-	Code            string
-	Name            string
-	FootprintCells  int32
-	MaxLevel        int32
-	BaseStorage     int64
-	PlacementRules  []byte
-	LevelCurve      []byte
-	BuildCost       int64
-	MaintenanceCost int64
+	ID                 uuid.UUID
+	Code               string
+	Name               string
+	FootprintCells     int32
+	MaxLevel           int32
+	BaseStorage        int64
+	PlacementRules     []byte
+	LevelCurve         []byte
+	BuildCost          int64
+	MaintenanceCost    int64
+	PowerCapacity      *int64
+	PowerFuelProductID *uuid.UUID
+	PowerFuelPerUnit   *int64
 }
 
 // ─── Tipos de edificio ───────────────────────────────────────────────────────
@@ -157,6 +163,9 @@ func (q *Queries) ListBuildingTypes(ctx context.Context, arg ListBuildingTypesPa
 			&i.LevelCurve,
 			&i.BuildCost,
 			&i.MaintenanceCost,
+			&i.PowerCapacity,
+			&i.PowerFuelProductID,
+			&i.PowerFuelPerUnit,
 		); err != nil {
 			return nil, err
 		}
@@ -403,7 +412,7 @@ func (q *Queries) ListRecipeIngredients(ctx context.Context, recipeIds []uuid.UU
 const listRecipes = `-- name: ListRecipes :many
 
 SELECT r.id, r.building_type_id, r.code, r.name, r.batch_sim_seconds,
-       r.fuel_product_id, r.fuel_per_batch, r.workers_required,
+       r.fuel_product_id, r.fuel_per_batch, r.power_per_hour, r.workers_required,
        r.min_city_level, r.changeover_seconds
 FROM world.recipes r
 WHERE ($1::uuid IS NULL OR r.building_type_id = $1::uuid)
@@ -430,6 +439,7 @@ type ListRecipesRow struct {
 	BatchSimSeconds   int64
 	FuelProductID     *uuid.UUID
 	FuelPerBatch      int64
+	PowerPerHour      int64
 	WorkersRequired   int32
 	MinCityLevel      int32
 	ChangeoverSeconds int64
@@ -462,6 +472,7 @@ func (q *Queries) ListRecipes(ctx context.Context, arg ListRecipesParams) ([]Lis
 			&i.BatchSimSeconds,
 			&i.FuelProductID,
 			&i.FuelPerBatch,
+			&i.PowerPerHour,
 			&i.WorkersRequired,
 			&i.MinCityLevel,
 			&i.ChangeoverSeconds,

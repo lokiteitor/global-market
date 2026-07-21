@@ -43,6 +43,11 @@ var RoutedEventTypes = []string{
 	"batch.queued", "batch.completed", "batch.paused", "batch.cancelled",
 	// concession.* → corp del titular (en el traspaso, ambas partes)
 	"concession.granted", "concession.renewed", "concession.transferred",
+	// power.curtailed → corp del dueño del edificio recortado (ADR-025); el
+	// resultado agregado del spot (power.spot_cleared) es pull por REST.
+	"power.curtailed",
+	// power_line.abandoned → corp del dueño de la línea que dejó de conducir.
+	"power_line.abandoned",
 }
 
 // Router es el consumidor outbox notification_gateway: por cada evento
@@ -262,6 +267,20 @@ func (r *Router) resolveTargets(ctx context.Context, tx pgx.Tx, ev outbox.Event)
 		}
 		return r.lookup(ctx, tx, "batch", ev.AggregateID, sqlBatchOwner)
 
+	case "power":
+		// power.curtailed: agregado = edificio recortado; el payload lleva al
+		// dueño (fallback: lookup del edificio).
+		if id, ok := parseUUID(p.OwnerAccountID); ok {
+			return []uuid.UUID{id}, nil
+		}
+		return r.lookup(ctx, tx, "building", ev.AggregateID, sqlBuildingOwner)
+
+	case "power_line":
+		if id, ok := parseUUID(p.OwnerAccountID); ok {
+			return []uuid.UUID{id}, nil
+		}
+		return r.lookup(ctx, tx, "power_line", ev.AggregateID, sqlPowerLineOwner)
+
 	case "concession":
 		var targets []uuid.UUID
 		// concession.transferred notifica a ambas partes del traspaso: el
@@ -299,6 +318,7 @@ WHERE a.id = $1`
 	sqlShipmentOwner   = `SELECT owner_account_id, contract_id FROM world.shipments WHERE id = $1`
 	sqlVehicleOwner    = `SELECT owner_account_id FROM world.vehicles WHERE id = $1`
 	sqlBuildingOwner   = `SELECT owner_account_id FROM world.buildings WHERE id = $1`
+	sqlPowerLineOwner  = `SELECT owner_account_id FROM world.power_lines WHERE id = $1`
 	sqlBatchOwner      = `
 SELECT b.owner_account_id
 FROM world.production_batches pb

@@ -2,7 +2,7 @@
 
 ## MMO de simulación económica, industrial y logística en un mundo único persistente. Decenas de miles de jugadores humanos y una población permanente de bots comparten el mismo mapa, el mismo mercado (tablón global de contratos CCRI) y las mismas reglas, sobre un servidor autoritativo.
 
-**Versión:** 1.8 · **Fecha:** 2026-07-21 · **Fuentes normativas:** GDD/SAD v1.3 (`gdd.md`), Arquitectura v1.3 (`arquitectura_imperio_industrial.md`) y contrato OpenAPI v1.3.0 (`api/openapi.yaml`), con los ADR-016 a ADR-024. Ante discrepancia, prevalece el GDD.
+**Versión:** 1.10 · **Fecha:** 2026-07-21 · **Fuentes normativas:** GDD/SAD v1.3 (`gdd.md`), Arquitectura v1.3 (`arquitectura_imperio_industrial.md`) y contrato OpenAPI v1.6.0 (`api/openapi.yaml`), con los ADR-016 a ADR-025. Ante discrepancia, prevalece el GDD.
 
 > **Cambios de v1.2 (Incremento 1 — núcleo CCRI, Fase 0):** ADR-022 (`ledger.account_kind` = `world_source`, contrapartida física de `production_output`/`consumption`); nueva tabla `public.idempotency_keys` (cabecera `Idempotency-Key` del contrato v1.2.0); migración `0008_ccri_support`; e **interpretaciones operativas del CCRI** (entrega in situ de las ventas, `origin_node_id` del aceptante en las compras, TTL de publicaciones abiertas, reparto de garantía, OHLC por región de destino) — todas en las secciones marcadas *v1.2* más abajo.
 >
@@ -17,6 +17,8 @@
 > **Cambios de v1.7 (Incremento 7 — mundo Fase 2: multi-región procedural + transporte ferroviario/marítimo):** materializa la **generación procedural del mundo** (GDD 9) y el **transporte multimodal** (GDD 7.2/7.3) sobre el esquema `world` que ya existía desde `0003_world` — **no añade tablas, enums ni migraciones** (como el Incremento 2, opera tablas ya definidas: `world.regions`/`network_*`/`link_segments`/`terminals`/`vehicle_types` con sus enums `world.biome`, `world.link_mode`, `world.shipment_status` `at_terminal`, ya completos desde `0003`). Aparece un **nuevo bounded context de composición**, `internal/worldgen` (binario `cmd/worldgen`, `make worldgen`): un generador **determinista, idempotente y ADITIVO** que **conserva intacta** la región raíz Askadia (0,0) y su seed (los ~30 paquetes de test no se rompen) y **añade** las regiones que la rodean. Documenta las **interpretaciones operativas del mundo Fase 2**: la **generación determinista** (semilla `II_WORLD_SEED`, **value-noise propio** sin dependencias → elevación/humedad → biomas; grilla de macro-regiones `II_WORLD_GRID` centrada en (0,0), regiones planas contiguas de `II_WORLD_REGION_SIZE_M`; 1-2 ciudades con su centro de distribución y caja prefondeada; 2-4 yacimientos finitos con recurso correlado al bioma; RNG por celda `(semilla, gx, gy)`, nunca `time`/entropía; una vez y persistida); la **red inter-región** (enlaces `rail` entre junctions terrestres, `sea` entre regiones costeras/oceánicas, **partidos en `link_segments` por la frontera** —un segmento por región con su `region_id`, para que cada shard simule su lado, GDD 15.1—) y las **terminales intermodales** (`owner = banco central`, en los junctions donde coinciden road y rail/sea); los **tipos de vehículo `freight_train`/`cargo_ship`** (modo `rail`/`sea`, combustible `coal`) y la **matriz coste/velocidad/volumen** (el eje de decisión modal); el **tránsito multimodal por tramos** con **transbordo explícito** en terminal (`shipment_status = at_terminal`, evento `shipment.at_terminal`, puerta de tiempo de transbordo); y los **route-plans multimodales** (Dijkstra sobre grafo expandido por modo de llegada; el **cambio de modo solo es transitable en un nodo con terminal**, sumando su tiempo de transbordo a la ETA) — todas en la sección *v1.7* más abajo. **Sin ADR nuevo, sin migración y sin cambio de diseño del GDD** (grilla 3×3 inicial y transbordo explícito por tramo son notas de implementación).
 
 > **Cambios de v1.8 (Incremento 8 — CCRI-Flete + slots de prioridad de terminal, GDD 5.3.2/7.3):** activa el **segundo tipo de contrato** (CCRI-Flete) y la **venta de slots de prioridad** en terminales, sobre el esquema ya definido en `0003_world`/`0004_ledger`. **Migración `0014_freight`** (45→46 tablas): añade la tabla `ledger.freight_deliveries` (idempotencia de la liquidación del flete por `(freight_contract_id, shipment_id)`), la columna `ledger.publications.declared_value` (valor declarado de la carga de una solicitud de flete) con su `CHECK ck_publications_freight` (un `kind=freight` exige `product_id`+`escrow_account_id`+`declared_value`+origen+destino), el índice parcial `ix_freight_due` (barrido de fletes vencidos) y **dos funciones todo-o-nada** —`ledger.confirm_freight` (escrow del cargador + garantía del transportista + **carga a custodia** en un solo asiento `custody_load`) y `ledger.settle_freight_prorata` (liquidación pro-rata `custody_release`: la custodia va al cargador donde la carga esté físicamente, el flete y la garantía se reparten por lo entregado a tiempo)—. **Reparto de responsabilidades world↔contracts:** el **Contract Service** (`internal/contracts`) reutiliza íntegra la maquinaria del tablón (ventana de sorteo, aceptación parcial, cursor) para `kind=freight`; al servir la aceptación crea el `ledger.freight_contracts`, **asienta la custody_load** (stock_free del cargador → `custody`) y emite `freight.confirmed`; el `freight_settler` (consumidor de `shipment.arrived` con `freight_contract_id`) liquida al entregar y el barrido `settle_freight` liquida el fallo por vencimiento (emitiendo `freight.expired_undelivered`). **world** (`internal/world/fleet`) NO toca cuentas del flete: el `freight_shipment_creator` consume `freight.confirmed` y materializa el cargamento del cargador en el origen descontando `building_inventories`; el despacho estándar (`POST /world/shipments/{id}/dispatch`) lo **autoriza el transportista** (lee `ledger.freight_contracts.carrier_account_id`) y mueve la carga —ya en custodia— en su vehículo; el `shipment_releaser` libera in situ también los cargamentos de flete vencidos. La mercancía en `custody` **no es vendible** por el transportista (el ledger lo impide: no está en su `stock_free`). **Slots de prioridad y cola de transbordo (GDD 7.3):** `world.terminals`/`world.terminal_slots` (ya en `0003`) se activan; `internal/worldgen` **crea** ahora, idempotentemente, 3 slots a la venta por terminal (`priority_tier` 1..N, precio creciente con la prioridad). `POST /world/terminal-slots/{slotId}/purchase` cobra `price` al dueño de la terminal (`cash→cash`, asiento `transfer`; `422 INSUFFICIENT_FUNDS`, `409 SLOT_HELD`) y fija `holder_account_id`+`valid_until_sim` (`II_SLOT_VALIDITY_SIM`, default 30 días-sim). **La segunda migración del incremento, `0015_transship_queue`, añade `world.shipments.transship_ready_at_sim`** (+índice parcial `ix_shipments_transship_pending`): al terminar un tramo, el cargamento entra en la **cola de transbordo** de la terminal; el barrido `sweepTransship` del motor de tránsito la sirve en orden de **prioridad** —dueños con un slot vigente primero, `priority_tier` ascendente; el resto FIFO por llegada— con un **servidor único** a `transshipment_per_hour`, fijando `transship_ready_at_sim` (la puerta de re-despacho). Métricas `ii_slot_purchases_total`, `ii_transshipment_priority_served_total`, `ii_transshipment_fifo_served_total`; `GET /world/terminals/{id}` y `/slots` devuelven datos reales. **Endurecimiento de la reconciliación:** `ListStockDiscrepancies` cuenta ahora la **custodia** en el lado contable (`stock_free`+`stock_reserved`+`custody`) y los **cargamentos de flete** en vuelo en el lado físico (atribuidos al almacén de la cuenta de custodia), de modo que un flete en vuelo queda cuadrado; y el job solo **escala a ERROR** una divergencia que persiste `II_RECONCILE_GRACE` pasadas consecutivas (default 2), tratando la transitoria (~250 ms entre la entrega física y su asiento) como DEBUG/esperada — en reposo sigue dando 0. Config nueva: `II_FREIGHT_GUARANTEE_BP` (1000), `II_FREIGHT_COMPENSATION_BP` (5000), `II_SLOT_VALIDITY_SIM` (2592000), `II_RECONCILE_GRACE` (2). **Sin ADR nuevo ni cambio de diseño del GDD** (el CCRI-Flete y los slots ya estaban especificados en 5.3.2/7.3; la cola de transbordo con prioridad es una nota de implementación de 7.3).
+
+> **Cambios de v1.10 (Incremento 10 — red eléctrica regional, GDD 5.8 Fase 3, ADR-025):** activa la **red eléctrica regional** cuya especificación el GDD conservó íntegra para Fase 3: **centrales construibles** (térmica de carbón e hidroeléctrica), **líneas de transmisión** propias con huella `LineString` y mantenimiento, y **mercado spot por región** con casación por **orden de mérito**, **precio de cierre uniforme** (no pay-as-bid) y **recorte rotatorio por prioridad inversa de precio** ante déficit. **Dos migraciones:** `0017_electric_grid_enums` (`-- migrate:no-transaction`, patrón `0008`: `world.batch_status` + `'paused_no_power'`, `ledger.transaction_kind` + `'power_spot'` y recreación del índice parcial `ix_batches_building` con el estado nuevo) y `0018_electric_grid` (transaccional; **46→52 tablas, 21→23 enums**: tipos `world.power_line_status`/`world.power_role`; tablas `world.power_lines`/`power_plant_types`/`power_offers`/`power_bids`/`power_spot_ticks`/`power_dispatches`; columnas `world.recipes.power_per_hour` y `world.buildings.powered_until_sim`/`powered_rate`/`last_curtailed_at_sim`). **La convivencia combustible↔electricidad es POR RECETA** (ADR-025 §1): ninguna receta existente cambia; la electricidad entra como recetas nuevas (`smelt_steel_electric`, alternativa opt-in del alto horno) y una receta puede exigir **ambos** a la vez (conjunción, nunca disyunción); la activación es **orgánica y por región**, sin flag. **La energía NO es un producto del ledger** (no es almacenable ni transportable, GDD 22): solo mueven valor el dinero (asiento multi-parte **`power_spot`**, redistribución `cash→cash` — ni faucet ni sink) y el combustible de las térmicas (`consumption` contra `world_source`, ADR-022); el plano físico del despacho vive en `power_spot_ticks`/`power_dispatches`. El **tick del spot** es del **Economy Balancer** (`PowerWorker`, GDD 18.1): bucketizado en sim-time (`II_POWER_SPOT_INTERVAL_SIM`), una tx `SERIALIZABLE` por región con `outbox.Emit` en la misma tx, idempotente por PK `(region_id, tick_sim)`; los buckets perdidos **no se recuperan**. La **conectividad** es un pool regional por radio a una línea operativa (`ST_DWithin`, `II_POWER_CONNECT_RADIUS_M`), sin flujos de potencia. Las **líneas** no requieren concesión de suelo: coste de construcción por longitud al sink y **mantenimiento por km/día-sim** cobrado por `world/enforcement` con el patrón exacto de edificios (solo lo disponible; días impagados degradan; `abandoned` = deja de conducir, terminal — **sin embargo ni subasta**). Las **centrales** son `building_types` normales **sin recetas** (su generación la gobierna el despacho); nueva regla de emplazamiento server-side **`requires_biome`** (hidro: `{"requires_biome":["coast"]}` — "ríos/agua" del GDD materializado como bioma hasta que worldgen genere ríos). Todo el detalle en el **módulo ⚡ Red Eléctrica** y la sección *v1.10* más abajo.
 
 ---
 
@@ -34,7 +36,7 @@
 - **Bases de datos auxiliares**: ninguna. Instancias separadas solo si la escala medida lo exige (GDD 17.1).
 - **Cache / Search / Otros**: **explícitamente ausentes en Fases 0–1** (se adoptan solo contra medición, ADR-008): sin Redis, sin Meilisearch, sin Kafka, sin etcd. El tablón global se sirve desde PostgreSQL con índices apropiados; TimescaleDB solo si el volumen de series lo justifica.
 
-> **Alcance**: este documento cubre el esquema lógico completo de Fases 0–2 (incluye CCRI-Flete y slots de terminales, que se activan en Fase 2). No cubre: la red eléctrica regional (Fase 3, especificación conservada en GDD 5.8), el particionado del ledger por cuenta (diseñado conceptualmente, no construido), ni los runbooks de operación.
+> **Alcance**: este documento cubre el esquema lógico completo de Fases 0–3 (incluye CCRI-Flete, slots de terminales y, desde v1.10, la **red eléctrica regional** de GDD 5.8 — módulo ⚡ más abajo, ADR-025). No cubre: el particionado del ledger por cuenta (diseñado conceptualmente, no construido), ni los runbooks de operación.
 
 ---
 
@@ -88,15 +90,15 @@ No aplica en Fases 0–1. Disparadores de adopción registrados (deben pasar por
 ## 📊 Estadísticas Generales
 
 ```
-Total de Tablas:            46   (auth 4 · world 25 · ledger 10 · analytics 4 · outbox 2 · public 1)
-Total de Enums:             21   (v1.2–v1.5 no añaden enums: world_source es un VALUE nuevo de ledger.account_kind, no un enum; los enums de flota/tránsito, de estado de edificio operational/damaged/abandoned/seized y de concesión active/delinquent/grace/reverted ya existían desde 0003_world; maintenance/canon/auction/bot_retirement ya eran VALUES de ledger.transaction_kind desde 0004_ledger)
+Total de Tablas:            52   (auth 4 · world 31 · ledger 10 · analytics 4 · outbox 2 · public 1)
+Total de Enums:             23   (v1.2–v1.5 no añaden enums: world_source es un VALUE nuevo de ledger.account_kind, no un enum; los enums de flota/tránsito, de estado de edificio operational/damaged/abandoned/seized y de concesión active/delinquent/grace/reverted ya existían desde 0003_world; maintenance/canon/auction/bot_retirement ya eran VALUES de ledger.transaction_kind desde 0004_ledger. v1.10 añade DOS tipos —world.power_line_status y world.power_role, 0018— y DOS VALUES —'paused_no_power' en world.batch_status y 'power_spot' en ledger.transaction_kind, 0017—)
 Dominios de tipo:            3   (sim_time, money_amount, stock_qty)
 Triggers de invariante:      4   (balance por cuenta, doble entrada diferida, inmutabilidad ×2)
 Funciones todo-o-nada:       2 documentadas (confirm_contract, settle_contract_prorata)
 Funciones auxiliares SQL:    1 (segment_travel_seconds, IMMUTABLE — tiempo de viaje de un segmento, v1.4/0009)
 ```
 
-*(v1.2 añade `public.idempotency_keys` a las 43 tablas de v1.1 —que a su vez había añadido `auth.account_credentials` y `world.sim_clock` a las 41 de v1.0— y el `ledger.account_kind` `world_source` (ADR-022). **v1.3 (Incremento 2) no altera ningún conteo**: opera las tablas de `world` que ya existían desde `0003_world` sin migraciones nuevas. **v1.4 (Incremento 3) no altera el conteo de tablas ni de enums**: sus dos migraciones (`0009_fleet_transit`, `0010_delivery_idempotency`) solo añaden **dos columnas** a `world.shipments` (`destination_node_id`, `deadline_sim`), **cuatro índices** (tres parciales de barrido en `0009` más el único de idempotencia de entrega en `0010`) y **una función SQL** auxiliar (`world.segment_travel_seconds`). **v1.5 (Incremento 6a) añade una tabla** —`ledger.system_liquidations` (44→45; idempotencia de la subasta pública)— y **no añade enums**: sus dos migraciones (`0011_enforcement`, `0012_system_liquidation`) suman **tres columnas de estado del barrido** (`world.buildings.maintenance_paid_until_sim`, `world.vehicles.maintenance_paid_until_sim`, `world.land_concessions.grace_until_sim`) y **seis índices** de barrido de la cascada de insolvencia. **v1.6 (Incremento 6b) no altera el conteo de tablas ni de enums**: su única migración (`0013_city_recent_supply`) añade **una columna**, `world.city_demand.recent_supply` (acumulador de la ventana de oferta reciente que alimenta la EMA de la curva de demanda; tracker interno del Balancer). **v1.7 (Incremento 7 — mundo Fase 2) no altera ningún conteo**: como el Incremento 2, opera sobre tablas de `world` que ya existían desde `0003_world` (`regions`, `network_nodes`/`network_links`/`link_segments`, `terminals`, `vehicle_types`) **sin migraciones nuevas**; el generador `internal/worldgen` **inserta filas** (regiones, ciudades, yacimientos, nodos, enlaces rail/sea con sus segmentos, terminales, tipos de vehículo tren/barco) idempotentemente por clave natural, y el modo `at_terminal` de `world.shipment_status` (ya presente desde `0003`) se activa por primera vez. **v1.8 (Incremento 8 — CCRI-Flete + slots) añade una tabla** —`ledger.freight_deliveries` (45→46; idempotencia de la liquidación del flete)— y **no añade enums** (el `account_kind` `custody`, el `publication_kind` `freight` y los `transaction_kind` `custody_load`/`custody_release` ya existían desde `0004`): tiene **dos migraciones**. `0014_freight` suma **una columna** (`ledger.publications.declared_value`), **un CHECK** (`ck_publications_freight`), **un índice** parcial (`ix_freight_due`) y **dos funciones SQL** (`ledger.confirm_freight`, `ledger.settle_freight_prorata`). `0015_transship_queue` suma **una columna** (`world.shipments.transship_ready_at_sim`) y **un índice** parcial (`ix_shipments_transship_pending`) para la cola de transbordo con prioridad. Las terminales/slots (`world.terminals`/`terminal_slots`) ya existían desde `0003` y solo se activan (worldgen crea los slots a la venta; compra + cola de transbordo con prioridad). La fuente de verdad de todos los conteos —tablas, índices, FKs, CHECKs— son las migraciones de `/backend/db/migrations`, aplicadas contra PostgreSQL 18 + PostGIS 3.6.)*
+*(v1.2 añade `public.idempotency_keys` a las 43 tablas de v1.1 —que a su vez había añadido `auth.account_credentials` y `world.sim_clock` a las 41 de v1.0— y el `ledger.account_kind` `world_source` (ADR-022). **v1.3 (Incremento 2) no altera ningún conteo**: opera las tablas de `world` que ya existían desde `0003_world` sin migraciones nuevas. **v1.4 (Incremento 3) no altera el conteo de tablas ni de enums**: sus dos migraciones (`0009_fleet_transit`, `0010_delivery_idempotency`) solo añaden **dos columnas** a `world.shipments` (`destination_node_id`, `deadline_sim`), **cuatro índices** (tres parciales de barrido en `0009` más el único de idempotencia de entrega en `0010`) y **una función SQL** auxiliar (`world.segment_travel_seconds`). **v1.5 (Incremento 6a) añade una tabla** —`ledger.system_liquidations` (44→45; idempotencia de la subasta pública)— y **no añade enums**: sus dos migraciones (`0011_enforcement`, `0012_system_liquidation`) suman **tres columnas de estado del barrido** (`world.buildings.maintenance_paid_until_sim`, `world.vehicles.maintenance_paid_until_sim`, `world.land_concessions.grace_until_sim`) y **seis índices** de barrido de la cascada de insolvencia. **v1.6 (Incremento 6b) no altera el conteo de tablas ni de enums**: su única migración (`0013_city_recent_supply`) añade **una columna**, `world.city_demand.recent_supply` (acumulador de la ventana de oferta reciente que alimenta la EMA de la curva de demanda; tracker interno del Balancer). **v1.7 (Incremento 7 — mundo Fase 2) no altera ningún conteo**: como el Incremento 2, opera sobre tablas de `world` que ya existían desde `0003_world` (`regions`, `network_nodes`/`network_links`/`link_segments`, `terminals`, `vehicle_types`) **sin migraciones nuevas**; el generador `internal/worldgen` **inserta filas** (regiones, ciudades, yacimientos, nodos, enlaces rail/sea con sus segmentos, terminales, tipos de vehículo tren/barco) idempotentemente por clave natural, y el modo `at_terminal` de `world.shipment_status` (ya presente desde `0003`) se activa por primera vez. **v1.8 (Incremento 8 — CCRI-Flete + slots) añade una tabla** —`ledger.freight_deliveries` (45→46; idempotencia de la liquidación del flete)— y **no añade enums** (el `account_kind` `custody`, el `publication_kind` `freight` y los `transaction_kind` `custody_load`/`custody_release` ya existían desde `0004`): tiene **dos migraciones**. `0014_freight` suma **una columna** (`ledger.publications.declared_value`), **un CHECK** (`ck_publications_freight`), **un índice** parcial (`ix_freight_due`) y **dos funciones SQL** (`ledger.confirm_freight`, `ledger.settle_freight_prorata`). `0015_transship_queue` suma **una columna** (`world.shipments.transship_ready_at_sim`) y **un índice** parcial (`ix_shipments_transship_pending`) para la cola de transbordo con prioridad. Las terminales/slots (`world.terminals`/`terminal_slots`) ya existían desde `0003` y solo se activan (worldgen crea los slots a la venta; compra + cola de transbordo con prioridad). **v1.9 (Incremento 9) no altera el conteo de tablas ni de enums**: su única migración (`0016_outbox_consumer_interest`) añade **una columna**, `outbox.consumer_cursors.event_types` (la suscripción declarada de cada consumidor, base de la medida real de su retraso). **v1.10 (Incremento 10 — red eléctrica regional, ADR-025) añade seis tablas** —todas de `world` (46→52; world 25→31): `power_lines`, `power_plant_types`, `power_offers`, `power_bids`, `power_spot_ticks`, `power_dispatches`— y **dos enums** —`world.power_line_status` y `world.power_role` (21→23)—: tiene **dos migraciones**. `0017_electric_grid_enums` (`-- migrate:no-transaction`, patrón `0008`) suma **dos VALUES** (`'paused_no_power'` en `world.batch_status`, `'power_spot'` en `ledger.transaction_kind`) y recrea el índice parcial `ix_batches_building` incluyendo el estado nuevo. `0018_electric_grid` (transaccional) suma, además de tipos y tablas, **cuatro columnas** (`world.recipes.power_per_hour` y `world.buildings.powered_until_sim`/`powered_rate`/`last_curtailed_at_sim`) y **cinco índices** (`ix_power_lines_owner`, `ix_power_lines_region` parcial, `ix_power_lines_path` GIST, `ix_power_lines_maintenance_due` parcial, `ix_power_dispatches_building`). La fuente de verdad de todos los conteos —tablas, índices, FKs, CHECKs— son las migraciones de `/backend/db/migrations`, aplicadas contra PostgreSQL 18 + PostGIS 3.6.)*
 
 ---
 
@@ -127,6 +129,8 @@ Orden lógico de las migraciones iniciales (en `/backend/db/migrations`):
 0014_freight → ledger.freight_deliveries + ledger.publications.declared_value + ledger.confirm_freight/settle_freight_prorata — CCRI-Flete (Incremento 8)
 0015_transship_queue → world.shipments.transship_ready_at_sim + ix_shipments_transship_pending — cola de transbordo con prioridad de slots (Incremento 8)
 0016_outbox_consumer_interest → outbox.consumer_cursors.event_types — la suscripción declarada en la fila: permite medir el RETRASO REAL de cada consumidor (Incremento 9)
+0017_electric_grid_enums → world.batch_status + 'paused_no_power', ledger.transaction_kind + 'power_spot', recreación de ix_batches_building — enums de la red eléctrica (Incremento 10, ADR-025)
+0018_electric_grid → tipos power_line_status/power_role + 6 tablas world.power_* + recipes.power_per_hour + buildings.powered_until_sim/powered_rate/last_curtailed_at_sim — red eléctrica regional (Incremento 10, ADR-025)
 ```
 
 > **Migraciones `0009_fleet_transit` y `0010_delivery_idempotency` (Incremento 3 — logística física).** `0009` añade a `world.shipments` los dos datos del **contrato de origen** que el motor de tránsito necesita para validar el despacho y confirmar la entrega **sin cruzar al bounded context `contracts`** (la frontera entre contextos es de código Go; `world` y `contracts` se integran solo por el outbox, SAD §7 / ADR-006): `destination_node_id` (el nodo al que debe llegar el cargamento; su llegada física emite `shipment.arrived`) y `deadline_sim` (informativo para el motor; la puntualidad la decide el consumidor `contracts`). Ambas son **NULLABLE** —los cargamentos de retirada in situ no se despachan y las dejan sin poblar—. Añade tres índices parciales de barrido (`ix_vehicles_in_transit`, `ix_vehicles_broken`, `ix_shipments_destination`) y la función `world.segment_travel_seconds(advance_fn jsonb)` **`IMMUTABLE`**, fuente ÚNICA en SQL de la fórmula de tiempo de viaje de un segmento (la comparten la derivación analítica de la posición y el barrido de segmentos vencidos; el código Go no la reimplementa, la consulta). `0010` añade el índice único `ux_contract_deliveries_shipment` sobre `ledger.contract_deliveries(shipment_id)` que habilita el `INSERT … ON CONFLICT (shipment_id) DO NOTHING` del consumidor `delivery_confirmer`: reprocesar el mismo `shipment.arrived` (reintento del lote, redespliegue) no duplica la partida ni la cantidad entregada. Ambos `down` son reversibles (drop de columnas/índices/función); el detalle operativo está en la sección *v1.4* más abajo.
@@ -398,6 +402,7 @@ CREATE TABLE world.recipes (
     batch_sim_seconds  sim_time NOT NULL CHECK (batch_sim_seconds > 0),
     fuel_product_id    uuid REFERENCES world.products(id),
     fuel_per_batch     stock_qty NOT NULL DEFAULT 0 CHECK (fuel_per_batch >= 0),
+    power_per_hour     stock_qty NOT NULL DEFAULT 0 CHECK (power_per_hour >= 0),  -- v1.10 (0018): consumo eléctrico (unidades/hora-sim mientras el lote está activo; ADR-025)
     workers_required   INT NOT NULL DEFAULT 0 CHECK (workers_required >= 0),
     min_city_level     INT NOT NULL DEFAULT 1,
     changeover_seconds sim_time NOT NULL DEFAULT 0,
@@ -416,7 +421,8 @@ CREATE TABLE world.recipe_ingredients (
 
 #### Reglas de Negocio
 
-- **Energía = combustible físico in situ** (GDD 5.8, decisión #29): `fuel_product_id`/`fuel_per_batch` referencian un bien de mercado que llega por logística; no hay red eléctrica en v1.
+- **Energía = combustible físico in situ** (GDD 5.8, decisión #29): `fuel_product_id`/`fuel_per_batch` referencian un bien de mercado que llega por logística; no hay red eléctrica en v1 (llega en v1.10 como opt-in por receta — ver bullet siguiente).
+- **Convivencia combustible↔electricidad: POR RECETA (v1.10, ADR-025 §1).** `power_per_hour > 0` hace la receta **eléctrica**: consume esas unidades de energía del pool regional por **hora-sim** mientras su lote está activo (el "consumo por ciclo" de GDD 6.2 es `power_per_hour × duración del lote`). **Ninguna receta existente cambia**: la electricidad entra como recetas **nuevas** (p. ej. `smelt_steel_electric`) y el jugador se electrifica eligiendo la receta activa de su edificio. Una receta puede exigir **combustible Y electricidad a la vez** (conjunción: ambos necesarios), nunca disyunción — detalle en la sección *v1.10* más abajo.
 - `min_city_level`: la cualificación laboral de recetas avanzadas se liga al nivel de la ciudad cercana (GDD 5.7).
 - `maintenance_cost` es un sink monetario por día de sim-time; su impago inicia el ciclo de degradación (GDD 11.2).
 
@@ -617,6 +623,9 @@ CREATE TABLE world.buildings (
     condition_pct     INT NOT NULL DEFAULT 100 CHECK (condition_pct BETWEEN 0 AND 100),
     fuel_stock        stock_qty NOT NULL DEFAULT 0 CHECK (fuel_stock >= 0),
     maintenance_paid_until_sim sim_time NOT NULL DEFAULT 0,  -- v1.5 (0011): obligaciones de mantenimiento liquidadas hasta
+    powered_until_sim sim_time NOT NULL DEFAULT 0,           -- v1.10 (0018): suministro eléctrico cubierto hasta (lo escribe el tick del spot: al servir, tick + intervalo × 1,5; al no servir, lo CIERRA)
+    powered_rate stock_qty NOT NULL DEFAULT 0 CHECK (powered_rate >= 0), -- v1.10 (0018): power_per_hour FACTURADO por el tick que otorgó la cobertura
+    last_curtailed_at_sim sim_time NOT NULL DEFAULT 0,       -- v1.10 (0018): marcador de rotación del recorte (entre pujas iguales cae primero el recortado menos reciente)
     created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at_sim    sim_time NOT NULL DEFAULT 0
 );
@@ -649,6 +658,7 @@ CREATE INDEX ix_buildings_concession     ON world.buildings (concession_id);
 - `fuel_stock`: almacén de combustible local (GDD 5.8); sin combustible la producción pausa. **En v1.3 es una columna espejo** del inventario físico (`building_inventories`) del producto combustible: el combustible se consume del propio inventario del edificio, no de un depósito aparte (ver *v1.3*).
 - El alta crea el edificio `under_construction` y su `network_node` (mina→`mine`, resto→`factory`) en el centroide del `footprint`; el coste se asienta al crear (sink `maintenance`). La transición `under_construction → operational` la ejecuta el motor tras un **tiempo fijo** `II_BUILD_SIM_SECONDS` (simplificación consciente — ver *v1.3*).
 - **Rama mantenimiento de la cascada (v1.5):** `maintenance_paid_until_sim` es el marcador "obligaciones de mantenimiento liquidadas hasta". El barrido de mantenimiento (`world/enforcement`, proceso *engine*) cobra `building_types.maintenance_cost × días-sim vencidos` como sink `maintenance` **cobrando solo lo disponible** (el saldo jamás baja de 0); si cubre todo, avanza el marcador y **recupera** condición (+2/día-sim, `damaged`→`operational` al llegar a 100); si no, cobra los días que pueda y **degrada** los impagados (`damaged`; `abandoned` al cruzar el umbral). Cada día vencido se salda **exactamente una vez** (en efectivo o por degradación): el marcador avanza por todos los días vencidos, nunca hay deuda ni doble degradación. Máquina de estados y asientos exactos en la sección *v1.5* más abajo.
+- **Red eléctrica (v1.10, ADR-025):** `powered_until_sim` es la cobertura del suministro que escribe el **tick del spot** — al servir, `tick + intervalo × 1,5` (la media gracia absorbe el desfase wall-clock entre buckets) junto con `powered_rate` = el `power_per_hour` **facturado**; al **no servir**, la **cierra** (`= tick`, tasa 0) — y el motor de producción exige **ambas** (`powered_until_sim > simNow` y `power_per_hour <= powered_rate`) para cerrar un lote de receta eléctrica; `last_curtailed_at_sim` sella el **recorte por déficit** (no la insolvencia) y materializa la rotación del castigo entre pujas iguales. Detalle en la sección *v1.10* más abajo.
 - La autorización es por propiedad: una corporación solo comanda sus edificios (403 en caso contrario).
 
 ### 16. `world.building_inventories`
@@ -672,8 +682,11 @@ CREATE INDEX ix_building_inventories_product ON world.building_inventories (prod
 **Descripción**: cola de producción por edificio. El progreso es **analítico, no por tick** (ADR-001): se persiste `(recipe, started_at_sim)` y el avance se deriva bajo demanda; solo el hito de fin de lote genera evento y escritura. Un edificio ocioso no consume CPU.
 
 ```sql
+-- El VALUE 'paused_no_power' se añade en 0017_electric_grid_enums (v1.10, ADR-025):
+-- sin suministro eléctrico — recorte del spot, insolvencia o desconexión (2º
+-- escalón de GDD 5.9); 0003 crea el resto.
 CREATE TYPE world.batch_status AS ENUM
-    ('queued','running','paused_no_fuel','paused_no_workers','completed','cancelled');
+    ('queued','running','paused_no_fuel','paused_no_workers','completed','cancelled','paused_no_power');
 
 CREATE TABLE world.production_batches (
     id               uuid PRIMARY KEY DEFAULT uuidv7(),
@@ -690,8 +703,10 @@ CREATE TABLE world.production_batches (
     CHECK (status <> 'running' OR started_at_sim IS NOT NULL)
 );
 
+-- v1.10 (0017): recreado incluyendo 'paused_no_power' (el barrido de producción
+-- también visita los lotes pausados por falta de suministro eléctrico)
 CREATE INDEX ix_batches_building ON world.production_batches (building_id, queue_position)
-    WHERE status IN ('queued','running','paused_no_fuel','paused_no_workers');
+    WHERE status IN ('queued', 'running', 'paused_no_fuel', 'paused_no_workers', 'paused_no_power');
 ```
 
 #### Reglas de Negocio
@@ -699,6 +714,7 @@ CREATE INDEX ix_batches_building ON world.production_batches (building_id, queue
 - Al completarse un lote, el motor asienta `production_output` en el ledger (alta de stock) y descuenta insumos y combustible con `consumption` — el plano físico (`building_inventories`, `resource_deposits`) y el contable se mueven **juntos en la misma tx** por eventos. La contrapartida de ambos asientos es la cuenta `world_source` del producto (ADR-022, v1.2).
 - El **progreso del lote en curso** (`progress_pct`, `eta_sim` del contrato) es **analítico y NO se persiste**: se deriva de `(started_at_sim, duración efectiva del nivel, simNow)` en el momento de la consulta (ADR-001). Solo `started_at_sim`, `batches_done` y `status` viven en la fila.
 - `paused_no_fuel` / `paused_no_workers` materializan la cascada de insolvencia (GDD 5.9): la producción pausa, nunca genera deuda. La falta de insumos/yacimiento o el almacén lleno **no cambian el enum** (el lote permanece `running` y se reintenta) — ver *v1.3*.
+- **`paused_no_power` (v1.10, GDD 5.9 2º escalón, ADR-025):** pausa quien detecta la falta de suministro — el **tick del spot** (Balancer) pausa los lotes en marcha de los consumidores **no servidos** (recorte o insolvencia), y el **motor de producción** pausa al vencer un lote de receta eléctrica **sin cobertura** (`powered_until_sim ≤ simNow`). Reanuda el **tick al servir** al edificio, o el `tryResume` del motor si la receta dejó de ser eléctrica o la cobertura sigue vigente; **al reanudar, el reloj del lote se reinicia** (vuelve a `running` arrancando de nuevo). Detalle en la sección *v1.10* más abajo.
 - La operación completa del motor (barrido, sinks, extracción, reconciliación, combustible) se detalla en la sección **v1.3** más abajo.
 
 ---
@@ -805,6 +821,179 @@ CREATE TABLE world.terminal_slots (
 );
 CREATE INDEX ix_terminal_slots_terminal ON world.terminal_slots (terminal_id);
 ```
+
+---
+
+## ⚡ Módulo Red Eléctrica (esquema `world`)
+
+**v1.10 (Incremento 10 — migraciones `0017_electric_grid_enums`/`0018_electric_grid`, ADR-025; GDD 5.8 Fase 3).** La red eléctrica regional: líneas de transmisión, parámetros de generación de las centrales, ofertas/pujas del mercado spot y el plano físico de su despacho. Principio rector: **la energía NO es un producto del ledger** — no es almacenable ni transportable (sin baterías, GDD 22); solo mueven valor el **dinero** (asiento `power_spot`, enum en `0017`) y el **combustible de las térmicas** (`consumption` contra `world_source`, ADR-022). El plano físico del despacho vive en estas tablas. Los activos físicos (líneas, ofertas, pujas, endpoints) son de `internal/world/power`; el mantenimiento de líneas, de `internal/world/enforcement`; el **tick del spot**, del **Economy Balancer** (`internal/balancer`, `PowerWorker` — GDD 18.1). Las tablas de este módulo van **sin número** (precedente de `ledger.freight_deliveries` en v1.8: no se renumeran las existentes); su operación completa está en la sección *v1.10* más abajo.
+
+### Tipos: `world.power_line_status` y `world.power_role`
+
+```sql
+-- operational: conduce (participa del pool regional).
+-- abandoned:   degradada por impago sostenido de mantenimiento; deja de
+--              conducir y es terminal (sin embargo ni subasta: la fila se
+--              conserva por auditoría — ADR-025 §4).
+CREATE TYPE world.power_line_status AS ENUM ('operational', 'abandoned');
+
+-- Rol de un edificio en un tick del spot (una central nunca es consumidora:
+-- los tipos de central no tienen recetas).
+CREATE TYPE world.power_role AS ENUM ('generator', 'consumer');
+```
+
+### `world.power_lines`
+
+**Descripción**: líneas de transmisión — infraestructura lineal **propia** (con dueño) que materializa el pool eléctrico de su región. El trazado (`path`, SRID 0 en metros, ADR-019) debe caer **íntegro** dentro de los `bounds` de su región (sin interconexiones interregionales: expansión futura, GDD 22); la validación es **server-side en el alta**, no un CHECK espacial.
+
+```sql
+-- Líneas de transmisión: infraestructura lineal PROPIA sin concesión de suelo
+-- (una línea cruza muchas parcelas, como las carreteras; el papel
+-- anti-acaparamiento del canon lo cumple su mantenimiento por longitud —
+-- ADR-025 §4). El trazado debe caer íntegro dentro de los bounds de su región
+-- (sin interconexiones interregionales: expansión futura, GDD 22); la
+-- validación es server-side en el alta, no un CHECK espacial.
+CREATE TABLE world.power_lines (
+    id                          uuid PRIMARY KEY DEFAULT uuidv7(),
+    owner_account_id            uuid NOT NULL REFERENCES auth.accounts(id),
+    region_id                   uuid NOT NULL REFERENCES world.regions(id),
+    path                        geometry(LineString, 0) NOT NULL,  -- SRID 0, metros (ADR-019)
+    length_m                    INT NOT NULL CHECK (length_m > 0),
+    status                      world.power_line_status NOT NULL DEFAULT 'operational',
+    condition_pct               INT NOT NULL DEFAULT 100 CHECK (condition_pct BETWEEN 0 AND 100),
+    maintenance_paid_until_sim  sim_time NOT NULL DEFAULT 0,
+    created_at                  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at_sim              sim_time NOT NULL DEFAULT 0
+);
+
+CREATE INDEX ix_power_lines_owner ON world.power_lines (owner_account_id);
+-- El pool regional: el tick del spot y la conectividad (ST_DWithin) solo miran
+-- líneas operativas de la región.
+CREATE INDEX ix_power_lines_region
+    ON world.power_lines (region_id) WHERE status = 'operational';
+CREATE INDEX ix_power_lines_path ON world.power_lines USING GIST (path);
+-- Barrido de mantenimiento (world/enforcement), patrón de 0011.
+CREATE INDEX ix_power_lines_maintenance_due
+    ON world.power_lines (maintenance_paid_until_sim) WHERE status = 'operational';
+```
+
+#### Reglas de Negocio
+
+- **Sin concesión de suelo** (ADR-025 §4): una línea cruza muchas parcelas y suelo público, como las carreteras (infraestructura sin concesión desde v1.3). El papel anti-acaparamiento del canon lo cumple aquí el **mantenimiento por longitud**.
+- **Alta** (`POST /world/power-lines`, `world/power`, tx SERIALIZABLE): valida la forma GeoJSON (`LineString` ≥ 2 vértices), resuelve la **única región** que contiene el trazado íntegro (422 `PLACEMENT_INVALID` `line_within_region` si ninguna), calcula `length_m` y cobra el **coste por longitud** (`length_m × II_POWER_LINE_COST_PER_KM / 1000`, redondeo hacia arriba) como **sink** (asiento `maintenance`, como el `build_cost` de un edificio; `422 INSUFFICIENT_FUNDS` si la caja no cubre); emite `power_line.created` en la misma tx.
+- **Mantenimiento por km/día-sim** (`II_POWER_LINE_MAINT_PER_KM_DAY`, barrido de `world/enforcement` — patrón **exacto** de edificios de v1.5): cobra **solo lo disponible**, cada día vencido se salda **exactamente una vez**, los días impagados degradan `condition_pct` (`−II_DEGRADE_PCT_PER_SIM_DAY`/día); al caer a `≤ II_ABANDON_CONDITION_PCT` la línea pasa a **`abandoned`: deja de conducir** (desconecta a quien dependía de ella) y es **terminal** — **sin embargo ni subasta** (el valor de una línea es su trazado; su fila se conserva por auditoría). Emite `power_line.abandoned`.
+- El "área de servicio" de la línea es el **radio de conexión** del pool (`II_POWER_CONNECT_RADIUS_M`, ver *v1.10*): un edificio participa en el mercado de su región si está a ≤ ese radio de **alguna línea operativa** de la región.
+
+### `world.power_plant_types`
+
+**Descripción**: parámetros de generación por tipo de edificio. Las centrales son `world.building_types` **normales** (concesión, huella, `build_cost`/`maintenance_cost`, cascada de insolvencia estándar) y **NO tienen recetas**: su generación la gobierna el despacho del mercado spot.
+
+```sql
+-- Parámetros de generación por tipo de edificio. Las centrales son
+-- building_types normales (concesión, huella, build/maintenance_cost, cascada
+-- de insolvencia estándar) y NO tienen recetas: su generación la gobierna el
+-- despacho del mercado spot.
+CREATE TABLE world.power_plant_types (
+    building_type_id  uuid PRIMARY KEY REFERENCES world.building_types(id),
+    -- Unidades de energía por hora-sim a nivel 1; el nivel multiplica por
+    -- level_curve.capacity_mult (default = nivel).
+    capacity          stock_qty NOT NULL CHECK (capacity > 0),
+    -- Térmicas: combustible físico consumido por unidad de energía despachada
+    -- (consumption contra world_source, ADR-022). Hidro: NULL/0.
+    fuel_product_id   uuid REFERENCES world.products(id),
+    fuel_per_unit     stock_qty NOT NULL DEFAULT 0 CHECK (fuel_per_unit >= 0),
+    CHECK ((fuel_product_id IS NULL) = (fuel_per_unit = 0))
+);
+```
+
+#### Reglas de Negocio
+
+- La fila convierte un `building_type` en **central**: `capacity` es su generación a nivel 1 en unidades de energía por hora-sim; el nivel multiplica por `level_curve.capacity_mult` (default = el propio nivel, coherente con `speed`/`storage` de v1.3).
+- **Térmicas** (`fuel_product_id`/`fuel_per_unit` > 0): la capacidad ofertable de cada tick se limita por el combustible de su **almacén local** — `min(capacidad de nivel, min(físico, stock_free)/fuel_per_unit)` (el mismo criterio de dos planos que `consumable` en producción). **Sin combustible no despachan** (GDD 5.8 literal). **Hidroeléctricas**: `NULL`/0 — coste marginal ~0, su oferta barata abre el orden de mérito; emplazamiento restringido por la regla `requires_biome` (ver *v1.10*).
+- El CHECK exige coherencia: o hay producto de combustible y consumo por unidad, o ninguno.
+
+### `world.power_offers` y `world.power_bids`
+
+**Descripción**: los dos lados del mercado spot. `power_offers` — precio de oferta por unidad de energía de cada **central** (lo fija su dueño); `power_bids` — **puja máxima** por unidad de cada edificio **consumidor** (materializa la "prioridad inversa de precio" del recorte, GDD 5.8, y el techo personal).
+
+```sql
+-- Oferta del generador: precio por unidad de energía fijado por el dueño de
+-- la central. Sin fila, la central NO participa (ofertar es una decisión del
+-- jugador, como publicar en el tablón).
+CREATE TABLE world.power_offers (
+    building_id     uuid PRIMARY KEY REFERENCES world.buildings(id),
+    unit_price      money_amount NOT NULL CHECK (unit_price > 0),
+    updated_at_sim  sim_time NOT NULL DEFAULT 0
+);
+
+-- Puja máxima del consumidor: materializa la "prioridad inversa de precio"
+-- del recorte (GDD 5.8) — menor puja = primero en recortarse — y el techo
+-- personal (el precio de cierre nunca supera la puja de un servido). Sin fila
+-- rige II_POWER_DEFAULT_BID_PRICE.
+CREATE TABLE world.power_bids (
+    building_id     uuid PRIMARY KEY REFERENCES world.buildings(id),
+    unit_price      money_amount NOT NULL CHECK (unit_price > 0),
+    updated_at_sim  sim_time NOT NULL DEFAULT 0
+);
+```
+
+#### Reglas de Negocio
+
+- **Sin oferta, la central no participa**: ofertar es una decisión del jugador, como publicar en el tablón (upsert por el dueño vía API; 422 si el edificio no es una central).
+- **Sin puja rige el default** `II_POWER_DEFAULT_BID_PRICE`: la puja es (a) el **orden de prioridad del recorte** (menor puja = primero en recortarse) y (b) el **techo personal** — el precio de cierre nunca supera la puja de un servido. El **pago efectivo** de todos los servidos es el **precio de cierre uniforme** (upsert por el dueño vía API; 422 si el edificio es una central: una central nunca consume).
+- Autorización por propiedad en ambas (403 en caso contrario), como el resto de comandos de `world`.
+
+### `world.power_spot_ticks` y `world.power_dispatches`
+
+**Descripción**: el **plano físico** del resultado de cada tick del spot — el valor va en el asiento `power_spot` del ledger. `power_spot_ticks` es el agregado por (región, tick); `power_dispatches`, el detalle por participante ("mi consumo/despacho" del contrato y auditoría física del asiento).
+
+```sql
+-- Resultado agregado de cada tick del spot por región (plano físico; el valor
+-- va en el asiento power_spot). Idempotencia del tick: PK (region_id,
+-- tick_sim); los buckets perdidos NO se recuperan (la energía no es
+-- almacenable: un tick perdido es energía no comerciada, sin efecto contable).
+CREATE TABLE world.power_spot_ticks (
+    region_id           uuid NOT NULL REFERENCES world.regions(id),
+    tick_sim            sim_time NOT NULL,  -- bucket: floor(simNow/intervalo)×intervalo
+    interval_sim        sim_time NOT NULL CHECK (interval_sim > 0),
+    closing_price       money_amount NOT NULL CHECK (closing_price >= 0),  -- 0 si no hubo despacho
+    demand_units        stock_qty NOT NULL CHECK (demand_units >= 0),
+    supplied_units      stock_qty NOT NULL CHECK (supplied_units >= 0),
+    curtailed_units     stock_qty NOT NULL CHECK (curtailed_units >= 0),
+    curtailed_buildings INT NOT NULL DEFAULT 0 CHECK (curtailed_buildings >= 0),
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (region_id, tick_sim)
+);
+
+-- Despacho/consumo por participante y tick ("mi consumo" del contrato y
+-- auditoría física del asiento power_spot; unit_price = precio de cierre).
+CREATE TABLE world.power_dispatches (
+    region_id         uuid NOT NULL REFERENCES world.regions(id),
+    tick_sim          sim_time NOT NULL,
+    building_id       uuid NOT NULL REFERENCES world.buildings(id),
+    owner_account_id  uuid NOT NULL REFERENCES auth.accounts(id),
+    role              world.power_role NOT NULL,
+    units             stock_qty NOT NULL CHECK (units > 0),
+    unit_price        money_amount NOT NULL CHECK (unit_price > 0),
+    amount            money_amount NOT NULL CHECK (amount > 0),  -- units × unit_price
+    PRIMARY KEY (region_id, tick_sim, building_id)
+);
+
+CREATE INDEX ix_power_dispatches_building
+    ON world.power_dispatches (building_id, tick_sim DESC);
+```
+
+#### Reglas de Negocio
+
+- **Idempotencia del tick por PK** `(region_id, tick_sim)`: el `PowerWorker` comprueba `ExistsPowerSpotTick` dentro de su tx SERIALIZABLE y el `INSERT` final es la defensa última contra la doble liquidación de un bucket (otra instancia que llegó antes).
+- **Los buckets perdidos NO se recuperan**: la energía no es almacenable — un tick perdido (caída del engine) es energía no comerciada, **sin efecto contable** (pérdida de gameplay momentánea, nunca contable — ADR-025).
+- `closing_price = 0` significa **tick sin despacho** (sin oferta, sin demanda casada o sin red que los conecte); `unit_price` de cada despacho es siempre el **precio de cierre uniforme** del tick.
+- En `power_dispatches`, `role = 'consumer'` registra energía **servida** (su `amount` es lo debitado de la caja del dueño) y `role = 'generator'` energía **despachada** (su `amount`, lo acreditado); por construcción Σ consumer = Σ generator por tick — la contrapartida exacta del asiento `power_spot`.
+- Lecturas del contrato: histórico del spot por región (público) y despachos/consumos de un edificio **propio** (`world/power`).
+
+---
+
+## 🚚 Módulo Red Logística (esquema `world`) — continuación
 
 ### 23. `world.vehicle_types`, 24. `world.routes`, 25. `world.route_legs`
 
@@ -1111,6 +1300,8 @@ La doble entrada exige que cada asiento **sume cero por activo** (dinero, o cada
 **Descripción**: cabecera y partidas de los asientos de doble entrada. **Append-only**: nunca se editan ni borran; toda corrección es un asiento nuevo (`reconciliation`).
 
 ```sql
+-- El VALUE 'power_spot' se añade en 0017_electric_grid_enums (v1.10, ADR-025):
+-- asiento multi-parte del mercado spot eléctrico regional; 0004 crea el resto.
 CREATE TYPE ledger.transaction_kind AS ENUM (
     'seed_capital','bot_capitalization','bot_retirement',
     'publication_lock','publication_release','acceptance_lock',
@@ -1118,7 +1309,8 @@ CREATE TYPE ledger.transaction_kind AS ENUM (
     'custody_load','custody_release',
     'production_output','consumption',
     'wage','maintenance','tax','canon',
-    'transfer','auction','reconciliation'
+    'transfer','auction','reconciliation',
+    'power_spot'  -- v1.10 (0017)
 );
 
 CREATE TABLE ledger.transactions (
@@ -1186,6 +1378,7 @@ CREATE TRIGGER trg_transactions_immutable
 - `transaction_kind` clasifica faucets (`seed_capital`, `bot_capitalization`) y sinks (`tax`, `canon`, `maintenance`, sanciones de liquidación) — la política monetaria y la densidad de bots comparten libro (ADR-010).
 - `production_output`/`consumption` son los movimientos de **stock** contra la cuenta `world_source` (ADR-022, v1.2): faucet y sink físicos del inventario, análogos a `emission`/absorción para el dinero.
 - **Asientos de la cascada de insolvencia (v1.5):** `maintenance` (mantenimiento de edificios y opex de flota) y `canon` (renovación de concesiones) son los **sinks periódicos** que cobra el motor `world/enforcement` cobrando **solo lo disponible**; `auction` mueve el stock libre embargado al banco central (doble entrada por producto) y emite el colateral de garantía de la subasta; `bot_retirement` es la **absorción** de la caja del bot retirado (`cash → emission`, inverso de `bot_capitalization`). Ninguno deja una caja en negativo (el trigger de no-negatividad lo garantiza). Detalle en la sección *v1.5* más abajo.
+- **Asiento `power_spot` (v1.10, ADR-025 §6):** asiento **multi-parte** del mercado spot eléctrico, **uno por (región, tick)**: N cajas de consumidores servidos al débito y M cajas de generadores despachados al crédito, **todas al precio de cierre uniforme**; balancea por construcción (Σ energía servida = Σ despacho). Es una **redistribución `cash→cash`** — ni faucet ni sink: no altera la masa monetaria. El combustible de las térmicas va aparte como `consumption` contra `world_source` (ADR-022), un asiento por central despachada. Detalle en la sección *v1.10* más abajo.
 
 ### 33. `ledger.publications`
 
@@ -1597,7 +1790,7 @@ Un job del engine (`II_RECONCILE_INTERVAL`, default 300 s wall) compara `Σ stoc
 
 ### Métricas Prometheus del motor
 
-`ii_buildings_constructed_total`, `ii_production_batches_completed_total`, `ii_production_paused_total{reason}` (`no_fuel`/`no_workers`/`no_inputs`/`no_deposit`), `ii_production_storage_full_total`, `ii_production_output_total{product}`, `ii_resource_extracted_total{product}`, `ii_production_sweep_duration_seconds{sweep}` (histograma: `construction`/`production`/`reconcile`) y el gauge `ii_reconciliation_discrepancies`.
+`ii_buildings_constructed_total`, `ii_production_batches_completed_total`, `ii_production_paused_total{reason}` (`no_fuel`/`no_workers`/`no_inputs`/`no_deposit`; v1.10 añade `no_power`), `ii_production_storage_full_total`, `ii_production_output_total{product}`, `ii_resource_extracted_total{product}`, `ii_production_sweep_duration_seconds{sweep}` (histograma: `construction`/`production`/`reconcile`) y el gauge `ii_reconciliation_discrepancies`.
 
 ### Parámetros de configuración del incremento
 
@@ -1619,7 +1812,7 @@ Emitidos por `internal/world` en la **misma tx** que el cambio de estado (dinero
 | `concession.granted` / `concession.renewed` / `concession.transferred` | `concession` | Alta (cobra el canon inicial), renovación (cobra el canon vigente) y traspaso (precio + `system_fee`) |
 | `building.created` / `building.updated` / `building.upgraded` | `building` | Alta (asienta `build_cost`), cambio de receta o inicio de mantenimiento, y mejora de nivel |
 | `building.constructed` | `building` | El motor completa la construcción diferida (tras `II_BUILD_SIM_SECONDS`) |
-| `batch.queued` / `batch.completed` / `batch.paused` / `batch.cancelled` | `production_batch` | Encolado, cierre de un batch (`running` si quedan, `completed` si fue el último), pausa (`reason` = `no_fuel`/`no_workers`) y cancelación |
+| `batch.queued` / `batch.completed` / `batch.paused` / `batch.cancelled` | `production_batch` | Encolado, cierre de un batch (`running` si quedan, `completed` si fue el último), pausa (`reason` = `no_fuel`/`no_workers`; v1.10 añade `no_power`) y cancelación |
 
 ---
 
@@ -2149,6 +2342,83 @@ El canal `private` (negociación directa 1:1) **no es nuevo**: existe desde el I
 
 ---
 
+## ⚡ Interpretaciones operativas v1.10 (red eléctrica regional — GDD 5.8 Fase 3, ADR-025)
+
+Decisiones de diseño **vinculantes** con las que el Incremento 10 activa la red eléctrica cuya especificación el GDD conservó **íntegra** para Fase 3 (centrales, líneas con huella y mantenimiento, mercado spot regional por orden de mérito con precio de cierre uniforme y recorte rotatorio por prioridad inversa de precio). El **ADR-025** cierra los tres huecos que la especificación dejaba a la implementación: (a) la **convivencia** con el combustible in situ, (b) qué significa "los que menos pagan" en el recorte con precio uniforme, y (c) qué significa "conectado" sin flujos de potencia. Quedan explícitamente fuera (GDD 22): flujos de potencia realistas, pérdidas por distancia, almacenamiento e interconexiones interregionales. Fronteras de módulo: activos físicos y endpoints en `internal/world/power`; mantenimiento de líneas en `internal/world/enforcement`; el **tick del spot** en `internal/balancer` (`PowerWorker` — GDD 18.1 lo asigna al Economy Balancer, que escribe cross-schema con queries sqlc propias: "la frontera es de código Go, no de esquema"); la guarda `powered_until_sim` y las reanudaciones en `internal/world/production`. Sin imports cruzados nuevos; la integración inversa va por outbox.
+
+### Convivencia por receta (ADR-025 §1)
+
+La fuente de energía es un atributo de la **RECETA**, y la electrificación es **aditiva y opcional**: `world.recipes.power_per_hour` (default 0) declara el consumo eléctrico en unidades por hora-sim mientras el lote está activo (análogo eléctrico de `fuel_per_batch` expresado como potencia). **Ninguna receta existente cambia** — todas siguen quemando combustible in situ exactamente como hoy; la electricidad entra al catálogo como recetas **nuevas** (`smelt_steel_electric`, sembrada como **alternativa del alto horno** sin combustible) y un jugador se electrifica **eligiendo la receta activa** de su edificio. Ambos modelos conviven indefinidamente; una receta puede declarar **combustible Y electricidad a la vez** (conjunción: ambos necesarios), nunca disyunción (la fuente dual conmutable es expansión futura). **La activación es orgánica y por región, sin flag**: el mercado spot de una región existe en cuanto hay líneas operativas en ella y la demanda existe donde hay recetas eléctricas activas; una región sin red simplemente no despacha y sus lotes eléctricos pausan (`paused_no_power`), igual que un lote sin carbón pausa hoy.
+
+### El tick del spot (`PowerWorker` del Balancer, GDD 18.1)
+
+- **Bucketizado en sim-time:** un bucle wall-clock (`II_POWER_SPOT_SWEEP_INTERVAL`) procesa cada **región con líneas operativas** cuyo bucket venció: `tick_sim = floor(simNow / II_POWER_SPOT_INTERVAL_SIM) × intervalo` (default 3600 sim = 1 hora-sim; el intervalo es **múltiplo de 3600** para que la energía por tick — `power_per_hour × horas del intervalo` — sea entera exacta).
+- **Cada región en UNA tx `SERIALIZABLE`** con `outbox.Emit` **en la misma tx**; métricas y log solo tras el commit (un reintento de serialización re-ejecuta el cuerpo). **Guarda de idempotencia doble**: `ExistsPowerSpotTick` dentro de la tx + la PK `(region_id, tick_sim)` de `world.power_spot_ticks`.
+- **Los buckets perdidos NO se recuperan** (solo se liquida el bucket vigente): la energía no es almacenable — un tick perdido es energía no comerciada, **sin efecto contable**.
+- **Casación pura** (`clearSpotMarket`, sin acceso a BD, testeable en aislamiento): oferta por **orden de mérito** (precio asc); demanda por **puja desc** con **rotación** como desempate (`last_curtailed_at_sim`: entre pujas iguales se sirve primero al recortado **más** reciente — es decir, **el recortado menos reciente cae primero**, GDD 5.8 "el recorte rota para no castigar siempre a los mismos"). Los consumidores son **todo-o-nada** (un edificio a medias no produce; la pasada continúa tras un no-servido: un bloque pequeño posterior puede caber donde uno grande no cupo) y los **generadores divisibles** (el marginal despacha parcial). **Precio de cierre = oferta del generador marginal despachado** (el bloque que sirve la última unidad); lo pagan todos los servidos y lo cobran todos los despachados (**uniforme, no pay-as-bid** — regla explícita del GDD); por construcción cierre ≤ puja de todo servido.
+- **Insolvencia sin deuda (GDD 5.9):** el presupuesto se acumula **por corporación** dentro del tick y la exclusión es **conservadora** — un consumidor cuya caja no cubre su pago máximo posible (`puja × energía`) queda fuera de la demanda: sin compra, sin deuda, lote en `paused_no_power` (`reason = insolvent`). La rotación **solo sella el recorte por déficit** (`reason = curtailed`): un insolvente no compite y no debe acumular prioridad para cuando vuelva a pujar.
+- La demanda de un edificio la gobierna **un lote activo por edificio** (`power_per_hour` de su receta × horas del intervalo); su puja es la explícita de `world.power_bids` o el default `II_POWER_DEFAULT_BID_PRICE`.
+
+### Conectividad (pool regional)
+
+"Conectado" **sin flujos de potencia**: un edificio (generador o consumidor) participa en el mercado de su región si el **centroide de su `footprint`** está a ≤ `II_POWER_CONNECT_RADIUS_M` (`ST_DWithin`, SRID 0 en metros) de **alguna línea de transmisión operativa de esa región**. El pool es único por región **porque el mercado spot es por región** (GDD 5.8); el análisis de componentes conexas sería una fidelidad física que la propia especificación excluye. Una línea `abandoned` no cuenta (deja de conducir: desconecta a quien dependía de ella); las interconexiones interregionales siguen fuera (el trazado cae íntegro dentro de los `bounds` de su región).
+
+### Térmicas
+
+La capacidad ofertable de cada tick es `capacity × capacity_mult(nivel)` (de `level_curve`, default = nivel) **limitada por el combustible del almacén local**: `min(capacidad de nivel, min(físico, stock_free) / fuel_per_unit)` — el mismo criterio de **dos planos** (físico y contable) que `consumable` en producción. **Sin combustible no despachan** (GDD 5.8 literal). El **quemado es al despachar**, en la misma tx del tick: un asiento `consumption` contra `world_source` (ADR-022) por central despachada (`fuel = units × fuel_per_unit`), con descuento del inventario físico (`building_inventories`) y refresco de la columna espejo `fuel_stock`. La térmica crea así **demanda estructural de carbón** (nuevo sink físico) sin tocar el mercado CCRI; la hidroeléctrica, sin combustible, tiene coste marginal ~0 y abre el orden de mérito.
+
+### Efecto sobre producción
+
+- Al servir a un consumidor, el tick escribe **`powered_until_sim = tick + intervalo × 1,5`** y **`powered_rate` = el `power_per_hour` FACTURADO** en ese tick: la **media gracia** absorbe el desfase wall-clock entre buckets (el siguiente tick liquida antes de que expire la cobertura del anterior). Al **no servir** (recorte o insolvencia), el tick **cierra la cobertura** (`powered_until_sim = tick`, `powered_rate = 0`): sin ese cierre, la gracia residual del tick anterior dejaría producir con energía no comprada.
+- El **motor de producción** exige, para **cerrar un lote** de receta eléctrica, `powered_until_sim > simNow` **y** `power_per_hour <= powered_rate` (guarda doble contra producir sin haber comprado energía — la segunda condición impide el cambio a un lote de carga mayor a mitad de intervalo pagando la carga menor); si no, lo pausa (`paused_no_power`).
+- El propio **tick pausa** (`paused_no_power`, evento `power.curtailed` con los `paused_batch_ids`) los lotes en marcha de los consumidores **no servidos** (recorte o insolvencia) y **reanuda** los `paused_no_power` de los **servidos**. El `tryResume` del motor cubre las otras dos salidas: la receta activa dejó de ser eléctrica, o la cobertura sigue vigente **a la tasa facturada**. **Al reanudar, el reloj del lote se reinicia** (vuelve a `running` arrancando de nuevo, como toda reanudación de v1.3).
+- El pausado del motor emite `batch.paused` con `reason = no_power` y cuenta en `ii_production_paused_total{reason="no_power"}`.
+- Los **tres** estados de pausa cuentan como lote ACTIVO del edificio (`CountActiveBatches`/`NextQueuePosition` incluyen `paused_no_power`): encolar durante una pausa por suministro **no promueve** un segundo lote a `running` (invariante de un lote en curso por edificio), y **cancelar** un lote pausado por suministro sí promueve la siguiente cabeza `queued`. El barrido de producción recorre los lotes activos con un **cursor de continuación** entre pasadas (`ListActiveBatchIDs.after_id`): una población de lotes pausados estable mayor que el `BatchSize` ya no monopoliza las pasadas ni deja sin barrer a los posteriores.
+
+### Mantenimiento de líneas (`world/enforcement`)
+
+El barrido `power_line_maintenance` (dentro del bucle de mantenimiento, `II_MAINTENANCE_INTERVAL`; índice parcial `ix_power_lines_maintenance_due`, solo líneas `operational`) cobra `length_m × II_POWER_LINE_MAINT_PER_KM_DAY / 1000 × días-sim vencidos` como **sink** (asiento `maintenance`) con el **patrón exacto de edificios** de v1.5: cobra **solo lo disponible** (el saldo jamás baja de 0), **cada día vencido se salda exactamente una vez** (el marcador `maintenance_paid_until_sim` avanza por todos los días vencidos, nunca hay deuda ni doble degradación); si cubre todo, recupera condición (+2/día-sim); si no, los días impagados degradan `−II_DEGRADE_PCT_PER_SIM_DAY` por día y al caer `condition_pct ≤ II_ABANDON_CONDITION_PCT` la línea pasa a **`abandoned`** (deja de conducir, estado **terminal** — sin embargo ni subasta: el valor de una línea es su trazado y su fila se conserva por auditoría) emitiendo **`power_line.abandoned`** en la misma tx. Cada línea se procesa en su propia tx SERIALIZABLE.
+
+### Parámetros de configuración del incremento (prefijo `II_`, 12-factor)
+
+| Variable | Default | Efecto |
+|---|---|---|
+| `II_POWER_SPOT_INTERVAL_SIM` | `3600` (1 hora-sim) | Intervalo del tick del spot por región, en sim-time. > 0 y **múltiplo de 3600** (energía por tick entera exacta). |
+| `II_POWER_SPOT_SWEEP_INTERVAL` | `5s` (wall) | Periodo wall-clock del barrido del `PowerWorker` que busca buckets vencidos. |
+| `II_POWER_CONNECT_RADIUS_M` | `2000` | Radio de conexión al pool regional: un edificio participa si está a ≤ este radio (metros de mundo) de una línea operativa de su región. |
+| `II_POWER_DEFAULT_BID_PRICE` | `200` | Puja máxima por unidad de energía de los consumidores **sin** puja explícita en `world.power_bids`. |
+| `II_POWER_LINE_COST_PER_KM` | `5000` | Coste de construcción de una línea por km de trazado (sink, como el `build_cost` de un edificio). |
+| `II_POWER_LINE_MAINT_PER_KM_DAY` | `50` | Mantenimiento de una línea por km y día-sim (sink; el papel anti-acaparamiento del canon en una infraestructura sin concesión). |
+
+### Métricas Prometheus del incremento
+
+`PowerWorker` (Balancer): `ii_power_spot_price{region}` (gauge, precio de cierre del último tick), `ii_power_supplied_units_total{region}`, `ii_power_curtailed_units_total{region}`, `ii_power_curtailments_total{region}` (consumidores no servidos), `ii_power_fuel_burned_total{product}` y el histograma `ii_power_spot_tick_duration_seconds`. `world/power`: `ii_power_lines_built_total`. `world/enforcement`: `ii_power_line_maintenance_charged_total`, `ii_power_lines_abandoned_total`. Motor de producción: `ii_production_paused_total{reason="no_power"}`.
+
+### Eventos de outbox del incremento (contratos de evento FIJOS)
+
+| Evento | Agregado | Emisor | Consumidor | Payload (dinero/stock como string; sim-time entero; uuid string) |
+|---|---|---|---|---|
+| `power_line.created` | `power_line` | `world/power` (alta) | informativo/WS | `{power_line_id, owner_account_id, region_id, length_m, build_cost, created_at_sim}` |
+| `power_line.abandoned` | `power_line` | `world/enforcement` (barrido) | informativo/WS | `{power_line_id, owner_account_id, region_id, abandoned_at_sim}` |
+| `power.spot_cleared` | `region` | `balancer` (`PowerWorker`) | informativo/WS | `{region_id, tick_sim, interval_sim, closing_price, demand_units, supplied_units, curtailed_units, curtailed_buildings}` |
+| `power.curtailed` | `building` | `balancer` (`PowerWorker`) | informativo/WS | `{building_id, owner_account_id, region_id, tick_sim, reason:"curtailed"\|"insolvent", paused_batch_ids}` |
+
+Cada evento se emite con `outbox.Emit` **en la misma tx** que el cambio de estado que lo causa.
+
+### Migraciones del incremento
+
+- **`0017_electric_grid_enums`** (`-- migrate:no-transaction`, patrón `0008`): `ALTER TYPE ... ADD VALUE` no permite usar el valor en la misma transacción (PG18) y el índice recreado lo referencia — cada sentencia va en autocommit y es **re-ejecutable** (`IF NOT EXISTS` / `DROP`+`CREATE` emparejados). Añade `'paused_no_power'` a `world.batch_status` y `'power_spot'` a `ledger.transaction_kind`, y recrea `ix_batches_building` incluyendo el estado nuevo. Su `down` **falla explícitamente con guardas** si existen **asientos `power_spot`** (el ledger es append-only: revertir exige decisión del operador, nunca de una migración) o **lotes `paused_no_power`** (el índice original no los cubre y el motor previo a `0017` no sabe reanudarlos); los VALUES no pueden eliminarse (límite de PostgreSQL) y quedan inertes.
+- **`0018_electric_grid`** (transaccional, atómica: o entra todo o nada): los dos tipos (`power_line_status`, `power_role`), las seis tablas (`power_lines`, `power_plant_types`, `power_offers`, `power_bids`, `power_spot_ticks`, `power_dispatches`) y las cuatro columnas (`recipes.power_per_hour`, `buildings.powered_until_sim`/`powered_rate`/`last_curtailed_at_sim`). Su `down` lleva **las mismas guardas explícitas que el de `0017` — comprobadas AQUÍ primero** porque `migrate down` lo ejecuta antes (si fallaran después, el plano físico de la red ya estaría destruido e irrecuperable) — más una tercera: **falla si existen recetas con `power_per_hour > 0`** (al perder la columna quedarían sin coste energético alguno y dominarían a sus equivalentes de combustible; el operador debe eliminarlas antes de revertir).
+
+### Catálogo sembrado
+
+- **`coal_power_plant`** (Central térmica de carbón): `capacity` **10** unidades de energía/hora-sim a nivel 1 (una cubre exactamente un alto horno eléctrico), combustible `coal` a **1/unidad** despachada, `build_cost` **120 000**, `maintenance_cost` **150**, almacén local 20 000 (el carbón llega por logística); `level_curve` con `capacity_mult` `[1,2,3,4]`.
+- **`hydro_power_plant`** (Central hidroeléctrica): `capacity` **6**/hora-sim, **sin combustible** (coste marginal ~0, abre el orden de mérito), `build_cost` 200 000, `maintenance_cost` 100, `placement_rules` **`{"requires_biome":["coast"]}`** — los "ríos/agua" del GDD materializados como bioma `coast` **hasta que worldgen genere ríos** (deuda registrada de v1.7); cuando existan, la regla se extenderá de forma aditiva.
+- **Receta `smelt_steel_electric`** (Fundición de acero, horno eléctrico — alternativa opt-in del alto horno): **20 `iron_ore` → 8 `steel_ingot`**, `batch_sim_seconds` **7200**, **5 trabajadores**, **`power_per_hour` 10**, **sin combustible**. La receta de combustible (`smelt_steel`) no cambia.
+- **Regla de emplazamiento nueva `requires_biome`** (server-side, `world/buildings`): lista de biomas admitidos para la **región de la concesión** — 422 `PLACEMENT_INVALID` si el bioma regional no está en la lista; un bioma **desconocido se ignora con warn**, como cualquier regla no soportada (regla desconocida ⇒ no bloquea).
+
+---
+
 ## 📈 Módulo Analítica (esquema `analytics`)
 
 Escrito por el job **Analytics** (batch de baja prioridad, deliberadamente separado de Persistence). Son los **agregados permanentes** del mundo que nunca se resetea: crecen lento y se conservan para siempre (GDD 17.2).
@@ -2348,6 +2618,14 @@ erDiagram
     NETWORK_NODES ||--o{ SHIPMENTS : "ubicación/destino (v1.4)"
     LINK_SEGMENTS ||--o{ VEHICLES : "en tránsito (v1.4)"
 
+    ACCOUNTS ||--o{ POWER_LINES : "dueño (v1.10)"
+    REGIONS ||--o{ POWER_LINES : "pool regional (v1.10)"
+    BUILDING_TYPES ||--o| POWER_PLANT_TYPES : "parámetros de generación (v1.10)"
+    BUILDINGS ||--o| POWER_OFFERS : "oferta del generador (v1.10)"
+    BUILDINGS ||--o| POWER_BIDS : "puja del consumidor (v1.10)"
+    REGIONS ||--o{ POWER_SPOT_TICKS : "tick del spot (v1.10)"
+    BUILDINGS ||--o{ POWER_DISPATCHES : "despacho/consumo por tick (v1.10)"
+
     LEDGER_ACCOUNTS ||--o{ LEDGER_ENTRIES : "partidas"
     LEDGER_TRANSACTIONS ||--o{ LEDGER_ENTRIES : "asiento"
     PUBLICATIONS ||--o{ PUBLICATION_ACCEPTANCES : "ventana de sorteo"
@@ -2446,4 +2724,4 @@ Notas:
   - `ledger.entries` prohíbe partidas de importe 0: en liquidaciones pro-rata con garantías ínfimas (compensación redondeada a 0), la aplicación debe omitir esa partida en el asiento.
   - La división de importes usa división entera (el residuo del redondeo debe asignarse siempre al sink, nunca perderse — regla de redondeo del banco central).
   - `world.city_demand.current_price` se acota contra `products.price_floor/price_ceiling` en el Balancer; el CHECK del esquema solo acota `saturation_factor` y el suelo de la EMA.
-- **Diferido con especificación conservada**: red eléctrica regional (Fase 3 — añadirá tablas de generadores, líneas y despacho spot al esquema `world`), particionado del ledger por cuenta, y Kafka/TimescaleDB/Meilisearch contra medición. Toda adopción requiere ADR previo con la medición que la justifica.
+- **Diferido con especificación conservada**: particionado del ledger por cuenta, y Kafka/TimescaleDB/Meilisearch contra medición. Toda adopción requiere ADR previo con la medición que la justifica. La **red eléctrica regional** (antes en esta lista) se materializó en **v1.10** (módulo ⚡ Red Eléctrica, sección *v1.10*, ADR-025): tablas de líneas/generación/despacho spot en `world`, con dos deudas registradas — **ríos** (hidro restringida a bioma `coast` hasta que worldgen los genere) y **visualización de líneas en el cliente** (el contrato las expone; el render es del incremento de frontend).

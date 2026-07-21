@@ -53,6 +53,7 @@ import (
 	"github.com/lokiteitor/global-market/backend/internal/world/catalog"
 	"github.com/lokiteitor/global-market/backend/internal/world/fleet"
 	"github.com/lokiteitor/global-market/backend/internal/world/land"
+	"github.com/lokiteitor/global-market/backend/internal/world/power"
 	"github.com/lokiteitor/global-market/backend/internal/world/production"
 )
 
@@ -556,6 +557,7 @@ func withWorldDefaults(o gateway.Options) gateway.Options {
 	o.Buildings = buildings.DefaultOptions()
 	o.Production = production.DefaultOptions()
 	o.Fleet = fleet.DefaultOptions()
+	o.Power = power.DefaultOptions()
 	o.Logistics = logistics.DefaultOptions()
 	return o
 }

@@ -34,16 +34,23 @@ const (
 	// delinquent → grace) como para el edificio abandonado. Default 1209600
 	// (14 días-sim).
 	EnvSeizeGraceSimSeconds = "II_SEIZE_GRACE_SIM_SECONDS"
+
+	// EnvPowerLineMaintPerKmDay es el mantenimiento de una línea de transmisión
+	// por kilómetro de trazado y día-sim (sink; ADR-025 §4 — el papel
+	// anti-acaparamiento del canon en una infraestructura sin concesión).
+	// Default 50.
+	EnvPowerLineMaintPerKmDay = "II_POWER_LINE_MAINT_PER_KM_DAY"
 )
 
 // Defaults documentados del subpaquete.
 const (
-	DefaultMaintenanceInterval        = 30 * time.Second
-	DefaultEnforcementInterval        = 15 * time.Second
-	DefaultBatchSize                  = 100
-	DefaultDegradePctPerSimDay  int32 = 5
-	DefaultAbandonConditionPct  int32 = 20
-	DefaultSeizeGraceSimSeconds int64 = 1_209_600 // 14 días-sim
+	DefaultMaintenanceInterval          = 30 * time.Second
+	DefaultEnforcementInterval          = 15 * time.Second
+	DefaultBatchSize                    = 100
+	DefaultDegradePctPerSimDay    int32 = 5
+	DefaultAbandonConditionPct    int32 = 20
+	DefaultSeizeGraceSimSeconds   int64 = 1_209_600 // 14 días-sim
+	DefaultPowerLineMaintPerKmDay int64 = 50
 )
 
 // recoverPctPerSimDay es la condición que RECUPERA un edificio por día-sim con
@@ -65,17 +72,21 @@ type WorkerOptions struct {
 	AbandonConditionPct int32
 	// SeizeGraceSimSeconds es el periodo de gracia en sim-time antes del embargo. >= 0.
 	SeizeGraceSimSeconds int64
+	// PowerLineMaintPerKmDay es el mantenimiento de línea eléctrica por km y
+	// día-sim (ADR-025 §4). >= 0.
+	PowerLineMaintPerKmDay int64
 }
 
 // DefaultWorkerOptions devuelve la configuración por defecto del motor.
 func DefaultWorkerOptions() WorkerOptions {
 	return WorkerOptions{
-		MaintenanceInterval:  DefaultMaintenanceInterval,
-		EnforcementInterval:  DefaultEnforcementInterval,
-		BatchSize:            DefaultBatchSize,
-		DegradePctPerSimDay:  DefaultDegradePctPerSimDay,
-		AbandonConditionPct:  DefaultAbandonConditionPct,
-		SeizeGraceSimSeconds: DefaultSeizeGraceSimSeconds,
+		MaintenanceInterval:    DefaultMaintenanceInterval,
+		EnforcementInterval:    DefaultEnforcementInterval,
+		BatchSize:              DefaultBatchSize,
+		DegradePctPerSimDay:    DefaultDegradePctPerSimDay,
+		AbandonConditionPct:    DefaultAbandonConditionPct,
+		SeizeGraceSimSeconds:   DefaultSeizeGraceSimSeconds,
+		PowerLineMaintPerKmDay: DefaultPowerLineMaintPerKmDay,
 	}
 }
 
@@ -125,6 +136,13 @@ func WorkerOptionsFromEnv() (WorkerOptions, error) {
 		}
 		opts.SeizeGraceSimSeconds = n
 	}
+	if v := strings.TrimSpace(os.Getenv(EnvPowerLineMaintPerKmDay)); v != "" {
+		var n int64
+		if _, err := fmt.Sscanf(v, "%d", &n); err != nil {
+			return WorkerOptions{}, fmt.Errorf("world/enforcement: %s inválido %q (entero): %w", EnvPowerLineMaintPerKmDay, v, err)
+		}
+		opts.PowerLineMaintPerKmDay = n
+	}
 	if err := opts.Validate(); err != nil {
 		return WorkerOptions{}, err
 	}
@@ -150,6 +168,9 @@ func (o WorkerOptions) Validate() error {
 	}
 	if o.SeizeGraceSimSeconds < 0 {
 		return fmt.Errorf("world/enforcement: %s debe ser >= 0 (actual %d)", EnvSeizeGraceSimSeconds, o.SeizeGraceSimSeconds)
+	}
+	if o.PowerLineMaintPerKmDay < 0 {
+		return fmt.Errorf("world/enforcement: %s debe ser >= 0 (actual %d)", EnvPowerLineMaintPerKmDay, o.PowerLineMaintPerKmDay)
 	}
 	return nil
 }

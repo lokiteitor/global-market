@@ -22,10 +22,11 @@ import (
 
 // Etiquetas de la métrica de duración por barrido.
 const (
-	sweepBuildingMaintenance = "building_maintenance"
-	sweepVehicleMaintenance  = "vehicle_maintenance"
-	sweepCanon               = "canon"
-	sweepEmbargo             = "embargo"
+	sweepBuildingMaintenance  = "building_maintenance"
+	sweepVehicleMaintenance   = "vehicle_maintenance"
+	sweepPowerLineMaintenance = "power_line_maintenance"
+	sweepCanon                = "canon"
+	sweepEmbargo              = "embargo"
 )
 
 // SimSource entrega el sim-time actual del mundo (inyectado: en el engine es el
@@ -50,6 +51,8 @@ type Worker struct {
 	maintenanceCharged    prometheus.Counter
 	buildingsDegraded     prometheus.Counter
 	buildingsAbandoned    prometheus.Counter
+	powerLineMaintCharged prometheus.Counter
+	powerLinesAbandoned   prometheus.Counter
 	canonCharged          prometheus.Counter
 	concessionsDelinquent prometheus.Counter
 	concessionsReverted   prometheus.Counter
@@ -90,6 +93,14 @@ func NewWorker(pool *pgxpool.Pool, sim SimSource, opts WorkerOptions, logger *sl
 			Name: "ii_buildings_abandoned_total",
 			Help: "Total de edificios que cruzaron a 'abandoned' por degradación.",
 		}),
+		powerLineMaintCharged: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "ii_power_line_maintenance_charged_total",
+			Help: "Importe total cobrado como mantenimiento de líneas de transmisión al sink.",
+		}),
+		powerLinesAbandoned: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "ii_power_lines_abandoned_total",
+			Help: "Total de líneas de transmisión que cruzaron a 'abandoned' (dejan de conducir).",
+		}),
 		canonCharged: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "ii_canon_charged_total",
 			Help: "Importe total cobrado como canon de renovación al sink.",
@@ -114,6 +125,7 @@ func NewWorker(pool *pgxpool.Pool, sim SimSource, opts WorkerOptions, logger *sl
 	}
 	if reg != nil {
 		reg.MustRegister(w.maintenanceCharged, w.buildingsDegraded, w.buildingsAbandoned,
+			w.powerLineMaintCharged, w.powerLinesAbandoned,
 			w.canonCharged, w.concessionsDelinquent, w.concessionsReverted, w.buildingsSeized,
 			w.sweepDuration)
 	}
@@ -160,6 +172,7 @@ func (w *Worker) Run(ctx context.Context) error {
 func (w *Worker) RunMaintenanceOnce(ctx context.Context) {
 	w.runSweep(ctx, sweepBuildingMaintenance, w.SweepBuildingMaintenance)
 	w.runSweep(ctx, sweepVehicleMaintenance, w.SweepVehicleMaintenance)
+	w.runSweep(ctx, sweepPowerLineMaintenance, w.SweepPowerLineMaintenance)
 	w.runSweep(ctx, sweepCanon, w.SweepCanon)
 }
 
@@ -386,6 +399,125 @@ func (w *Worker) processVehicleMaintenance(ctx context.Context, id uuid.UUID, pa
 	})
 	if err == nil && charged > 0 {
 		w.maintenanceCharged.Add(float64(charged))
+	}
+	return err
+}
+
+// ─── (1c) Mantenimiento de líneas de transmisión (ADR-025 §4) ─────────────────
+
+// lineOutcome acumula los efectos de procesar una línea.
+type lineOutcome struct {
+	charged   int64
+	abandoned bool
+}
+
+// SweepPowerLineMaintenance cobra el mantenimiento por longitud de las líneas
+// operativas (patrón de edificios: solo lo disponible; los días impagados
+// degradan; abandoned = deja de conducir, terminal — sin embargo ni subasta).
+func (w *Worker) SweepPowerLineMaintenance(ctx context.Context) (int, error) {
+	simNow := w.sim.Now(ctx)
+	ids, err := w.repo.ListPowerLinesDueMaintenance(ctx, simNow, int32(w.opts.BatchSize)) //nolint:gosec // acotado por Validate
+	if err != nil {
+		return 0, err
+	}
+	processed := 0
+	for _, id := range ids {
+		if err := w.processPowerLineMaintenance(ctx, id); err != nil {
+			w.logger.Warn("world/enforcement: fallo en mantenimiento de una línea eléctrica",
+				slog.String("power_line_id", id.String()), slog.Any("error", err))
+			continue
+		}
+		processed++
+	}
+	return processed, nil
+}
+
+// processPowerLineMaintenance procesa una línea en su propia transacción.
+func (w *Worker) processPowerLineMaintenance(ctx context.Context, id uuid.UUID) error {
+	var oc *lineOutcome
+	err := db.RunSerializable(ctx, w.pool, func(tx pgx.Tx) error {
+		oc = &lineOutcome{}
+		r := w.repo.WithTx(tx)
+		simNow := w.sim.Now(ctx)
+		l, err := r.LockPowerLineForMaintenance(ctx, id, simNow)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil // ya procesada o tomada por otra instancia
+			}
+			return err
+		}
+		daysDue := (int64(simNow) - l.PaidUntilSim) / simtime.SimDay
+		if daysDue <= 0 {
+			return nil
+		}
+		costPerDay := (int64(l.LengthM) * w.opts.PowerLineMaintPerKmDay) / 1000
+		if costPerDay <= 0 && w.opts.PowerLineMaintPerKmDay > 0 {
+			// Suelo de 1/día-sim: una línea corta jamás tiene mantenimiento 0
+			// (sin él, nunca degradaría y el sink de GDD 5.8 sería evitable).
+			costPerDay = 1
+		}
+		cost := costPerDay * daysDue
+
+		avail, cashID, err := w.cashAvailable(ctx, r, l.OwnerAccountID)
+		if err != nil {
+			return err
+		}
+
+		newPaid := l.PaidUntilSim + daysDue*simtime.SimDay // cada día vencido se salda UNA vez
+		var newCond int32
+		newStatus := sqlcgen.WorldPowerLineStatusOperational
+		var charged int64
+
+		if avail >= cost {
+			charged = cost
+			newCond = clampCondition(int64(l.ConditionPct) + int64(recoverPctPerSimDay)*daysDue)
+		} else {
+			var daysPaid int64
+			if costPerDay > 0 {
+				daysPaid = avail / costPerDay
+			}
+			if daysPaid > daysDue {
+				daysPaid = daysDue
+			}
+			charged = daysPaid * costPerDay
+			daysUnpaid := daysDue - daysPaid
+			newCond = clampCondition(int64(l.ConditionPct) - int64(w.opts.DegradePctPerSimDay)*daysUnpaid)
+			if newCond <= w.opts.AbandonConditionPct {
+				newStatus = sqlcgen.WorldPowerLineStatusAbandoned
+				oc.abandoned = true
+			}
+		}
+
+		if charged > 0 {
+			if err := w.chargeToSink(ctx, r, sqlcgen.LedgerTransactionKindMaintenance, cashID, charged, l.ID, simNow,
+				fmt.Sprintf("Mantenimiento de línea eléctrica (%d)", charged)); err != nil {
+				return err
+			}
+			oc.charged = charged
+		}
+		if err := r.UpdatePowerLineMaintenance(ctx, l.ID, newPaid, newCond, newStatus, simNow); err != nil {
+			return err
+		}
+		if oc.abandoned {
+			if err := outbox.Emit(ctx, tx, int64(simNow), AggregatePowerLine, l.ID, EventPowerLineAbandoned,
+				PowerLineAbandonedPayload{
+					PowerLineID:    l.ID.String(),
+					OwnerAccountID: l.OwnerAccountID.String(),
+					RegionID:       l.RegionID.String(),
+					AbandonedAtSim: int64(simNow),
+				}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err == nil && oc != nil {
+		if oc.charged > 0 {
+			w.powerLineMaintCharged.Add(float64(oc.charged))
+		}
+		if oc.abandoned {
+			w.powerLinesAbandoned.Inc()
+		}
 	}
 	return err
 }

@@ -93,6 +93,62 @@ func (r *Repo) UpdateBuildingMaintenance(ctx context.Context, id uuid.UUID, paid
 	return nil
 }
 
+// ─── (1a-bis) Mantenimiento de líneas de transmisión (ADR-025 §4) ─────────────
+
+// ListPowerLinesDueMaintenance lista líneas operativas con mantenimiento vencido.
+func (r *Repo) ListPowerLinesDueMaintenance(ctx context.Context, simNow simtime.SimTime, limit int32) ([]uuid.UUID, error) {
+	ids, err := r.q.ListPowerLinesDueMaintenance(ctx, sqlcgen.ListPowerLinesDueMaintenanceParams{
+		SimNow: int64(simNow), PageLimit: limit,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("world/enforcement: listando líneas con mantenimiento vencido: %w", err)
+	}
+	return ids, nil
+}
+
+// lineMaint es la vista de una línea bloqueada para mantenimiento.
+type lineMaint struct {
+	ID             uuid.UUID
+	OwnerAccountID uuid.UUID
+	RegionID       uuid.UUID
+	LengthM        int32
+	ConditionPct   int32
+	PaidUntilSim   int64
+}
+
+// LockPowerLineForMaintenance bloquea una línea vencida; pgx.ErrNoRows si ya no
+// aplica o la tomó otra instancia.
+func (r *Repo) LockPowerLineForMaintenance(ctx context.Context, id uuid.UUID, simNow simtime.SimTime) (lineMaint, error) {
+	row, err := r.q.LockPowerLineForMaintenance(ctx, sqlcgen.LockPowerLineForMaintenanceParams{
+		ID: id, SimNow: int64(simNow),
+	})
+	if err != nil {
+		return lineMaint{}, err
+	}
+	return lineMaint{
+		ID:             row.ID,
+		OwnerAccountID: row.OwnerAccountID,
+		RegionID:       row.RegionID,
+		LengthM:        row.LengthM,
+		ConditionPct:   row.ConditionPct,
+		PaidUntilSim:   row.MaintenancePaidUntilSim,
+	}, nil
+}
+
+// UpdatePowerLineMaintenance asienta el resultado del barrido de una línea.
+func (r *Repo) UpdatePowerLineMaintenance(ctx context.Context, id uuid.UUID, paidUntil int64, condition int32, status sqlcgen.WorldPowerLineStatus, simNow simtime.SimTime) error {
+	if err := r.q.UpdatePowerLineMaintenance(ctx, sqlcgen.UpdatePowerLineMaintenanceParams{
+		PaidUntilSim: paidUntil,
+		ConditionPct: condition,
+		Status:       status,
+		SimNow:       int64(simNow),
+		ID:           id,
+	}); err != nil {
+		return fmt.Errorf("world/enforcement: actualizando mantenimiento de la línea %s: %w", id, err)
+	}
+	return nil
+}
+
 // ─── (1b) Mantenimiento de flota ──────────────────────────────────────────────
 
 // ListVehiclesDueMaintenance lista los vehículos con opex vencido.

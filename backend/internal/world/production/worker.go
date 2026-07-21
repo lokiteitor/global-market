@@ -58,6 +58,13 @@ type Worker struct {
 	// CONSECUTIVAS lleva divergiendo la reconciliación: solo el motor lo lee y
 	// escribe (Reconcile no es concurrente consigo mismo), sin lock.
 	reconcileStreak map[discKey]int
+
+	// sweepCursor es el cursor de continuación del barrido de producción entre
+	// pasadas (v1.10): sin él, una población de lotes pausados estable
+	// >= BatchSize al principio del orden por id monopolizaría todas las
+	// pasadas y los lotes posteriores no se barrerían jamás. Solo lo toca el
+	// propio bucle del worker (RunOnce no es concurrente consigo mismo).
+	sweepCursor *uuid.UUID
 }
 
 // NewWorker construye el motor sobre el pool compartido. reg registra sus
@@ -246,11 +253,19 @@ func newBatchOutcome() *batchOutcome {
 	return &batchOutcome{output: map[string]int64{}, extracted: map[string]int64{}}
 }
 
-// sweepProduction procesa los lotes activos (running/pausados) vencidos.
+// sweepProduction procesa los lotes activos (running/pausados) vencidos,
+// continuando desde el cursor de la pasada anterior (rotación completa aunque
+// haya más lotes activos que BatchSize).
 func (w *Worker) sweepProduction(ctx context.Context) (int, error) {
-	ids, err := w.repo.ListActiveBatchIDs(ctx, int32(w.opts.BatchSize)) //nolint:gosec // acotado por Validate
+	ids, err := w.repo.ListActiveBatchIDs(ctx, w.sweepCursor, int32(w.opts.BatchSize)) //nolint:gosec // acotado por Validate
 	if err != nil {
 		return 0, err
+	}
+	if len(ids) < w.opts.BatchSize {
+		w.sweepCursor = nil // lista agotada: la próxima pasada reinicia
+	} else {
+		last := ids[len(ids)-1]
+		w.sweepCursor = &last
 	}
 	processed := 0
 	for _, id := range ids {
@@ -295,6 +310,8 @@ func (w *Worker) processBatch(ctx context.Context, id uuid.UUID) error {
 			return w.tryResume(ctx, r, pb, simNow, reasonNoFuel)
 		case string(statusPausedNoWorkers):
 			return w.tryResume(ctx, r, pb, simNow, reasonNoWorkers)
+		case string(statusPausedNoPower):
+			return w.tryResume(ctx, r, pb, simNow, reasonNoPower)
 		default:
 			return nil
 		}
@@ -379,6 +396,18 @@ func (w *Worker) completeBatch(ctx context.Context, r *Repo, tx pgx.Tx, pb procB
 		if !ok {
 			return w.pause(ctx, r, tx, pb, statusPausedNoFuel, reasonNoFuel, simNow, oc)
 		}
+	}
+
+	// (1b) Suministro eléctrico (GDD 5.8/ADR-025): una receta eléctrica solo
+	//      cierra lote con el suministro del edificio cubierto por el tick del
+	//      spot (powered_until_sim) Y a una tasa <= la FACTURADA en ese tick
+	//      (powered_rate) — sin la segunda condición, cambiar a un lote de
+	//      carga mayor a mitad de intervalo produciría con energía comprada
+	//      para una carga menor. Sin cobertura —recorte, insolvencia o
+	//      desconexión— pausa; el tick que vuelva a servir al edificio lo
+	//      reanuda (o tryResume, si la cobertura sigue vigente).
+	if pb.PowerPerHour > 0 && (pb.PoweredUntilSim <= int64(simNow) || pb.PowerPerHour > pb.PoweredRate) {
+		return w.pause(ctx, r, tx, pb, statusPausedNoPower, reasonNoPower, simNow, oc)
 	}
 
 	// (2) Fondos para el salario (cash del dueño). Sin fondos → insolvencia sin
@@ -646,6 +675,13 @@ func (w *Worker) tryResume(ctx context.Context, r *Repo, pb procBatch, simNow si
 				ok = cash.Balance >= wage
 			}
 		}
+	case reasonNoPower:
+		// Normalmente reanuda el propio tick del spot al servir al edificio
+		// (que además fija la tasa facturada); esta ruta cubre el cambio a una
+		// receta no eléctrica y la cobertura aún vigente A LA TASA facturada —
+		// el tick CIERRA la cobertura de los no servidos, así que la gracia
+		// residual nunca reanuda a un recortado.
+		ok = pb.PowerPerHour <= 0 || (pb.PoweredUntilSim > int64(simNow) && pb.PowerPerHour <= pb.PoweredRate)
 	}
 	if !ok {
 		return nil

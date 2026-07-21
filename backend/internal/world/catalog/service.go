@@ -204,8 +204,23 @@ func (s *Service) ListBuildingTypes(ctx context.Context, f BuildingTypeFilter) (
 			LevelCurve: r.LevelCurve, BuildCost: r.BuildCost,
 			MaintenanceCost: r.MaintenanceCost,
 		}
+		if r.PowerCapacity != nil {
+			types[i].PowerGeneration = &PowerGeneration{
+				Capacity:      *r.PowerCapacity,
+				FuelProductID: r.PowerFuelProductID,
+				FuelPerUnit:   powerFuelPerUnit(r.PowerFuelPerUnit),
+			}
+		}
 	}
 	return types, next, nil
+}
+
+// powerFuelPerUnit desreferencia el fuel_per_unit del LEFT JOIN (0 si NULL).
+func powerFuelPerUnit(v *int64) int64 {
+	if v == nil {
+		return 0
+	}
+	return *v
 }
 
 // ─── Recetas ─────────────────────────────────────────────────────────────────
@@ -244,8 +259,9 @@ func (s *Service) ListRecipes(ctx context.Context, f RecipeFilter) ([]Recipe, st
 		recipes[i] = Recipe{
 			ID: r.ID, BuildingTypeID: r.BuildingTypeID, Code: r.Code, Name: r.Name,
 			BatchSimSeconds: r.BatchSimSeconds, FuelProductID: r.FuelProductID,
-			FuelPerBatch: r.FuelPerBatch, WorkersRequired: r.WorkersRequired,
-			MinCityLevel: r.MinCityLevel, ChangeoverSeconds: r.ChangeoverSeconds,
+			FuelPerBatch: r.FuelPerBatch, PowerPerHour: r.PowerPerHour,
+			WorkersRequired: r.WorkersRequired,
+			MinCityLevel:    r.MinCityLevel, ChangeoverSeconds: r.ChangeoverSeconds,
 			Ingredients: []RecipeIngredient{},
 		}
 		ids[i] = r.ID

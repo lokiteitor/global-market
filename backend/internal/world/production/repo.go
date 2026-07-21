@@ -18,6 +18,7 @@ const (
 	statusRunning         = sqlcgen.WorldBatchStatusRunning
 	statusPausedNoFuel    = sqlcgen.WorldBatchStatusPausedNoFuel
 	statusPausedNoWorkers = sqlcgen.WorldBatchStatusPausedNoWorkers
+	statusPausedNoPower   = sqlcgen.WorldBatchStatusPausedNoPower
 	statusCompleted       = sqlcgen.WorldBatchStatusCompleted
 	statusCancelled       = sqlcgen.WorldBatchStatusCancelled
 )
@@ -320,9 +321,13 @@ func (r *Repo) SetBatchCancelled(ctx context.Context, id uuid.UUID, simNow simti
 
 // ─── Motor: procesado de lotes ────────────────────────────────────────────────
 
-// ListActiveBatchIDs lista los lotes running/pausados de edificios operativos.
-func (r *Repo) ListActiveBatchIDs(ctx context.Context, limit int32) ([]uuid.UUID, error) {
-	ids, err := r.q.ListActiveBatchIDs(ctx, limit)
+// ListActiveBatchIDs lista los lotes running/pausados de edificios operativos a
+// partir del cursor de continuación (nil = desde el principio).
+func (r *Repo) ListActiveBatchIDs(ctx context.Context, afterID *uuid.UUID, limit int32) ([]uuid.UUID, error) {
+	ids, err := r.q.ListActiveBatchIDs(ctx, sqlcgen.ListActiveBatchIDsParams{
+		AfterID:   afterID,
+		PageLimit: limit,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("world/production: listando lotes activos: %w", err)
 	}
@@ -344,6 +349,9 @@ type procBatch struct {
 	FuelProductID    *uuid.UUID
 	FuelPerBatch     int64
 	WorkersRequired  int32
+	PowerPerHour     int64
+	PoweredUntilSim  int64
+	PoweredRate      int64
 }
 
 // LockBatchForProcessing bloquea un lote (FOR UPDATE SKIP LOCKED) con todo lo
@@ -376,6 +384,9 @@ func (r *Repo) LockBatchForProcessing(ctx context.Context, id uuid.UUID) (procBa
 		FuelProductID:    row.FuelProductID,
 		FuelPerBatch:     row.FuelPerBatch,
 		WorkersRequired:  row.WorkersRequired,
+		PowerPerHour:     row.PowerPerHour,
+		PoweredUntilSim:  row.PoweredUntilSim,
+		PoweredRate:      row.PoweredRate,
 	}, nil
 }
 

@@ -74,6 +74,7 @@ const (
 	LedgerTransactionKindTransfer             LedgerTransactionKind = "transfer"
 	LedgerTransactionKindAuction              LedgerTransactionKind = "auction"
 	LedgerTransactionKindReconciliation       LedgerTransactionKind = "reconciliation"
+	LedgerTransactionKindPowerSpot            LedgerTransactionKind = "power_spot"
 )
 
 func (e *LedgerTransactionKind) Scan(src interface{}) error {
@@ -109,6 +110,95 @@ func (ns NullLedgerTransactionKind) Value() (driver.Value, error) {
 		return nil, nil
 	}
 	return string(ns.LedgerTransactionKind), nil
+}
+
+type WorldBatchStatus string
+
+const (
+	WorldBatchStatusQueued          WorldBatchStatus = "queued"
+	WorldBatchStatusRunning         WorldBatchStatus = "running"
+	WorldBatchStatusPausedNoFuel    WorldBatchStatus = "paused_no_fuel"
+	WorldBatchStatusPausedNoWorkers WorldBatchStatus = "paused_no_workers"
+	WorldBatchStatusCompleted       WorldBatchStatus = "completed"
+	WorldBatchStatusCancelled       WorldBatchStatus = "cancelled"
+	WorldBatchStatusPausedNoPower   WorldBatchStatus = "paused_no_power"
+)
+
+func (e *WorldBatchStatus) Scan(src interface{}) error {
+	switch s := src.(type) {
+	case []byte:
+		*e = WorldBatchStatus(s)
+	case string:
+		*e = WorldBatchStatus(s)
+	default:
+		return fmt.Errorf("unsupported scan type for WorldBatchStatus: %T", src)
+	}
+	return nil
+}
+
+type NullWorldBatchStatus struct {
+	WorldBatchStatus WorldBatchStatus
+	Valid            bool // Valid is true if WorldBatchStatus is not NULL
+}
+
+// Scan implements the Scanner interface.
+func (ns *NullWorldBatchStatus) Scan(value interface{}) error {
+	if value == nil {
+		ns.WorldBatchStatus, ns.Valid = "", false
+		return nil
+	}
+	ns.Valid = true
+	return ns.WorldBatchStatus.Scan(value)
+}
+
+// Value implements the driver Valuer interface.
+func (ns NullWorldBatchStatus) Value() (driver.Value, error) {
+	if !ns.Valid {
+		return nil, nil
+	}
+	return string(ns.WorldBatchStatus), nil
+}
+
+type WorldPowerRole string
+
+const (
+	WorldPowerRoleGenerator WorldPowerRole = "generator"
+	WorldPowerRoleConsumer  WorldPowerRole = "consumer"
+)
+
+func (e *WorldPowerRole) Scan(src interface{}) error {
+	switch s := src.(type) {
+	case []byte:
+		*e = WorldPowerRole(s)
+	case string:
+		*e = WorldPowerRole(s)
+	default:
+		return fmt.Errorf("unsupported scan type for WorldPowerRole: %T", src)
+	}
+	return nil
+}
+
+type NullWorldPowerRole struct {
+	WorldPowerRole WorldPowerRole
+	Valid          bool // Valid is true if WorldPowerRole is not NULL
+}
+
+// Scan implements the Scanner interface.
+func (ns *NullWorldPowerRole) Scan(value interface{}) error {
+	if value == nil {
+		ns.WorldPowerRole, ns.Valid = "", false
+		return nil
+	}
+	ns.Valid = true
+	return ns.WorldPowerRole.Scan(value)
+}
+
+// Value implements the driver Valuer interface.
+func (ns NullWorldPowerRole) Value() (driver.Value, error) {
+	if !ns.Valid {
+		return nil, nil
+	}
+	return string(ns.WorldPowerRole), nil
 }
 
 type WorldProductClass string

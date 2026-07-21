@@ -260,7 +260,8 @@ func (s *Service) CancelBatch(ctx context.Context, owner, batchID uuid.UUID) (Ba
 		}
 		wasActive := row.Batch.Status == string(statusRunning) ||
 			row.Batch.Status == string(statusPausedNoFuel) ||
-			row.Batch.Status == string(statusPausedNoWorkers)
+			row.Batch.Status == string(statusPausedNoWorkers) ||
+			row.Batch.Status == string(statusPausedNoPower)
 
 		out, err = r.SetBatchCancelled(ctx, batchID, simNow)
 		if err != nil {
@@ -335,7 +336,8 @@ func normalizeLimit(limit int) int32 {
 // validBatchStatus indica si s es un estado de lote válido del enum.
 func validBatchStatus(s string) bool {
 	switch sqlcgen.WorldBatchStatus(s) {
-	case statusQueued, statusRunning, statusPausedNoFuel, statusPausedNoWorkers, statusCompleted, statusCancelled:
+	case statusQueued, statusRunning, statusPausedNoFuel, statusPausedNoWorkers, statusPausedNoPower,
+		statusCompleted, statusCancelled:
 		return true
 	}
 	return false

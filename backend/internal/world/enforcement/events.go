@@ -7,12 +7,17 @@ import "strconv"
 const (
 	AggregateBuilding   = "building"
 	AggregateConcession = "concession"
+	AggregatePowerLine  = "power_line"
 
 	// EventBuildingSeized lo CONSUME contracts/system_liquidator (publica el
 	// stock embargado como ofertas de venta del sistema vía CCRI).
 	EventBuildingSeized = "building.seized"
 	// EventConcessionReverted es informativo/WS (el suelo volvió al sistema).
 	EventConcessionReverted = "concession.reverted"
+	// EventPowerLineAbandoned es informativo/WS: una línea de transmisión
+	// degradó a 'abandoned' por mantenimiento impagado y deja de conducir
+	// (ADR-025 §4; los edificios que dependían de ella pierden la conexión).
+	EventPowerLineAbandoned = "power_line.abandoned"
 )
 
 // Motivos del embargo (campo reason de building.seized), derivados del estado
@@ -51,6 +56,14 @@ type ConcessionRevertedPayload struct {
 	FormerHolder  string `json:"former_holder"`
 	RegionID      string `json:"region_id"`
 	RevertedAtSim int64  `json:"reverted_at_sim"`
+}
+
+// PowerLineAbandonedPayload es el payload de power_line.abandoned.
+type PowerLineAbandonedPayload struct {
+	PowerLineID    string `json:"power_line_id"`
+	OwnerAccountID string `json:"owner_account_id"`
+	RegionID       string `json:"region_id"`
+	AbandonedAtSim int64  `json:"abandoned_at_sim"`
 }
 
 // fixed serializa un importe/stock de punto fijo como string del contrato.

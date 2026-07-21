@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -383,6 +384,28 @@ func (s *Service) checkPlacementRules(ctx context.Context, r *Repo, rules parsed
 				return &PlacementError{Rule: "requires_node_kind",
 					Message: fmt.Sprintf("no hay un nodo %q en la región", rules.RequiresNodeKind),
 					Details: map[string]any{"node_kind": rules.RequiresNodeKind}}
+			}
+		}
+	}
+	if rules.HasRequiresBiome {
+		valid := make([]string, 0, len(rules.RequiresBiome))
+		for _, b := range rules.RequiresBiome {
+			if validBiome(b) {
+				valid = append(valid, b)
+			} else {
+				s.logger.Warn("regla requires_biome con bioma desconocido ignorado",
+					slog.String("building_type", buildingTypeCode), slog.String("biome", b))
+			}
+		}
+		if len(valid) > 0 {
+			biome, err := r.RegionBiome(ctx, regionID)
+			if err != nil {
+				return err
+			}
+			if !slices.Contains(valid, biome) {
+				return &PlacementError{Rule: "requires_biome",
+					Message: fmt.Sprintf("la región es de bioma %q y el tipo exige %v", biome, valid),
+					Details: map[string]any{"region_biome": biome, "allowed_biomes": valid}}
 			}
 		}
 	}

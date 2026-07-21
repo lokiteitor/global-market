@@ -1007,6 +1007,149 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/world/power-lines": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Catálogo de líneas de transmisión
+         * @description Las líneas de transmisión conectan generadores y consumidores dentro de
+         *     una región (pool regional, ADR-025): un edificio participa del mercado
+         *     spot si está dentro del radio de conexión de una línea **operativa** de
+         *     su región. Visibles para todos, como las terminales.
+         */
+        get: operations["listPowerLines"];
+        put?: never;
+        /**
+         * Construir una línea de transmisión
+         * @description Da de alta una línea de transmisión propia. El trazado (`LineString`
+         *     plano, metros de mundo) debe caer **íntegro dentro de una región** —las
+         *     interconexiones interregionales son expansión futura (GDD 22)—. Las
+         *     líneas **no requieren concesión de suelo** (cruzan muchas parcelas,
+         *     como las carreteras): su coste de construcción es proporcional a la
+         *     longitud (sink) y su **mantenimiento periódico por longitud** cumple el
+         *     papel anti-acaparamiento del canon — impagado, la línea degrada y
+         *     termina `abandoned` (deja de conducir; ADR-025).
+         */
+        post: operations["createPowerLine"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/world/power-lines/{powerLineId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Detalle de una línea de transmisión */
+        get: operations["getPowerLine"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/world/power-plants/{buildingId}/offer": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Fijar el precio de oferta de una central propia
+         * @description Fija el precio por unidad de energía al que la central oferta su
+         *     capacidad en el mercado spot de su región. **Sin oferta publicada la
+         *     central no participa** (ofertar es una decisión del jugador, como
+         *     publicar en el tablón). La capacidad ofertable la deriva el tick: nivel
+         *     de la central y, en las térmicas, el combustible disponible en su
+         *     almacén — **sin combustible no despachan** (GDD 5.8).
+         */
+        put: operations["setPowerOffer"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/world/buildings/{buildingId}/power-bid": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Fijar la puja eléctrica máxima de un edificio propio
+         * @description Fija la puja máxima por unidad de energía de un edificio consumidor.
+         *     La puja es la **prioridad inversa del recorte** (menor puja = primero
+         *     en recortarse ante déficit, con rotación entre pujas iguales, GDD 5.8)
+         *     y el **techo personal**: el precio de cierre uniforme nunca supera la
+         *     puja de un consumidor servido. Sin puja explícita rige el default del
+         *     mundo (`II_POWER_DEFAULT_BID_PRICE`).
+         */
+        put: operations["setPowerBid"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/world/power/spot": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Histórico del mercado spot de una región
+         * @description Ticks liquidados del mercado spot regional por orden de mérito
+         *     (GDD 5.8): **el precio de cierre lo pagan todos los despachados**
+         *     (precio marginal uniforme, no pay-as-bid). Más recientes primero.
+         */
+        get: operations["listPowerSpotTicks"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/world/power/dispatches": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Despacho/consumo eléctrico de un edificio propio
+         * @description Registro por tick del edificio en el spot — como generador despachado o como consumidor servido — al precio de cierre. Solo edificios propios.
+         */
+        get: operations["listPowerDispatches"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/logistics/network/nodes": {
         parameters: {
             query?: never;
@@ -1224,6 +1367,11 @@ export interface components {
         SlotId: string;
         /**
          * Format: uuid
+         * @description UUIDv7 de línea de transmisión.
+         */
+        PowerLineId: string;
+        /**
+         * Format: uuid
          * @description UUIDv7 de tipo de vehículo.
          */
         VehicleTypeId: string;
@@ -1302,8 +1450,11 @@ export interface components {
         ConcessionStatus: "active" | "delinquent" | "grace" | "reverted";
         /** @enum {string} */
         BuildingStatus: "under_construction" | "operational" | "damaged" | "in_maintenance" | "abandoned" | "seized";
-        /** @enum {string} */
-        BatchStatus: "queued" | "running" | "paused_no_fuel" | "paused_no_workers" | "completed" | "cancelled";
+        /**
+         * @description paused_no_power (v1.6.0, ADR-025) = sin suministro eléctrico (recorte del spot, insolvencia o desconexión) — mismo 2º escalón de GDD 5.9 que paused_no_fuel, con remedio distinto.
+         * @enum {string}
+         */
+        BatchStatus: "queued" | "running" | "paused_no_fuel" | "paused_no_workers" | "paused_no_power" | "completed" | "cancelled";
         /** @enum {string} */
         NodeKind: "mine" | "factory" | "warehouse" | "port" | "station" | "distribution_center" | "junction" | "city_gate";
         /**
@@ -1472,7 +1623,7 @@ export interface components {
             /** @description Importe de la partida (positivo o negativo, nunca cero). */
             amount: string;
             /** @enum {string} */
-            transaction_kind: "seed_capital" | "bot_capitalization" | "bot_retirement" | "publication_lock" | "publication_release" | "acceptance_lock" | "contract_confirmation" | "delivery_settlement" | "custody_load" | "custody_release" | "production_output" | "consumption" | "wage" | "maintenance" | "tax" | "canon" | "transfer" | "auction" | "reconciliation";
+            transaction_kind: "seed_capital" | "bot_capitalization" | "bot_retirement" | "publication_lock" | "publication_release" | "acceptance_lock" | "contract_confirmation" | "delivery_settlement" | "custody_load" | "custody_release" | "production_output" | "consumption" | "wage" | "maintenance" | "tax" | "canon" | "transfer" | "auction" | "power_spot" | "reconciliation";
             /** @description UUID de la entidad de dominio que originó el asiento. */
             reference_id?: string;
             description?: string;
@@ -1740,6 +1891,17 @@ export interface components {
             build_cost: components["schemas"]["MoneyAmount"];
             /** @description Sink por día de sim-time; su impago inicia el ciclo de degradación. */
             maintenance_cost: components["schemas"]["MoneyAmount"];
+            /** @description Parámetros de generación si el tipo es una central eléctrica (v1.6.0, ADR-025); ausente en el resto. */
+            power_generation?: components["schemas"]["PowerGeneration"];
+        };
+        /** @description Parámetros de generación de un tipo de central (GDD 5.8 Fase 3). Las centrales no tienen recetas — su generación la gobierna el despacho del mercado spot. */
+        PowerGeneration: {
+            /** @description Unidades de energía por hora-sim a nivel 1 (el nivel multiplica por level_curve.capacity_mult). */
+            capacity_per_hour: components["schemas"]["StockQty"];
+            /** @description Combustible físico de las térmicas (ausente en hidroeléctricas). */
+            fuel_product_id?: components["schemas"]["ProductId"];
+            /** @description Combustible consumido por unidad de energía despachada ("0" en hidroeléctricas). Sin combustible la central no despacha. */
+            fuel_per_unit: components["schemas"]["StockQty"];
         };
         RecipeIngredient: {
             product_id: components["schemas"]["ProductId"];
@@ -1757,6 +1919,8 @@ export interface components {
             /** @description Combustible consumido por lote (bien de mercado que llega por logística). */
             fuel_product_id?: components["schemas"]["ProductId"];
             fuel_per_batch: components["schemas"]["StockQty"];
+            /** @description Consumo eléctrico de la receta en unidades de energía por hora-sim mientras su lote está activo ("0" = receta no eléctrica; v1.6.0, ADR-025). Puede convivir con fuel_per_batch (conjunción, ambos necesarios). */
+            power_per_hour?: components["schemas"]["StockQty"];
             workers_required: number;
             /** @description Nivel mínimo de la ciudad cercana (cualificación laboral de recetas avanzadas). */
             min_city_level: number;
@@ -2001,6 +2165,59 @@ export interface components {
             /** @description Titular vigente; ausente si el slot está en venta. */
             holder_account_id?: components["schemas"]["AccountId"];
             valid_until_sim?: components["schemas"]["SimTime"];
+        };
+        /**
+         * @description operational = conduce (participa del pool regional); abandoned = degradada por mantenimiento impagado, deja de conducir (terminal).
+         * @enum {string}
+         */
+        PowerLineStatus: "operational" | "abandoned";
+        PowerLine: {
+            id: components["schemas"]["PowerLineId"];
+            owner_account_id: components["schemas"]["AccountId"];
+            region_id: components["schemas"]["RegionId"];
+            /** @description Trazado GeoJSON-like LineString con coordenadas planas [x_m, y_m] (SRID 0, ADR-019). */
+            path: Record<string, never>;
+            /** @description Longitud del trazado en metros de mundo (base del coste y del mantenimiento). */
+            length_m: number;
+            status: components["schemas"]["PowerLineStatus"];
+            condition_pct: number;
+            maintenance_paid_until_sim: components["schemas"]["SimTime"];
+            updated_at_sim: components["schemas"]["SimTime"];
+        };
+        PowerPriceInput: {
+            /** @description Precio por unidad de energía (> 0). */
+            unit_price: components["schemas"]["MoneyAmount"];
+        };
+        PowerPrice: {
+            building_id: components["schemas"]["BuildingId"];
+            unit_price: components["schemas"]["MoneyAmount"];
+        };
+        /** @description Resultado de un tick del mercado spot regional por orden de mérito (GDD 5.8). El precio de cierre uniforme lo pagan todos los consumidores servidos y lo cobran todos los generadores despachados. */
+        PowerSpotTick: {
+            region_id: components["schemas"]["RegionId"];
+            /** @description Inicio del bucket liquidado (floor(simNow/intervalo)×intervalo). */
+            tick_sim: components["schemas"]["SimTime"];
+            interval_sim: components["schemas"]["SimTime"];
+            /** @description Oferta del generador marginal despachado ("0" si no hubo despacho). */
+            closing_price: components["schemas"]["MoneyAmount"];
+            demand_units: components["schemas"]["StockQty"];
+            supplied_units: components["schemas"]["StockQty"];
+            /** @description Demanda no servida (recorte rotatorio por prioridad inversa de puja + exclusión por insolvencia). */
+            curtailed_units: components["schemas"]["StockQty"];
+            curtailed_buildings: number;
+        };
+        /** @enum {string} */
+        PowerDispatchRole: "generator" | "consumer";
+        PowerDispatch: {
+            region_id: components["schemas"]["RegionId"];
+            tick_sim: components["schemas"]["SimTime"];
+            building_id: components["schemas"]["BuildingId"];
+            role: components["schemas"]["PowerDispatchRole"];
+            units: components["schemas"]["StockQty"];
+            /** @description Precio de cierre del tick (uniforme). */
+            unit_price: components["schemas"]["MoneyAmount"];
+            /** @description units × unit_price (asiento power_spot del ledger). */
+            amount: components["schemas"]["MoneyAmount"];
         };
         NetworkNode: {
             id: components["schemas"]["NodeId"];
@@ -4261,6 +4478,266 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
+            429: components["responses"]["TooManyRequests"];
+            500: components["responses"]["InternalError"];
+            503: components["responses"]["Maintenance"];
+        };
+    };
+    listPowerLines: {
+        parameters: {
+            query?: {
+                /** @description Filtra por región. */
+                region_id?: components["schemas"]["RegionId"];
+                /** @description Cursor opaco de paginación devuelto en `meta.next_cursor`. */
+                cursor?: components["parameters"]["cursor"];
+                /** @description Tamaño máximo de página. */
+                limit?: components["parameters"]["limit"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Líneas de transmisión. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        data: components["schemas"]["PowerLine"][];
+                        meta: components["schemas"]["Meta"];
+                    };
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            429: components["responses"]["TooManyRequests"];
+            500: components["responses"]["InternalError"];
+            503: components["responses"]["Maintenance"];
+        };
+    };
+    createPowerLine: {
+        parameters: {
+            query?: never;
+            header?: {
+                /**
+                 * @description Clave de idempotencia para **reintentos seguros de comandos que mueven
+                 *     valor**: si el cliente reintenta con la misma clave, el servidor reproduce
+                 *     la misma respuesta del primer intento — nunca hay doble ejecución.
+                 */
+                "Idempotency-Key"?: components["parameters"]["idempotencyKey"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** @description Trazado GeoJSON-like `LineString` con coordenadas planas `[x_m, y_m]` (SRID 0, ADR-019); al menos 2 vértices. */
+                    path: Record<string, never>;
+                };
+            };
+        };
+        responses: {
+            /** @description Línea construida (operational, condición 100). */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        data: components["schemas"]["PowerLine"];
+                        meta: components["schemas"]["Meta"];
+                    };
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            /** @description Trazado inválido (`PLACEMENT_INVALID`, p. ej. cruza regiones) o fondos insuficientes (`INSUFFICIENT_FUNDS`). */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            429: components["responses"]["TooManyRequests"];
+            500: components["responses"]["InternalError"];
+            503: components["responses"]["Maintenance"];
+        };
+    };
+    getPowerLine: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                powerLineId: components["schemas"]["PowerLineId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Línea de transmisión. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        data: components["schemas"]["PowerLine"];
+                        meta: components["schemas"]["Meta"];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            429: components["responses"]["TooManyRequests"];
+            500: components["responses"]["InternalError"];
+            503: components["responses"]["Maintenance"];
+        };
+    };
+    setPowerOffer: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                buildingId: components["schemas"]["BuildingId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PowerPriceInput"];
+            };
+        };
+        responses: {
+            /** @description Oferta fijada. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        data: components["schemas"]["PowerPrice"];
+                        meta: components["schemas"]["Meta"];
+                    };
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            422: components["responses"]["ValidationError"];
+            429: components["responses"]["TooManyRequests"];
+            500: components["responses"]["InternalError"];
+            503: components["responses"]["Maintenance"];
+        };
+    };
+    setPowerBid: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                buildingId: components["schemas"]["BuildingId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PowerPriceInput"];
+            };
+        };
+        responses: {
+            /** @description Puja fijada. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        data: components["schemas"]["PowerPrice"];
+                        meta: components["schemas"]["Meta"];
+                    };
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            422: components["responses"]["ValidationError"];
+            429: components["responses"]["TooManyRequests"];
+            500: components["responses"]["InternalError"];
+            503: components["responses"]["Maintenance"];
+        };
+    };
+    listPowerSpotTicks: {
+        parameters: {
+            query: {
+                region_id: components["schemas"]["RegionId"];
+                /** @description Solo ticks con `tick_sim` anterior a este sim-time. */
+                before_sim?: components["schemas"]["SimTime"];
+                /** @description Tamaño máximo de página. */
+                limit?: components["parameters"]["limit"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Ticks del spot. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        data: components["schemas"]["PowerSpotTick"][];
+                        meta: components["schemas"]["Meta"];
+                    };
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            429: components["responses"]["TooManyRequests"];
+            500: components["responses"]["InternalError"];
+            503: components["responses"]["Maintenance"];
+        };
+    };
+    listPowerDispatches: {
+        parameters: {
+            query: {
+                building_id: components["schemas"]["BuildingId"];
+                /** @description Solo registros con `tick_sim` anterior a este sim-time. */
+                before_sim?: components["schemas"]["SimTime"];
+                /** @description Tamaño máximo de página. */
+                limit?: components["parameters"]["limit"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Despachos/consumos del edificio. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        data: components["schemas"]["PowerDispatch"][];
+                        meta: components["schemas"]["Meta"];
+                    };
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
             429: components["responses"]["TooManyRequests"];
             500: components["responses"]["InternalError"];
             503: components["responses"]["Maintenance"];

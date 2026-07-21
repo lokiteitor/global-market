@@ -156,11 +156,14 @@ const countActiveBatches = `-- name: CountActiveBatches :one
 SELECT count(*)::bigint AS total
 FROM world.production_batches
 WHERE building_id = $1
-  AND status IN ('running', 'paused_no_fuel', 'paused_no_workers')
+  AND status IN ('running', 'paused_no_fuel', 'paused_no_workers', 'paused_no_power')
 `
 
 // CountActiveBatches cuenta los lotes en curso o pausados de un edificio (para
-// decidir si el nuevo lote se promueve a running al encolar).
+// decidir si el nuevo lote se promueve a running al encolar). Los TRES estados
+// de pausa cuentan: un lote pausado sigue siendo el activo del edificio
+// (invariante de un lote en curso por edificio — sin él, un lote encolado
+// durante una pausa por suministro correría en paralelo al reanudarse esta).
 func (q *Queries) CountActiveBatches(ctx context.Context, buildingID uuid.UUID) (int64, error) {
 	row := q.db.QueryRow(ctx, countActiveBatches, buildingID)
 	var total int64
@@ -485,20 +488,30 @@ const listActiveBatchIDs = `-- name: ListActiveBatchIDs :many
 SELECT b.id
 FROM world.production_batches b
 JOIN world.buildings bld ON bld.id = b.building_id
-WHERE b.status IN ('running', 'paused_no_fuel', 'paused_no_workers')
+WHERE b.status IN ('running', 'paused_no_fuel', 'paused_no_workers', 'paused_no_power')
   AND bld.status = 'operational'
+  AND ($1::uuid IS NULL OR b.id > $1)
 ORDER BY b.id
-LIMIT $1
+LIMIT $2
 `
+
+type ListActiveBatchIDsParams struct {
+	AfterID   *uuid.UUID
+	PageLimit int32
+}
 
 // ═════════════════════════════════════════════════════════════════════════════
 // (3) Motor de producción: barrido analítico de lotes vencidos.
 // ═════════════════════════════════════════════════════════════════════════════
 // ListActiveBatchIDs lista los lotes running o pausados de edificios operativos
 // (candidatos del barrido). El due-ness (progreso analítico con la eficiencia
-// del nivel) se decide en Go tras bloquear cada lote.
-func (q *Queries) ListActiveBatchIDs(ctx context.Context, pageLimit int32) ([]uuid.UUID, error) {
-	rows, err := q.db.Query(ctx, listActiveBatchIDs, pageLimit)
+// del nivel) se decide en Go tras bloquear cada lote. after_id es el cursor de
+// CONTINUACIÓN entre barridos (v1.10): sin él, una población de lotes pausados
+// estable >= page_limit al principio del orden por id (UUIDv7 ≈ antigüedad)
+// ocuparía todas las pasadas y los lotes posteriores no se barrerían jamás; el
+// worker avanza el cursor por pasadas y lo reinicia al agotar la lista.
+func (q *Queries) ListActiveBatchIDs(ctx context.Context, arg ListActiveBatchIDsParams) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, listActiveBatchIDs, arg.AfterID, arg.PageLimit)
 	if err != nil {
 		return nil, err
 	}
@@ -813,9 +826,10 @@ const lockBatchForProcessing = `-- name: LockBatchForProcessing :one
 SELECT b.id, b.building_id, b.recipe_id, b.batches_queued, b.batches_done,
        b.status, b.queue_position, b.started_at_sim,
        bld.owner_account_id, bld.region_id, bld.level, bld.fuel_stock,
-       bld.status AS building_status,
+       bld.status AS building_status, bld.powered_until_sim, bld.powered_rate,
        bt.base_storage, bt.level_curve, bt.code AS building_type_code, bt.placement_rules,
-       r.batch_sim_seconds, r.fuel_product_id, r.fuel_per_batch, r.workers_required
+       r.batch_sim_seconds, r.fuel_product_id, r.fuel_per_batch, r.workers_required,
+       r.power_per_hour
 FROM world.production_batches b
 JOIN world.buildings bld ON bld.id = b.building_id
 JOIN world.building_types bt ON bt.id = bld.building_type_id
@@ -838,6 +852,8 @@ type LockBatchForProcessingRow struct {
 	Level            int32
 	FuelStock        int64
 	BuildingStatus   WorldBuildingStatus
+	PoweredUntilSim  int64
+	PoweredRate      int64
 	BaseStorage      int64
 	LevelCurve       []byte
 	BuildingTypeCode string
@@ -846,6 +862,7 @@ type LockBatchForProcessingRow struct {
 	FuelProductID    *uuid.UUID
 	FuelPerBatch     int64
 	WorkersRequired  int32
+	PowerPerHour     int64
 }
 
 // LockBatchForProcessing bloquea un lote (FOR UPDATE OF b SKIP LOCKED) y devuelve
@@ -870,6 +887,8 @@ func (q *Queries) LockBatchForProcessing(ctx context.Context, id uuid.UUID) (Loc
 		&i.Level,
 		&i.FuelStock,
 		&i.BuildingStatus,
+		&i.PoweredUntilSim,
+		&i.PoweredRate,
 		&i.BaseStorage,
 		&i.LevelCurve,
 		&i.BuildingTypeCode,
@@ -878,6 +897,7 @@ func (q *Queries) LockBatchForProcessing(ctx context.Context, id uuid.UUID) (Loc
 		&i.FuelProductID,
 		&i.FuelPerBatch,
 		&i.WorkersRequired,
+		&i.PowerPerHour,
 	)
 	return i, err
 }
@@ -1024,7 +1044,7 @@ const nextQueuePosition = `-- name: NextQueuePosition :one
 SELECT COALESCE(MAX(queue_position) + 1, 0)::int AS position
 FROM world.production_batches
 WHERE building_id = $1
-  AND status IN ('queued', 'running', 'paused_no_fuel', 'paused_no_workers')
+  AND status IN ('queued', 'running', 'paused_no_fuel', 'paused_no_workers', 'paused_no_power')
 `
 
 // NextQueuePosition devuelve la siguiente posición libre de la cola de un

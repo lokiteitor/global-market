@@ -21,6 +21,7 @@ Los quince primeros ADRs (motor event-driven, sim-time 24×, ventana de mantenim
 | [ADR-022](ADR-022-world-source-stock.md) | Cuentas `world_source`: contrapartida física del ledger para producción/consumo de stock | Aceptado | Modelo contable (DB doc, migración 0004/0008) |
 | [ADR-023](ADR-023-notification-gateway-ws.md) | Protocolo del Notification/Event Gateway (WebSocket) | Aceptado | Resuelve FAD §27.5 nº1; completa ADR-017 §5 |
 | [ADR-024](ADR-024-sdk-bots.md) | SDK oficial de bots y Bot Orchestration Service | Aceptado | Desarrolla ADR-010, GDD §13/§15.4 |
+| [ADR-025](ADR-025-red-electrica-regional.md) | Red eléctrica regional (Fase 3): convivencia por receta, puja de demanda y mercado spot | Aceptado | Desarrolla GDD §5.8/§18.1; enums `world.batch_status` y `ledger.transaction_kind` (migración 0017) |
 
 ## Formato
 

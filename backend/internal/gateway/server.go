@@ -32,6 +32,7 @@ import (
 	"github.com/lokiteitor/global-market/backend/internal/world/catalog"
 	"github.com/lokiteitor/global-market/backend/internal/world/fleet"
 	"github.com/lokiteitor/global-market/backend/internal/world/land"
+	"github.com/lokiteitor/global-market/backend/internal/world/power"
 	"github.com/lokiteitor/global-market/backend/internal/world/production"
 )
 
@@ -67,6 +68,10 @@ type Options struct {
 	// Fleet es la configuración del subpaquete world/fleet (flota y despacho de
 	// cargamentos; el motor de tránsito vive en el engine).
 	Fleet fleet.Options
+	// Power es la configuración del subpaquete world/power (líneas de
+	// transmisión, ofertas/pujas y lecturas del spot; el tick del mercado vive
+	// en el engine, en el Balancer — ADR-025).
+	Power power.Options
 	// Logistics es la configuración del bounded context logistics (Logistics
 	// Service: grafo, route-plans y rutas propietarias).
 	Logistics logistics.Options
@@ -117,6 +122,10 @@ func OptionsFromEnv() (Options, error) {
 	if err != nil {
 		return Options{}, err
 	}
+	powerOpts, err := power.OptionsFromEnv()
+	if err != nil {
+		return Options{}, err
+	}
 	logisticsOpts, err := logistics.OptionsFromEnv()
 	if err != nil {
 		return Options{}, err
@@ -139,6 +148,7 @@ func OptionsFromEnv() (Options, error) {
 		Buildings:   buildingsOpts,
 		Production:  productionOpts,
 		Fleet:       fleetOpts,
+		Power:       powerOpts,
 		Logistics:   logisticsOpts,
 		Notify:      notifyOpts,
 		ClockReader: readerOpts,
@@ -321,12 +331,22 @@ func BuildServer(deps Deps) (*Server, error) {
 	}
 	fleetHandlers := fleet.NewHandlers(fleetSvc, sessionIdentity{}, meta, deps.Logger)
 
+	// world/power (Fase 3, ADR-025): líneas de transmisión, ofertas de
+	// generación, pujas de consumo y lecturas del spot. El tick del mercado
+	// vive en el engine (Balancer, GDD 18.1); aquí solo los activos físicos.
+	powerSvc, err := power.NewService(deps.Pool, meta.reader, deps.Options.Power, deps.Logger, deps.Registry)
+	if err != nil {
+		return nil, err
+	}
+	powerHandlers := power.NewHandlers(powerSvc, sessionIdentity{}, meta, deps.Logger)
+
 	worldMux := http.NewServeMux()
 	catalogHandlers.Register(worldMux)
 	landHandlers.Register(worldMux)
 	buildingsHandlers.Register(worldMux)
 	productionHandlers.Register(worldMux)
 	fleetHandlers.Register(worldMux)
+	powerHandlers.Register(worldMux)
 	api.Handle(APIPrefix+"/world/",
 		http.StripPrefix(APIPrefix, authMW.RequireAuth(authMW.RateLimitAPI(idempotentWrites(idemMW, worldMux)))))
 

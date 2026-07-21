@@ -34,6 +34,15 @@ type Product struct {
 	IsFuel       bool
 }
 
+// PowerGeneration son los parámetros de generación de un tipo de central
+// eléctrica (world.power_plant_types, ADR-025): capacidad por hora-sim a
+// nivel 1 y combustible por unidad despachada (nil/0 en hidroeléctricas).
+type PowerGeneration struct {
+	Capacity      int64
+	FuelProductID *uuid.UUID
+	FuelPerUnit   int64
+}
+
 // BuildingType es un tipo de edificio construible (schema BuildingType).
 type BuildingType struct {
 	ID              uuid.UUID
@@ -46,6 +55,7 @@ type BuildingType struct {
 	LevelCurve      []byte // JSONB crudo (objeto)
 	BuildCost       int64
 	MaintenanceCost int64
+	PowerGeneration *PowerGeneration // nil si el tipo no es una central
 }
 
 // RecipeIngredient es un insumo (input) o producto (output) de una receta.
@@ -64,6 +74,7 @@ type Recipe struct {
 	BatchSimSeconds   int64
 	FuelProductID     *uuid.UUID
 	FuelPerBatch      int64
+	PowerPerHour      int64 // consumo eléctrico (unidades/hora-sim; ADR-025)
 	WorkersRequired   int32
 	MinCityLevel      int32
 	ChangeoverSeconds int64

@@ -352,6 +352,7 @@ type recipeSpec struct {
 	batchSimSeconds int64
 	fuelProductID   *uuid.UUID
 	fuelPerBatch    int64
+	powerPerHour    int64 // consumo eléctrico (unidades/hora-sim; ADR-025)
 	workersRequired int
 	ingredients     []ingredientSpec
 }
@@ -374,10 +375,10 @@ func ensureRecipe(ctx context.Context, pool *pgxpool.Pool, spec recipeSpec, logg
 		if _, err := pool.Exec(ctx, `
 			INSERT INTO world.recipes
 			       (id, building_type_id, code, name, batch_sim_seconds,
-			        fuel_product_id, fuel_per_batch, workers_required)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+			        fuel_product_id, fuel_per_batch, power_per_hour, workers_required)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
 			id, spec.buildingTypeID, spec.code, spec.name, spec.batchSimSeconds,
-			spec.fuelProductID, spec.fuelPerBatch, spec.workersRequired); err != nil {
+			spec.fuelProductID, spec.fuelPerBatch, spec.powerPerHour, spec.workersRequired); err != nil {
 			return fmt.Errorf("seed: creando la receta %q: %w", spec.code, err)
 		}
 		logger.Info("receta creada",

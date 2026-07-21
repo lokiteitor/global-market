@@ -44,6 +44,7 @@ export const BATCH_STATUS_PRESENTATION: Readonly<Record<BatchStatus, StatusPrese
   running: { labelKey: 'status.batch.running', severity: 'busy' },
   paused_no_fuel: { labelKey: 'status.batch.paused_no_fuel', severity: 'warn' },
   paused_no_workers: { labelKey: 'status.batch.paused_no_workers', severity: 'warn' },
+  paused_no_power: { labelKey: 'status.batch.paused_no_power', severity: 'warn' },
   completed: { labelKey: 'status.batch.completed', severity: 'ok' },
   cancelled: { labelKey: 'status.batch.cancelled', severity: 'warn' },
 }

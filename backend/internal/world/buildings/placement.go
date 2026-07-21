@@ -10,9 +10,11 @@ import (
 )
 
 // parsedRules es la interpretación de building_types.placement_rules soportada
-// por este incremento (extensible): near_resource (+ max_distance_m) y
-// requires_node_kind. Las claves desconocidas se recogen en Unknown para
-// registrarlas con warn e ignorarlas (regla desconocida ⇒ no bloquea).
+// (extensible): near_resource (+ max_distance_m), requires_node_kind y
+// requires_biome (lista de biomas admitidos para la región de la concesión —
+// el emplazamiento "ríos/agua" de las hidroeléctricas, ADR-025 §5). Las claves
+// desconocidas se recogen en Unknown para registrarlas con warn e ignorarlas
+// (regla desconocida ⇒ no bloquea).
 type parsedRules struct {
 	NearResource     string
 	HasNearResource  bool
@@ -20,6 +22,8 @@ type parsedRules struct {
 	HasMaxDistance   bool
 	RequiresNodeKind string
 	HasRequiresNode  bool
+	RequiresBiome    []string
+	HasRequiresBiome bool
 	Unknown          []string
 }
 
@@ -53,6 +57,12 @@ func parsePlacementRules(raw []byte) (parsedRules, error) {
 				pr.RequiresNodeKind = s
 				pr.HasRequiresNode = true
 			}
+		case "requires_biome":
+			var list []string
+			if err := json.Unmarshal(v, &list); err == nil && len(list) > 0 {
+				pr.RequiresBiome = list
+				pr.HasRequiresBiome = true
+			}
 		default:
 			pr.Unknown = append(pr.Unknown, k)
 		}
@@ -68,6 +78,17 @@ func deriveNodeKind(code string, rules parsedRules) sqlcgen.WorldNodeKind {
 		return sqlcgen.WorldNodeKindMine
 	}
 	return sqlcgen.WorldNodeKindFactory
+}
+
+// validBiome indica si s es un world.biome conocido (un bioma desconocido en
+// requires_biome se ignora con warn, como cualquier regla no soportada).
+func validBiome(s string) bool {
+	switch sqlcgen.WorldBiome(s) {
+	case sqlcgen.WorldBiomePlains, sqlcgen.WorldBiomeForest, sqlcgen.WorldBiomeDesert,
+		sqlcgen.WorldBiomeMountain, sqlcgen.WorldBiomeOcean, sqlcgen.WorldBiomeCoast:
+		return true
+	}
+	return false
 }
 
 // validNodeKind indica si s es un world.node_kind conocido (una regla

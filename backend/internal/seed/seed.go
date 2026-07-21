@@ -257,6 +257,14 @@ func Run(ctx context.Context, pool *pgxpool.Pool, opts Options, logger *slog.Log
 		if err := ensureCityInfrastructure(ctx, pool, ledgerSvc, bank, emission, cat, simNow, logger); err != nil {
 			return err
 		}
+
+		// (i) Catálogo eléctrico de la Fase 3 (GDD 5.8, ADR-025): centrales
+		// construibles (térmica de carbón e hidroeléctrica con emplazamiento en
+		// bioma coast) y la receta eléctrica opt-in del alto horno. Depende del
+		// mundo industrial (alto horno, steel_ingot), por eso comparte su gate.
+		if err := ensurePowerCatalog(ctx, pool, cat, logger); err != nil {
+			return err
+		}
 	}
 
 	logger.Info("seed completado")
