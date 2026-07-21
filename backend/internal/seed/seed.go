@@ -67,6 +67,16 @@ const CentralBankName = "Banco Central"
 // por corporación como emisión balanceada: +capital caja / -capital emisión.
 const CorpSeedCapital int64 = 1_000_000
 
+// CentralBankTreasury es la tesorería de sistema del banco central, en unidades
+// menores de dinero. Es la garantía con la que el sistema publica sus ofertas
+// sell en la subasta del stock embargado (Incremento 6a, GDD 11.2): cada oferta
+// bloquea el 10% del valor como garantía, que el liquidador toma de esta caja.
+// Se emite UNA sola vez —el banco central puede emitir para sí (Arquitectura
+// §9)— como asiento balanceado +tesorería caja / -tesorería emisión. Si llegara
+// a agotarse, el liquidador emite el faltante como colateral (system_liquidator,
+// ensureGuaranteeCollateral); esta tesorería evita esa emisión en el caso común.
+const CentralBankTreasury int64 = 1_000_000
+
 // Options es la configuración del seed.
 type Options struct {
 	// DemoName es el nombre de la cuenta humana demo (II_SEED_DEMO_NAME).
@@ -170,6 +180,14 @@ func Run(ctx context.Context, pool *pgxpool.Pool, opts Options, logger *slog.Log
 		return err
 	}
 	if _, err := ensureLedgerAccount(ctx, ledgerSvc, ledger.AccountKindSink, bank, logger); err != nil {
+		return err
+	}
+
+	// (b') Tesorería del banco central: caja de sistema con capital de garantía,
+	// emitido una única vez (el banco central emite para sí). Habilita al sistema
+	// a publicar ofertas sell en la subasta del stock embargado sin depender de
+	// emitir colateral por operación (Incremento 6a, GDD 11.2).
+	if err := ensureCentralBankTreasury(ctx, ledgerSvc, bank, emission, simNow, logger); err != nil {
 		return err
 	}
 
@@ -345,6 +363,51 @@ func ensureCorporation(ctx context.Context, repo *auth.PGRepository, ledgerSvc *
 		slog.String("transaction_id", txID.String()),
 		slog.Int64("sim_time_at", int64(simNow)))
 	return acc, nil
+}
+
+// ensureCentralBankTreasury garantiza la caja de sistema del banco central con
+// su tesorería de garantía (CentralBankTreasury), emitida una única vez. La
+// existencia de la caja es la clave de idempotencia del capital: si ya existía,
+// la tesorería se emitió en un seed anterior y no se re-emite (ni en re-arranques
+// ni tras cobrar proceeds de subastas). El asiento es balanceado
+// (+tesorería caja / −tesorería emisión), así el ledger sigue cerrando a cero
+// por dinero (la emisión es la única cuenta monetaria que puede quedar negativa).
+func ensureCentralBankTreasury(ctx context.Context, ledgerSvc *ledger.Service, bank auth.Account, emission ledger.Account, simNow simtime.SimTime, logger *slog.Logger) error {
+	existing, _, err := ledgerSvc.ListAccounts(ctx, bank.ID, ledger.AccountFilter{
+		Kind: ledger.AccountKindCash, Limit: 1,
+	})
+	if err != nil {
+		return err
+	}
+	if len(existing) > 0 {
+		logger.Info("tesorería del banco central ya existía: emisión omitida",
+			slog.String("account", bank.Name),
+			slog.String("ledger_account_id", existing[0].ID.String()),
+			slog.Int64("balance", existing[0].Balance))
+		return nil
+	}
+
+	cash, err := ledgerSvc.EnsureCashAccount(ctx, bank.ID)
+	if err != nil {
+		return err
+	}
+	ref := bank.ID
+	txID, err := ledgerSvc.PostTransaction(ctx, ledger.TransactionKindSeedCapital, simNow, &ref,
+		"Tesorería de garantía del banco central (emisión para sí)",
+		[]ledger.EntryInput{
+			{AccountID: cash.ID, Amount: CentralBankTreasury},
+			{AccountID: emission.ID, Amount: -CentralBankTreasury},
+		})
+	if err != nil {
+		return err
+	}
+	logger.Info("tesorería del banco central asentada",
+		slog.String("account", bank.Name),
+		slog.Int64("amount", CentralBankTreasury),
+		slog.String("ledger_account_id", cash.ID.String()),
+		slog.String("transaction_id", txID.String()),
+		slog.Int64("sim_time_at", int64(simNow)))
+	return nil
 }
 
 // ensureAuthAccount devuelve la cuenta de auth con ese nombre, creándola con

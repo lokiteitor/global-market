@@ -29,6 +29,7 @@ import (
 	"github.com/lokiteitor/global-market/backend/internal/platform/service"
 	"github.com/lokiteitor/global-market/backend/internal/sim/clock"
 	"github.com/lokiteitor/global-market/backend/internal/sim/simtime"
+	"github.com/lokiteitor/global-market/backend/internal/world/enforcement"
 	"github.com/lokiteitor/global-market/backend/internal/world/fleet"
 	"github.com/lokiteitor/global-market/backend/internal/world/production"
 )
@@ -112,6 +113,17 @@ func run() error {
 	}
 	deliveryConsumer := deliveryConfirmer.NewConsumer(app.Pool(), outbox.WithLogger(app.Logger()))
 
+	// Liquidador del sistema: consume building.seized (emitido por
+	// world/enforcement al embargar) y subasta PÚBLICAMENTE el stock embargado —
+	// lo transfiere al banco central y lo publica como oferta sell del sistema al
+	// precio de remate; los proceeds los cobra el banco central (efecto
+	// sink/absorción, GDD 11.2). Cierra la cascada de insolvencia.
+	systemLiquidator, err := contracts.NewSystemLiquidator(contractsSvc, app.Logger(), app.Metrics().Registry())
+	if err != nil {
+		return err
+	}
+	liquidatorConsumer := systemLiquidator.NewConsumer(app.Pool(), outbox.WithLogger(app.Logger()))
+
 	// ── Agregador OHLC: consumidor del outbox de contract.settled ────────────
 	marketOpts, err := market.OptionsFromEnv()
 	if err != nil {
@@ -153,6 +165,20 @@ func run() error {
 	}
 	shipmentCreator := fleet.NewShipmentCreator(app.Logger(), app.Metrics().Registry())
 	shipmentConsumer := shipmentCreator.NewConsumer(app.Pool(), outbox.WithLogger(app.Logger()))
+
+	// ── Motor de insolvencia (Incremento 6a): cascada de mantenimiento →
+	//    degradación → abandono → embargo → reversión del suelo, y canon →
+	//    gracia → embargo (GDD 5.9/11.2). Mismo reloj de simulación; emite
+	//    building.seized (lo consume la liquidación del sistema de contracts) y
+	//    concession.reverted ──────────────────────────────────────────────────
+	enforcementWorkerOpts, err := enforcement.WorkerOptionsFromEnv()
+	if err != nil {
+		return err
+	}
+	enforcementWorker, err := enforcement.NewWorker(app.Pool(), clockSimSource{clk}, enforcementWorkerOpts, app.Logger(), app.Metrics().Registry())
+	if err != nil {
+		return err
+	}
 	// Liberación in situ: consume contract.expired_undelivered (emitido por el
 	// Contract Service al vencer un contrato con cantidad sin entregar) y detiene
 	// los cargamentos aún en tránsito de ese contrato, reintegrando su stock físico
@@ -164,7 +190,7 @@ func run() error {
 	// Comparten el ctx de la señal: al apagar, los bucles observan ctx.Done() y
 	// retornan nil (parada limpia). wg los sincroniza antes de cerrar el pool.
 	var wg sync.WaitGroup
-	wg.Add(7)
+	wg.Add(9)
 	go func() {
 		defer wg.Done()
 		if err := worker.Run(ctx); err != nil {
@@ -207,6 +233,18 @@ func run() error {
 			app.Logger().Error("world/fleet: el consumidor shipment_releaser terminó con error", slog.Any("error", err))
 		}
 	}()
+	go func() {
+		defer wg.Done()
+		if err := enforcementWorker.Run(ctx); err != nil {
+			app.Logger().Error("world/enforcement: el motor de insolvencia terminó con error", slog.Any("error", err))
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		if err := liquidatorConsumer.Run(ctx, consumerInterval, systemLiquidator.Handle); err != nil {
+			app.Logger().Error("contracts: el consumidor system_liquidator terminó con error", slog.Any("error", err))
+		}
+	}()
 
 	app.Logger().Info("procesos del motor en marcha",
 		slog.Duration("contracts_sweep_interval", workerOpts.SweepInterval),
@@ -228,7 +266,14 @@ func run() error {
 		slog.Duration("congestion_interval", fleetWorkerOpts.CongestionInterval),
 		slog.String("shipment_creator", fleet.ConsumerShipmentCreator),
 		slog.String("shipment_releaser", fleet.ConsumerShipmentReleaser),
-		slog.String("delivery_confirmer", contracts.ConsumerDeliveryConfirmer))
+		slog.String("delivery_confirmer", contracts.ConsumerDeliveryConfirmer),
+		slog.String("system_liquidator", contracts.ConsumerSystemLiquidator),
+		slog.Int("liquidation_price_bp", contractsOpts.LiquidationPriceBP),
+		slog.Duration("maintenance_interval", enforcementWorkerOpts.MaintenanceInterval),
+		slog.Duration("enforcement_interval", enforcementWorkerOpts.EnforcementInterval),
+		slog.Int("degrade_pct_per_sim_day", int(enforcementWorkerOpts.DegradePctPerSimDay)),
+		slog.Int("abandon_condition_pct", int(enforcementWorkerOpts.AbandonConditionPct)),
+		slog.Int64("seize_grace_sim_seconds", enforcementWorkerOpts.SeizeGraceSimSeconds))
 
 	// Sirve HTTP (sondas/métricas) hasta la señal; entonces app.Run apaga el
 	// servidor de forma graceful. Al retornar, el ctx ya está cancelado y los

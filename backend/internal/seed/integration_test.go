@@ -477,14 +477,15 @@ func assertCoherence(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 		t.Fatalf("el ledger no cierra a cero en %d activos", unbalancedAssets)
 	}
 
-	// La emisión monetaria es exactamente el capital de las dos corporaciones.
+	// La emisión monetaria es exactamente el capital de las dos corporaciones más
+	// la tesorería de garantía del banco central (emitida para sí, Incremento 6a).
 	var emission int64
 	if err := pool.QueryRow(ctx,
 		`SELECT balance FROM ledger.accounts WHERE kind = 'emission'`).Scan(&emission); err != nil {
 		t.Fatalf("cuenta emission: %v", err)
 	}
-	if emission != -2*seed.CorpSeedCapital {
-		t.Fatalf("emission: %d, esperado %d", emission, -2*seed.CorpSeedCapital)
+	if want := -(2*seed.CorpSeedCapital + seed.CentralBankTreasury); emission != want {
+		t.Fatalf("emission: %d, esperado %d", emission, want)
 	}
 }
 

@@ -28,6 +28,7 @@ const (
 	txKindPublicationLock    = "publication_lock"
 	txKindPublicationRelease = "publication_release"
 	txKindAcceptanceLock     = "acceptance_lock"
+	txKindAuction            = "auction" // subasta de embargo vía CCRI (GDD 11.2)
 )
 
 // SQLSTATE y constraints que este módulo traduce a errores tipados.
@@ -134,116 +135,9 @@ func (s *Service) CreatePublication(ctx context.Context, publisher uuid.UUID, in
 
 	var out Publication
 	err = db.RunSerializable(ctx, s.pool, func(tx pgx.Tx) error {
-		r := s.repo.WithTx(tx)
-
-		ok, err := r.ProductExists(ctx, *in.ProductID)
-		if err != nil {
-			return err
-		}
-		if !ok {
-			return fmt.Errorf("%w: el producto %s no existe", ErrValidation, *in.ProductID)
-		}
-
-		pubID, err := newUUIDv7()
-		if err != nil {
-			return err
-		}
-		params := insertPublicationParams{
-			ID:                    pubID,
-			Kind:                  in.Kind,
-			PublisherAccountID:    publisher,
-			Channel:               in.Channel,
-			CounterpartyAccountID: in.CounterpartyAccountID,
-			ProductID:             in.ProductID,
-			QuantityTotal:         in.QuantityTotal,
-			UnitPrice:             in.UnitPrice,
-			MinLot:                in.MinLot,
-			OriginNodeID:          in.OriginNodeID,
-			DestinationNodeID:     in.DestinationNodeID,
-			DeliverySimSeconds:    in.DeliverySimSeconds,
-			DrawWindowSeconds:     s.opts.DrawWindowSeconds,
-			CancelCooldownSeconds: s.opts.CancelCooldownSeconds,
-			PublishedAtSim:        simNow,
-		}
-
-		var entries []entryAmount
-		var description string
-		switch in.Kind {
-		case KindSell:
-			node, err := s.warehouseNode(ctx, r, *in.OriginNodeID, "origen")
-			if err != nil {
-				return err
-			}
-			// Colateral: el stock debe existir YA en el almacén de origen
-			// (regla base del CCRI: nada sobre producción futura) y la caja
-			// debe cubrir la garantía del 10%.
-			stockFree, err := s.stockFreeOrCollateral(ctx, r, publisher, *in.ProductID, *node.BuildingID, in.QuantityTotal)
-			if err != nil {
-				return err
-			}
-			cash, err := s.cashOrCollateral(ctx, r, publisher, guarantee)
-			if err != nil {
-				return err
-			}
-			reserved, err := r.CreateMirrorAccount(ctx, accountKindStockReserved, publisher, in.ProductID, node.BuildingID, pubID)
-			if err != nil {
-				return err
-			}
-			guaranteeAcc, err := r.CreateMirrorAccount(ctx, accountKindGuarantee, publisher, nil, nil, pubID)
-			if err != nil {
-				return err
-			}
-			params.StockReserveAccountID = &reserved.ID
-			params.GuaranteeAccountID = &guaranteeAcc.ID
-			entries = []entryAmount{
-				{AccountID: stockFree.ID, Amount: -in.QuantityTotal},
-				{AccountID: reserved.ID, Amount: in.QuantityTotal},
-				{AccountID: cash.ID, Amount: -guarantee},
-				{AccountID: guaranteeAcc.ID, Amount: guarantee},
-			}
-			description = fmt.Sprintf("Publicación sell: %d de stock congelado + garantía %d (10%%)", in.QuantityTotal, guarantee)
-
-		case KindBuy:
-			if _, err := s.warehouseNode(ctx, r, *in.DestinationNodeID, "destino"); err != nil {
-				return err
-			}
-			cash, err := s.cashOrCollateral(ctx, r, publisher, value)
-			if err != nil {
-				return err
-			}
-			escrowAcc, err := r.CreateMirrorAccount(ctx, accountKindEscrow, publisher, nil, nil, pubID)
-			if err != nil {
-				return err
-			}
-			params.EscrowAccountID = &escrowAcc.ID
-			entries = []entryAmount{
-				{AccountID: cash.ID, Amount: -value},
-				{AccountID: escrowAcc.ID, Amount: value},
-			}
-			description = fmt.Sprintf("Publicación buy: %d retenido en escrow (100%%)", value)
-		}
-
-		out, err = r.InsertPublication(ctx, params)
-		if err != nil {
-			return err
-		}
-		if err := r.PostLedgerTransaction(ctx, txKindPublicationLock, simNow, pubID, description, entries); err != nil {
-			return err
-		}
-		return outbox.Emit(ctx, tx, int64(simNow), AggregatePublication, pubID, EventPublicationCreated, PublicationCreatedPayload{
-			PublicationID:      pubID.String(),
-			Kind:               string(out.Kind),
-			Channel:            string(out.Channel),
-			PublisherAccountID: publisher.String(),
-			ProductID:          uuidOrEmpty(out.ProductID),
-			QuantityTotal:      fixed(out.QuantityTotal),
-			UnitPrice:          fixed(out.UnitPrice),
-			MinLot:             fixed(out.MinLot),
-			OriginNodeID:       uuidOrEmpty(out.OriginNodeID),
-			DestinationNodeID:  uuidOrEmpty(out.DestinationNodeID),
-			DeliverySimSeconds: int64(out.DeliverySimSeconds),
-			PublishedAtSim:     int64(out.PublishedAtSim),
-		})
+		var e error
+		out, e = s.createPublicationTx(ctx, s.repo.WithTx(tx), tx, publisher, in, value, guarantee, simNow)
+		return e
 	})
 	if err != nil {
 		return Publication{}, mapLedgerError(err)
@@ -257,6 +151,128 @@ func (s *Service) CreatePublication(ctx context.Context, publisher uuid.UUID, in
 		slog.String("publisher", publisher.String()),
 		slog.Int64("quantity_total", out.QuantityTotal),
 		slog.Int64("unit_price", out.UnitPrice))
+	return out, nil
+}
+
+// createPublicationTx asienta una publicación (validación de producto, cuentas
+// espejo, bloqueo de colateral y evento publication.created) DENTRO de una
+// transacción ya abierta (tx) sobre un Repo ya ligado a ella (r). Es el núcleo
+// compartido: lo envuelve CreatePublication con su propia transacción
+// SERIALIZABLE, y lo reutiliza el consumidor system_liquidator dentro de la
+// transacción del lote del outbox (la subasta del stock embargado es una venta
+// del sistema por el MISMO camino que cualquier sell). `in` llega ya normalizado
+// (normalizePublicationInput) y value/guarantee ya calculados (lockAmounts).
+func (s *Service) createPublicationTx(ctx context.Context, r *Repo, tx pgx.Tx, publisher uuid.UUID, in PublicationInput, value, guarantee int64, simNow simtime.SimTime) (Publication, error) {
+	ok, err := r.ProductExists(ctx, *in.ProductID)
+	if err != nil {
+		return Publication{}, err
+	}
+	if !ok {
+		return Publication{}, fmt.Errorf("%w: el producto %s no existe", ErrValidation, *in.ProductID)
+	}
+
+	pubID, err := newUUIDv7()
+	if err != nil {
+		return Publication{}, err
+	}
+	params := insertPublicationParams{
+		ID:                    pubID,
+		Kind:                  in.Kind,
+		PublisherAccountID:    publisher,
+		Channel:               in.Channel,
+		CounterpartyAccountID: in.CounterpartyAccountID,
+		ProductID:             in.ProductID,
+		QuantityTotal:         in.QuantityTotal,
+		UnitPrice:             in.UnitPrice,
+		MinLot:                in.MinLot,
+		OriginNodeID:          in.OriginNodeID,
+		DestinationNodeID:     in.DestinationNodeID,
+		DeliverySimSeconds:    in.DeliverySimSeconds,
+		DrawWindowSeconds:     s.opts.DrawWindowSeconds,
+		CancelCooldownSeconds: s.opts.CancelCooldownSeconds,
+		PublishedAtSim:        simNow,
+	}
+
+	var entries []entryAmount
+	var description string
+	switch in.Kind {
+	case KindSell:
+		node, err := s.warehouseNode(ctx, r, *in.OriginNodeID, "origen")
+		if err != nil {
+			return Publication{}, err
+		}
+		// Colateral: el stock debe existir YA en el almacén de origen
+		// (regla base del CCRI: nada sobre producción futura) y la caja
+		// debe cubrir la garantía del 10%.
+		stockFree, err := s.stockFreeOrCollateral(ctx, r, publisher, *in.ProductID, *node.BuildingID, in.QuantityTotal)
+		if err != nil {
+			return Publication{}, err
+		}
+		cash, err := s.cashOrCollateral(ctx, r, publisher, guarantee)
+		if err != nil {
+			return Publication{}, err
+		}
+		reserved, err := r.CreateMirrorAccount(ctx, accountKindStockReserved, publisher, in.ProductID, node.BuildingID, pubID)
+		if err != nil {
+			return Publication{}, err
+		}
+		guaranteeAcc, err := r.CreateMirrorAccount(ctx, accountKindGuarantee, publisher, nil, nil, pubID)
+		if err != nil {
+			return Publication{}, err
+		}
+		params.StockReserveAccountID = &reserved.ID
+		params.GuaranteeAccountID = &guaranteeAcc.ID
+		entries = []entryAmount{
+			{AccountID: stockFree.ID, Amount: -in.QuantityTotal},
+			{AccountID: reserved.ID, Amount: in.QuantityTotal},
+			{AccountID: cash.ID, Amount: -guarantee},
+			{AccountID: guaranteeAcc.ID, Amount: guarantee},
+		}
+		description = fmt.Sprintf("Publicación sell: %d de stock congelado + garantía %d (10%%)", in.QuantityTotal, guarantee)
+
+	case KindBuy:
+		if _, err := s.warehouseNode(ctx, r, *in.DestinationNodeID, "destino"); err != nil {
+			return Publication{}, err
+		}
+		cash, err := s.cashOrCollateral(ctx, r, publisher, value)
+		if err != nil {
+			return Publication{}, err
+		}
+		escrowAcc, err := r.CreateMirrorAccount(ctx, accountKindEscrow, publisher, nil, nil, pubID)
+		if err != nil {
+			return Publication{}, err
+		}
+		params.EscrowAccountID = &escrowAcc.ID
+		entries = []entryAmount{
+			{AccountID: cash.ID, Amount: -value},
+			{AccountID: escrowAcc.ID, Amount: value},
+		}
+		description = fmt.Sprintf("Publicación buy: %d retenido en escrow (100%%)", value)
+	}
+
+	out, err := r.InsertPublication(ctx, params)
+	if err != nil {
+		return Publication{}, err
+	}
+	if err := r.PostLedgerTransaction(ctx, txKindPublicationLock, simNow, pubID, description, entries); err != nil {
+		return Publication{}, err
+	}
+	if err := outbox.Emit(ctx, tx, int64(simNow), AggregatePublication, pubID, EventPublicationCreated, PublicationCreatedPayload{
+		PublicationID:      pubID.String(),
+		Kind:               string(out.Kind),
+		Channel:            string(out.Channel),
+		PublisherAccountID: publisher.String(),
+		ProductID:          uuidOrEmpty(out.ProductID),
+		QuantityTotal:      fixed(out.QuantityTotal),
+		UnitPrice:          fixed(out.UnitPrice),
+		MinLot:             fixed(out.MinLot),
+		OriginNodeID:       uuidOrEmpty(out.OriginNodeID),
+		DestinationNodeID:  uuidOrEmpty(out.DestinationNodeID),
+		DeliverySimSeconds: int64(out.DeliverySimSeconds),
+		PublishedAtSim:     int64(out.PublishedAtSim),
+	}); err != nil {
+		return Publication{}, err
+	}
 	return out, nil
 }
 

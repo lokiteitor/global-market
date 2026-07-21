@@ -28,6 +28,10 @@ import (
 // (login fallido, API inaccesible, sesión expirada).
 const sessionRetryWait = 5 * time.Second
 
+// errBotRetired señala que la cuenta del bot fue retirada (ADR-024): su
+// goroutine debe terminar sin reintentar (una cuenta retirada no juega).
+var errBotRetired = errors.New("bots: cuenta retirada")
+
 // configuredBehavior es un Behavior cuyos umbrales se persisten como behavior
 // JSON en auth.bot_profiles (auditabilidad del ADR-024). Los tres arquetipos
 // v1 lo implementan.
@@ -290,18 +294,48 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 }
 
 // runBot mantiene vivas las sesiones de un bot: si la sesión cae (login
-// rechazado, API inaccesible, token expirado) espera y vuelve a entrar.
+// rechazado, API inaccesible, token expirado) espera y vuelve a entrar. Si la
+// cuenta fue retirada (ADR-024) la goroutine termina: una cuenta retirada no
+// vuelve a jugar.
 func (o *Orchestrator) runBot(ctx context.Context, bot ProvisionedBot) {
 	log := o.logger.With(slog.String("bot", bot.Name), slog.String("behavior", bot.Behavior.Name()))
 	st := NewState()
 	for ctx.Err() == nil {
-		if err := o.botSession(ctx, bot, st, log); err != nil && ctx.Err() == nil {
+		if retired, err := o.accountRetired(ctx, bot.AccountID); err != nil {
+			log.Warn("no se pudo comprobar el estado de la cuenta; se reintenta", slog.Any("error", err))
+		} else if retired {
+			log.Info("cuenta retirada: el bot deja de jugar")
+			return
+		}
+		err := o.botSession(ctx, bot, st, log)
+		if errors.Is(err, errBotRetired) {
+			log.Info("cuenta retirada: el bot deja de jugar")
+			return
+		}
+		if err != nil && ctx.Err() == nil {
 			log.Warn("sesión de bot terminada; se reintenta", slog.Any("error", err))
 		}
 		if err := sleepCtx(ctx, sessionRetryWait); err != nil {
 			return
 		}
 	}
+}
+
+// accountRetired indica si la cuenta ya no está activa (retirada/suspendida).
+// Una cuenta sin id (bot no aprovisionado) o inexistente se considera no
+// retirada: el flujo normal la resuelve por otras vías.
+func (o *Orchestrator) accountRetired(ctx context.Context, accountID uuid.UUID) (bool, error) {
+	if accountID == uuid.Nil {
+		return false, nil
+	}
+	status, err := o.repo.GetAccountStatus(ctx, accountID)
+	if errors.Is(err, auth.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return status != accountStatusActive, nil
 }
 
 // botSession ejecuta una sesión completa del bot: Login por el SDK, conexión
@@ -364,6 +398,11 @@ func (o *Orchestrator) botSession(ctx context.Context, bot ProvisionedBot, st *S
 				slog.Int64("watermark", wm))
 		}
 
+		// Una cuenta retirada no decide: se comprueba antes de cada pasada para
+		// dejar de jugar en cuanto el barrido de retiro la marque.
+		if retired, err := o.accountRetired(ctx, bot.AccountID); err == nil && retired {
+			return errBotRetired
+		}
 		if err := o.safeDecide(ctx, bot, client, st, log); err != nil {
 			return err // sesión inválida: re-login en runBot
 		}

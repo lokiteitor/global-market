@@ -206,8 +206,35 @@ func (s *Service) PostTransaction(ctx context.Context, kind TransactionKind, sim
 	return txID, err
 }
 
-// postTransaction ejecuta el asiento; separado para observar el resultado en
-// un único punto.
+// PostTransactionTx asienta cabecera + partidas DENTRO de la transacción tx del
+// llamante, para operaciones que deben confirmar de forma atómica JUNTO a otros
+// efectos —típicamente un evento del outbox (transactional outbox) y cambios en
+// otros esquemas— en una única transacción SERIALIZABLE. El aislamiento, los
+// reintentos por conflicto y el COMMIT son del llamante (db.RunSerializable);
+// el trigger diferido de doble entrada se evalúa en ESE commit, así que un
+// asiento no balanceado revierte toda la transacción del llamante.
+//
+// Misma validación de forma que PostTransaction (>=2 partidas, importes no
+// nulos) y mismo mapeo de errores de invariante (ErrInsufficientBalance…). No
+// observa la métrica de asientos: el resultado real solo se conoce en el commit
+// del llamante, que este método no controla.
+func (s *Service) PostTransactionTx(ctx context.Context, tx pgx.Tx, kind TransactionKind, simTime simtime.SimTime, referenceID *uuid.UUID, description string, entries []EntryInput) (uuid.UUID, error) {
+	if tx == nil {
+		return uuid.Nil, errors.New("ledger: PostTransactionTx requiere la transacción del llamante (tx nil)")
+	}
+	if len(entries) < 2 {
+		return uuid.Nil, ErrTooFewEntries
+	}
+	for _, e := range entries {
+		if e.Amount == 0 {
+			return uuid.Nil, fmt.Errorf("%w (cuenta %s)", ErrZeroAmount, e.AccountID)
+		}
+	}
+	return s.insertTransactionEntries(ctx, s.q.WithTx(tx), kind, simTime, referenceID, description, entries)
+}
+
+// postTransaction ejecuta el asiento en su PROPIA transacción serializable;
+// separado para observar el resultado en un único punto.
 func (s *Service) postTransaction(ctx context.Context, kind TransactionKind, simTime simtime.SimTime, referenceID *uuid.UUID, description string, entries []EntryInput) (uuid.UUID, error) {
 	ctx, cancel := s.withTimeout(ctx)
 	defer cancel()
@@ -219,7 +246,23 @@ func (s *Service) postTransaction(ctx context.Context, kind TransactionKind, sim
 	// Rollback tras Commit devuelve ErrTxClosed: inocuo.
 	defer tx.Rollback(context.WithoutCancel(ctx)) //nolint:errcheck
 
-	q := s.q.WithTx(tx)
+	txID, err := s.insertTransactionEntries(ctx, s.q.WithTx(tx), kind, simTime, referenceID, description, entries)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	// El trigger diferido de doble entrada se evalúa aquí: un asiento no
+	// balanceado hace fallar el COMMIT y lo revierte todo.
+	if err := tx.Commit(ctx); err != nil {
+		return uuid.Nil, mapPostError(err)
+	}
+	return txID, nil
+}
+
+// insertTransactionEntries inserta la cabecera y sus partidas con el querier
+// dado (ligado a la transacción que corresponda), generando los UUIDv7 en la
+// aplicación (ADR-018) y mapeando las violaciones de invariante a errores
+// tipados. No confirma: el COMMIT lo hace el dueño de la transacción.
+func (s *Service) insertTransactionEntries(ctx context.Context, q *sqlcgen.Queries, kind TransactionKind, simTime simtime.SimTime, referenceID *uuid.UUID, description string, entries []EntryInput) (uuid.UUID, error) {
 	txID, err := newUUIDv7()
 	if err != nil {
 		return uuid.Nil, err
@@ -250,11 +293,6 @@ func (s *Service) postTransaction(ctx context.Context, kind TransactionKind, sim
 		}); err != nil {
 			return uuid.Nil, mapPostError(err)
 		}
-	}
-	// El trigger diferido de doble entrada se evalúa aquí: un asiento no
-	// balanceado hace fallar el COMMIT y lo revierte todo.
-	if err := tx.Commit(ctx); err != nil {
-		return uuid.Nil, mapPostError(err)
 	}
 	return txID, nil
 }

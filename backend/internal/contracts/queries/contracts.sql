@@ -439,3 +439,37 @@ SELECT id, region_id FROM world.network_nodes
 WHERE building_id = sqlc.arg(building_id)
 ORDER BY id
 LIMIT 1;
+
+-- ═════════════════════════════════════════════════════════════════════════════
+-- Subasta pública del stock embargado (Incremento 6a, GDD 11.2). El consumidor
+-- contracts "system_liquidator" consume building.seized (emitido por
+-- world/enforcement), mueve el stock libre embargado a la cuenta stock_free del
+-- banco central (transacción 'auction', doble entrada por producto) y lo publica
+-- como oferta sell del sistema por el MISMO camino que cualquier venta del CCRI.
+-- ═════════════════════════════════════════════════════════════════════════════
+
+-- InsertSystemLiquidationIfNew reclama un embargo para su subasta de forma
+-- IDEMPOTENTE por building_id: si ya se liquidó (índice de clave primaria), no
+-- inserta y no devuelve fila (pgx.ErrNoRows). El outbox ya da exactly-once por
+-- cursor; esta reclamación es la defensa en profundidad (mismo embargo re-emitido
+-- o redespliegue no re-subastan). Se reclama ANTES de mover stock o publicar, de
+-- modo que un reproceso no repita el trabajo.
+-- name: InsertSystemLiquidationIfNew :one
+INSERT INTO ledger.system_liquidations (building_id, seized_at_sim, liquidated_at_sim)
+VALUES (sqlc.arg(building_id), sqlc.arg(seized_at_sim), sqlc.arg(liquidated_at_sim))
+ON CONFLICT (building_id) DO NOTHING
+RETURNING building_id;
+
+-- GetProductBasePrice devuelve el ancla administrada del producto (world.products
+-- .base_price, GDD 5.1/5.6): el precio de remate de la subasta es una fracción de
+-- ella (II_LIQUIDATION_PRICE_BP). pgx.ErrNoRows si el producto no existe.
+-- name: GetProductBasePrice :one
+SELECT base_price FROM world.products WHERE id = sqlc.arg(id);
+
+-- GetEmissionAccount devuelve la cuenta de emisión del banco central (la única
+-- cuenta monetaria que puede quedar negativa: es la masa emitida). El liquidador
+-- la usa para dotar de colateral (garantía del 10%) a la caja del sistema cuando
+-- no lo cubre: emisión de colateral de subasta, saldada al liquidarse la venta.
+-- pgx.ErrNoRows si el seed no la creó.
+-- name: GetEmissionAccount :one
+SELECT * FROM ledger.accounts WHERE kind = 'emission' ORDER BY id LIMIT 1;

@@ -2,13 +2,15 @@
 
 ## MMO de simulación económica, industrial y logística en un mundo único persistente. Decenas de miles de jugadores humanos y una población permanente de bots comparten el mismo mapa, el mismo mercado (tablón global de contratos CCRI) y las mismas reglas, sobre un servidor autoritativo.
 
-**Versión:** 1.4 · **Fecha:** 2026-07-17 · **Fuentes normativas:** GDD/SAD v1.3 (`gdd.md`), Arquitectura v1.3 (`arquitectura_imperio_industrial.md`) y contrato OpenAPI v1.3.0 (`api/openapi.yaml`), con los ADR-016 a ADR-022. Ante discrepancia, prevalece el GDD.
+**Versión:** 1.5 · **Fecha:** 2026-07-21 · **Fuentes normativas:** GDD/SAD v1.3 (`gdd.md`), Arquitectura v1.3 (`arquitectura_imperio_industrial.md`) y contrato OpenAPI v1.3.0 (`api/openapi.yaml`), con los ADR-016 a ADR-024. Ante discrepancia, prevalece el GDD.
 
 > **Cambios de v1.2 (Incremento 1 — núcleo CCRI, Fase 0):** ADR-022 (`ledger.account_kind` = `world_source`, contrapartida física de `production_output`/`consumption`); nueva tabla `public.idempotency_keys` (cabecera `Idempotency-Key` del contrato v1.2.0); migración `0008_ccri_support`; e **interpretaciones operativas del CCRI** (entrega in situ de las ventas, `origin_node_id` del aceptante en las compras, TTL de publicaciones abiertas, reparto de garantía, OHLC por región de destino) — todas en las secciones marcadas *v1.2* más abajo.
 >
 > **Cambios de v1.3 (Incremento 2 — mundo y producción, Fase 1):** cierra el lazo construir→producir→vender sobre el esquema `world` que ya existía desde `0003_world` — **no añade tablas, enums ni migraciones** (el bounded context `internal/world` materializa la *operación* de las tablas ya definidas). Documenta las **interpretaciones operativas del mundo y la producción**: sinks de `build_cost`/`upgrade_cost`/`canon`/`wage` y el traspaso de concesión; asientos de producción/extracción (`production_output`/`consumption` con `world_source` y su gemelo físico `building_inventories` en la misma tx); extracción que decrementa `resource_deposits` (finito); progreso analítico no persistido; reconciliación física↔contable (job del engine, gauge); decisión de combustible (`fuel_stock` como columna espejo); pausas `paused_no_fuel`/`paused_no_workers` como cascada de insolvencia parcial; y tiempo de construcción fijo — todas en la sección *v1.3* más abajo.
 >
 > **Cambios de v1.4 (Incremento 3 — logística física, Fase 1 terrestre):** materializa el pilar *ningún bien se mueve sin transporte físico; nada se teletransporta, tampoco en los fallos* (GDD 7.1/5.3) sobre el grafo, la flota y los cargamentos que ya existían desde `0003_world`. **Dos migraciones nuevas, sin tablas ni enums nuevos:** `0009_fleet_transit` (añade `world.shipments.destination_node_id`/`deadline_sim`, tres índices de barrido y la función SQL vinculante `world.segment_travel_seconds`) y `0010_delivery_idempotency` (índice único `ux_contract_deliveries_shipment`). Documenta las **interpretaciones operativas de la logística**: ciclo de vida del cargamento (`in_warehouse`→`in_transit`→`delivered`/`released_in_situ`) y la coherencia física↔contable ampliada (stock físico = `building_inventories` + cargamentos en vuelo); posición analítica de vehículos (segmento + `t_entrada` + `advance_fn`, derivada bajo demanda; solo los hitos escriben); congestión EMA por segmento; avería `broken` + reparación (la carga espera a bordo); y la integración CCRI↔Logística **solo por outbox** (`contract.confirmed` de compra cross-node → `shipment_creator`; `shipment.arrived` → `delivery_confirmer` → liquidación; `contract.expired_undelivered` → liberación in situ) — todas en la sección *v1.4* más abajo.
+
+> **Cambios de v1.5 (Incremento 6a — cascada de insolvencia, Fase 1):** materializa los **dos últimos escalones** de la cascada *saldo = 0, nunca deuda* (GDD 5.9) que el Incremento 2 había dejado pendientes —la **degradación por mantenimiento impagado** (3º) y el ciclo **canon → gracia → embargo → subasta** (4º, GDD 11.2)— sobre las tablas de `world`/`ledger` que ya existían. **Dos migraciones nuevas, sin enums nuevos:** `0011_enforcement` (añade `world.buildings.maintenance_paid_until_sim`, `world.vehicles.maintenance_paid_until_sim` y `world.land_concessions.grace_until_sim`, más seis índices de barrido) y `0012_system_liquidation` (**una tabla nueva**, `ledger.system_liquidations`, idempotencia de la subasta pública por `building_id`). El motor de consecuencias físicas vive en `internal/world/enforcement` (subpaquete de `world`, proceso *engine*); la liquidación del stock embargado la hace el consumidor `contracts`/`system_liquidator`; el retiro de bots insolventes-inactivos lo hace el `RetirementJob` del orquestador (`cmd/bots`). Documenta las **interpretaciones operativas de la insolvencia/embargo**: máquinas de estado exactas de edificio (`operational`→`damaged`→`abandoned`→`seized`) y concesión (`active`→`delinquent`→`grace`→`reverted`) con sus disparadores y umbrales `II_*`; asientos `maintenance`/`canon` como sink, `auction` de la subasta y `bot_retirement` como absorción (`cash`→`emission`); la liquidación del stock vía **oferta sell del sistema** (proceeds al banco central = efecto sink); y el invariante `saldo ≥ 0` a lo largo de toda la cascada (el motor cobra **solo lo disponible**) — todas en la sección *v1.5* más abajo. **Refinamiento diferido a Fase 2:** el traspaso del edificio **en pie** con pujas; en 6a el embargo congela el edificio, liquida su stock y revierte el suelo.
 
 ---
 
@@ -80,15 +82,15 @@ No aplica en Fases 0–1. Disparadores de adopción registrados (deben pasar por
 ## 📊 Estadísticas Generales
 
 ```
-Total de Tablas:            44   (auth 4 · world 25 · ledger 8 · analytics 4 · outbox 2 · public 1)
-Total de Enums:             21   (v1.2–v1.4 no añaden enums: world_source es un VALUE nuevo de ledger.account_kind, no un enum; los enums de flota/tránsito ya existían desde 0003_world)
+Total de Tablas:            45   (auth 4 · world 25 · ledger 9 · analytics 4 · outbox 2 · public 1)
+Total de Enums:             21   (v1.2–v1.5 no añaden enums: world_source es un VALUE nuevo de ledger.account_kind, no un enum; los enums de flota/tránsito, de estado de edificio operational/damaged/abandoned/seized y de concesión active/delinquent/grace/reverted ya existían desde 0003_world; maintenance/canon/auction/bot_retirement ya eran VALUES de ledger.transaction_kind desde 0004_ledger)
 Dominios de tipo:            3   (sim_time, money_amount, stock_qty)
 Triggers de invariante:      4   (balance por cuenta, doble entrada diferida, inmutabilidad ×2)
 Funciones todo-o-nada:       2 documentadas (confirm_contract, settle_contract_prorata)
 Funciones auxiliares SQL:    1 (segment_travel_seconds, IMMUTABLE — tiempo de viaje de un segmento, v1.4/0009)
 ```
 
-*(v1.2 añade `public.idempotency_keys` a las 43 tablas de v1.1 —que a su vez había añadido `auth.account_credentials` y `world.sim_clock` a las 41 de v1.0— y el `ledger.account_kind` `world_source` (ADR-022). **v1.3 (Incremento 2) no altera ningún conteo**: opera las tablas de `world` que ya existían desde `0003_world` sin migraciones nuevas. **v1.4 (Incremento 3) no altera el conteo de tablas ni de enums**: sus dos migraciones (`0009_fleet_transit`, `0010_delivery_idempotency`) solo añaden **dos columnas** a `world.shipments` (`destination_node_id`, `deadline_sim`), **cuatro índices** (tres parciales de barrido en `0009` más el único de idempotencia de entrega en `0010`) y **una función SQL** auxiliar (`world.segment_travel_seconds`). La fuente de verdad de todos los conteos —tablas, índices, FKs, CHECKs— son las migraciones de `/backend/db/migrations`, aplicadas contra PostgreSQL 18 + PostGIS 3.6.)*
+*(v1.2 añade `public.idempotency_keys` a las 43 tablas de v1.1 —que a su vez había añadido `auth.account_credentials` y `world.sim_clock` a las 41 de v1.0— y el `ledger.account_kind` `world_source` (ADR-022). **v1.3 (Incremento 2) no altera ningún conteo**: opera las tablas de `world` que ya existían desde `0003_world` sin migraciones nuevas. **v1.4 (Incremento 3) no altera el conteo de tablas ni de enums**: sus dos migraciones (`0009_fleet_transit`, `0010_delivery_idempotency`) solo añaden **dos columnas** a `world.shipments` (`destination_node_id`, `deadline_sim`), **cuatro índices** (tres parciales de barrido en `0009` más el único de idempotencia de entrega en `0010`) y **una función SQL** auxiliar (`world.segment_travel_seconds`). **v1.5 (Incremento 6a) añade una tabla** —`ledger.system_liquidations` (44→45; idempotencia de la subasta pública)— y **no añade enums**: sus dos migraciones (`0011_enforcement`, `0012_system_liquidation`) suman **tres columnas de estado del barrido** (`world.buildings.maintenance_paid_until_sim`, `world.vehicles.maintenance_paid_until_sim`, `world.land_concessions.grace_until_sim`) y **seis índices** de barrido de la cascada de insolvencia. La fuente de verdad de todos los conteos —tablas, índices, FKs, CHECKs— son las migraciones de `/backend/db/migrations`, aplicadas contra PostgreSQL 18 + PostGIS 3.6.)*
 
 ---
 
@@ -113,9 +115,13 @@ Orden lógico de las migraciones iniciales (en `/backend/db/migrations`):
 0008_ccri_support → ADR-022 (kind world_source) + public.idempotency_keys — soporte del núcleo CCRI (Incremento 1)
 0009_fleet_transit → world.shipments.destination_node_id/deadline_sim + índices de barrido + world.segment_travel_seconds — soporte del tránsito físico (Incremento 3)
 0010_delivery_idempotency → índice único ux_contract_deliveries_shipment — idempotencia estructural de la entrega del CCRI (Incremento 3)
+0011_enforcement → buildings/vehicles.maintenance_paid_until_sim + land_concessions.grace_until_sim + índices de barrido — cascada de insolvencia (Incremento 6a)
+0012_system_liquidation → tabla ledger.system_liquidations — idempotencia de la subasta pública del stock embargado (Incremento 6a)
 ```
 
 > **Migraciones `0009_fleet_transit` y `0010_delivery_idempotency` (Incremento 3 — logística física).** `0009` añade a `world.shipments` los dos datos del **contrato de origen** que el motor de tránsito necesita para validar el despacho y confirmar la entrega **sin cruzar al bounded context `contracts`** (la frontera entre contextos es de código Go; `world` y `contracts` se integran solo por el outbox, SAD §7 / ADR-006): `destination_node_id` (el nodo al que debe llegar el cargamento; su llegada física emite `shipment.arrived`) y `deadline_sim` (informativo para el motor; la puntualidad la decide el consumidor `contracts`). Ambas son **NULLABLE** —los cargamentos de retirada in situ no se despachan y las dejan sin poblar—. Añade tres índices parciales de barrido (`ix_vehicles_in_transit`, `ix_vehicles_broken`, `ix_shipments_destination`) y la función `world.segment_travel_seconds(advance_fn jsonb)` **`IMMUTABLE`**, fuente ÚNICA en SQL de la fórmula de tiempo de viaje de un segmento (la comparten la derivación analítica de la posición y el barrido de segmentos vencidos; el código Go no la reimplementa, la consulta). `0010` añade el índice único `ux_contract_deliveries_shipment` sobre `ledger.contract_deliveries(shipment_id)` que habilita el `INSERT … ON CONFLICT (shipment_id) DO NOTHING` del consumidor `delivery_confirmer`: reprocesar el mismo `shipment.arrived` (reintento del lote, redespliegue) no duplica la partida ni la cantidad entregada. Ambos `down` son reversibles (drop de columnas/índices/función); el detalle operativo está en la sección *v1.4* más abajo.
+
+> **Migraciones `0011_enforcement` y `0012_system_liquidation` (Incremento 6a — cascada de insolvencia).** `0011` añade las **columnas de estado** que barre el motor `internal/world/enforcement`, sin tocar el esquema base (los enums `world.building_status` y `world.concession_status` ya traían todos sus valores desde `0003_world`): `world.buildings.maintenance_paid_until_sim` y `world.vehicles.maintenance_paid_until_sim` (`sim_time NOT NULL DEFAULT 0` — sim-time hasta el que las obligaciones de mantenimiento/opex están **liquidadas**: pagadas en efectivo o saldadas por degradación, *nunca deuda*) y `world.land_concessions.grace_until_sim` (`sim_time` **NULLABLE** — vencimiento del periodo de gracia del canon; `NULL` mientras la concesión está al día). Añade seis índices de barrido: `ix_buildings_maintenance_due` (parcial `WHERE status IN ('operational','damaged')`), `ix_buildings_abandoned` (parcial `WHERE status='abandoned'`, base del conteo de gracia), `ix_buildings_concession` (localizar por concesión los edificios a congelar), `ix_concessions_grace` (parcial `WHERE status='delinquent'`), `ix_concessions_pending_seizure` (parcial `WHERE status='grace'`) y `ix_vehicles_maintenance_due`. El barrido de canon vencido reutiliza el `ix_concessions_expiry (expires_at_sim) WHERE status='active'` ya existente. `0012` añade la **tabla nueva** `ledger.system_liquidations` (PK `building_id`, sin FK a `world.buildings`: es un registro de auditoría/idempotencia del contexto de contratos, no una proyección del mundo — la frontera entre `contracts` y `world` es de código Go, SAD §7 / ADR-006) que garantiza que un `building.seized` se subasta **una sola vez** (defensa en profundidad sobre el exactly-once del cursor del outbox). Ambos `down` son reversibles (drop de columnas/índices y de la tabla); el detalle operativo —máquinas de estado, disparadores, asientos e invariante `saldo ≥ 0`— está en la sección *v1.5* más abajo.
 
 > **Migración `0008_ccri_support` (Incremento 1).** Se aplica con la directiva `-- migrate:no-transaction`: `ALTER TYPE ... ADD VALUE 'world_source'` no puede usarse en la misma transacción que lo referencia, así que cada sentencia va en autocommit y **todas son re-ejecutables** (`IF EXISTS`/`IF NOT EXISTS` o drop+add emparejados). Los dos CHECK de `ledger.accounts` (`ck_accounts_non_negative`, `ck_accounts_asset`) se recrean con `NOT VALID` + `VALIDATE` para no escanear la tabla bajo `ACCESS EXCLUSIVE`; la nueva condición es estrictamente más permisiva, así que `VALIDATE` no puede fallar sobre datos existentes. El `down` **falla explícitamente** si existen filas `world_source` (su saldo negativo violaría los CHECK originales) y no puede eliminar el VALUE del enum (límite de PostgreSQL: no hay `ALTER TYPE ... DROP VALUE`), que queda inerte al restaurarse los CHECK.
 
@@ -518,6 +524,7 @@ CREATE TABLE world.land_concessions (
     period_sim_days   INT NOT NULL DEFAULT 90,
     expires_at_sim    sim_time NOT NULL,
     status            world.concession_status NOT NULL DEFAULT 'active',
+    grace_until_sim   sim_time,                     -- v1.5 (0011): vencimiento de la gracia del canon; NULL mientras está al día
     granted_at_sim    sim_time NOT NULL,
     created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -526,23 +533,27 @@ CREATE TABLE world.land_concessions (
 CREATE INDEX ix_concessions_holder ON world.land_concessions (holder_account_id) WHERE status <> 'reverted';
 CREATE INDEX ix_concessions_parcel ON world.land_concessions USING GIST (parcel);
 CREATE INDEX ix_concessions_expiry ON world.land_concessions (expires_at_sim) WHERE status = 'active';
+-- v1.5 (0011): barridos de la rama canon de la cascada de insolvencia
+CREATE INDEX ix_concessions_grace ON world.land_concessions (grace_until_sim) WHERE status = 'delinquent';
+CREATE INDEX ix_concessions_pending_seizure ON world.land_concessions (id) WHERE status = 'grace';
 ```
 
 #### Enums Relacionados
 
 ##### `world.concession_status`
 
-| Valor | Descripción |
-|---|---|
-| `active` | Vigente, canon al día |
-| `delinquent` | Morosa: canon impagado (paso 4º de la cascada de insolvencia, GDD 5.9) |
-| `grace` | Periodo de gracia previo al embargo (semanas reales: distingue vacaciones de abandono) |
-| `reverted` | Revertida al sistema; el suelo rota hacia jugadores activos |
+| Valor | Descripción | Disparador (v1.5, `world/enforcement`) |
+|---|---|---|
+| `active` | Vigente, canon al día | Al cobrar el canon vigente, el periodo se renueva (`expires_at_sim += period_sim_days`, `grace_until_sim = NULL`) |
+| `delinquent` | Morosa: canon impagado (paso 4º de la cascada de insolvencia, GDD 5.9) | `active` con el periodo vencido y **caja insuficiente** para el canon → se fija `grace_until_sim = simNow + II_SEIZE_GRACE_SIM_SECONDS` |
+| `grace` | Periodo de gracia agotado: marcada para embargo (semanas reales en sim-time: distingue vacaciones de abandono) | `delinquent` con `grace_until_sim` vencido (`simNow ≥ grace_until_sim`) |
+| `reverted` | Revertida al sistema; el suelo rota hacia jugadores activos | Embargo: `grace` (rama canon) **o** cualquier estado ≠ `reverted` con un edificio `abandoned` de gracia agotada (rama mantenimiento) |
 
 #### Reglas de Negocio
 
 - El canon lo cobra el sistema como transacción `canon` del ledger (sink). Su cuantía deriva de `regions.canon_base` ajustada por ubicación; el Balancer puede moverla dentro de rangos (anti-land-banking, congestion pricing).
 - La cascada de insolvencia nunca produce deuda: `saldo = 0` → salarios → combustible → mantenimiento → canon → gracia → embargo → subasta.
+- **Rama canon de la cascada (v1.5):** el barrido de canon (`world/enforcement`, proceso *engine*) renueva las concesiones vencidas si la caja cubre el canon; si no, las marca `delinquent` arrancando la gracia (`grace_until_sim`). Al vencer la gracia pasan a `grace` (marcador transitorio "embargo pendiente") y el barrido de embargo las lleva a `reverted`, congelando **todos** sus edificios. La parcela queda **libre**: el alta de concesiones solo valida solape contra concesiones activas, así que otro jugador puede volver a pedirla. Máquina de estados y asientos exactos en la sección *v1.5* más abajo.
 
 ### 14. `world.concession_transfers`
 
@@ -587,6 +598,7 @@ CREATE TABLE world.buildings (
     active_recipe_id  uuid REFERENCES world.recipes(id),
     condition_pct     INT NOT NULL DEFAULT 100 CHECK (condition_pct BETWEEN 0 AND 100),
     fuel_stock        stock_qty NOT NULL DEFAULT 0 CHECK (fuel_stock >= 0),
+    maintenance_paid_until_sim sim_time NOT NULL DEFAULT 0,  -- v1.5 (0011): obligaciones de mantenimiento liquidadas hasta
     created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at_sim    sim_time NOT NULL DEFAULT 0
 );
@@ -594,26 +606,31 @@ CREATE TABLE world.buildings (
 CREATE INDEX ix_buildings_owner ON world.buildings (owner_account_id);
 CREATE INDEX ix_buildings_region_status ON world.buildings (region_id, status);
 CREATE INDEX ix_buildings_footprint ON world.buildings USING GIST (footprint);
+-- v1.5 (0011): barridos de la rama mantenimiento de la cascada de insolvencia
+CREATE INDEX ix_buildings_maintenance_due ON world.buildings (maintenance_paid_until_sim) WHERE status IN ('operational','damaged');
+CREATE INDEX ix_buildings_abandoned      ON world.buildings (maintenance_paid_until_sim) WHERE status = 'abandoned';
+CREATE INDEX ix_buildings_concession     ON world.buildings (concession_id);
 ```
 
 #### Enums Relacionados
 
 ##### `world.building_status`
 
-| Valor | Descripción |
-|---|---|
-| `under_construction` | En construcción |
-| `operational` | Operativa |
-| `damaged` | Dañada (degradación por impago de mantenimiento) |
-| `in_maintenance` | En mantenimiento |
-| `abandoned` | Abandonada (inoperativa por impago sostenido) |
-| `seized` | En embargo: el edificio y su contenido pasan a custodia del sistema; el stock libre se subasta **vía CCRI estándar** (decisión #16) |
+| Valor | Descripción | Disparador (v1.5, `world/enforcement`) |
+|---|---|---|
+| `under_construction` | En construcción | Alta del edificio; **fuera del barrido de mantenimiento** (aún no operativo) |
+| `operational` | Operativa | Estado normal; también se recupera aquí un `damaged` cuya condición vuelve a 100 con el mantenimiento al día |
+| `damaged` | Dañada (degradación por impago de mantenimiento) | `operational`/`damaged` con mantenimiento vencido y **caja insuficiente**: cobra los días que pueda, degrada `−II_DEGRADE_PCT_PER_SIM_DAY` por día impagado (con condición aún `> II_ABANDON_CONDITION_PCT`) |
+| `in_maintenance` | En mantenimiento (manual del jugador) | **Fuera del barrido** (mantenimiento programado, no automático) |
+| `abandoned` | Abandonada (inoperativa por impago sostenido) | `damaged` cuya condición cae a `≤ II_ABANDON_CONDITION_PCT`: **para la producción** (lotes → `paused_no_workers`) y fija `maintenance_paid_until_sim = simNow` (arranca la gracia previa al embargo). Estado terminal de la rama (no se vuelve a barrer) |
+| `seized` | En embargo: el edificio y su contenido pasan a custodia del sistema; el stock libre se subasta **vía CCRI estándar** (decisión #16) | Embargo de su concesión (rama canon: `grace`; rama mantenimiento: `abandoned` de gracia agotada): se **congela** (incomandable, no produce), se para su producción y se emite `building.seized` con su stock libre y su nodo de origen |
 
 #### Reglas de Negocio
 
 - Validación de emplazamiento (espacio, acceso, recursos) server-side contra `building_types.placement_rules` y el grafo logístico — **422 `PLACEMENT_INVALID`** si no se cumple (las cuatro reglas se detallan en *v1.3*).
 - `fuel_stock`: almacén de combustible local (GDD 5.8); sin combustible la producción pausa. **En v1.3 es una columna espejo** del inventario físico (`building_inventories`) del producto combustible: el combustible se consume del propio inventario del edificio, no de un depósito aparte (ver *v1.3*).
 - El alta crea el edificio `under_construction` y su `network_node` (mina→`mine`, resto→`factory`) en el centroide del `footprint`; el coste se asienta al crear (sink `maintenance`). La transición `under_construction → operational` la ejecuta el motor tras un **tiempo fijo** `II_BUILD_SIM_SECONDS` (simplificación consciente — ver *v1.3*).
+- **Rama mantenimiento de la cascada (v1.5):** `maintenance_paid_until_sim` es el marcador "obligaciones de mantenimiento liquidadas hasta". El barrido de mantenimiento (`world/enforcement`, proceso *engine*) cobra `building_types.maintenance_cost × días-sim vencidos` como sink `maintenance` **cobrando solo lo disponible** (el saldo jamás baja de 0); si cubre todo, avanza el marcador y **recupera** condición (+2/día-sim, `damaged`→`operational` al llegar a 100); si no, cobra los días que pueda y **degrada** los impagados (`damaged`; `abandoned` al cruzar el umbral). Cada día vencido se salda **exactamente una vez** (en efectivo o por degradación): el marcador avanza por todos los días vencidos, nunca hay deuda ni doble degradación. Máquina de estados y asientos exactos en la sección *v1.5* más abajo.
 - La autorización es por propiedad: una corporación solo comanda sus edificios (403 en caso contrario).
 
 ### 16. `world.building_inventories`
@@ -828,6 +845,7 @@ CREATE TABLE world.vehicles (
     segment_entered_sim   sim_time,
     advance_fn            JSONB,
     repair_until_sim      sim_time,
+    maintenance_paid_until_sim sim_time NOT NULL DEFAULT 0,  -- v1.5 (0011): opex liquidado hasta
     created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at_sim        sim_time NOT NULL DEFAULT 0,
     CHECK ((at_node_id IS NULL) <> (on_segment_id IS NULL)),
@@ -837,6 +855,8 @@ CREATE TABLE world.vehicles (
 CREATE INDEX ix_vehicles_owner ON world.vehicles (owner_account_id);
 CREATE INDEX ix_vehicles_segment ON world.vehicles (on_segment_id) WHERE on_segment_id IS NOT NULL;
 CREATE INDEX ix_vehicles_node ON world.vehicles (at_node_id) WHERE at_node_id IS NOT NULL;
+-- v1.5 (0011): barrido de opex de flota (todos los estados; el opex se cobra por día-sim)
+CREATE INDEX ix_vehicles_maintenance_due ON world.vehicles (maintenance_paid_until_sim);
 ```
 
 #### Enums Relacionados
@@ -856,6 +876,7 @@ CREATE INDEX ix_vehicles_node ON world.vehicles (at_node_id) WHERE at_node_id IS
 - **Posición analítica (v1.4):** cuando el vehículo está `in_transit` se persiste `(on_segment_id, segment_entered_sim, advance_fn)` y la posición exacta (`segment_progress_pct`, punto sobre la línea) se **deriva bajo demanda** al consultarla; solo los **hitos** (despacho, llegada a nodo, avería, cambio de segmento) escriben. `advance_fn` es el JSONB `{base_speed_kmh, congestion_ema, length_m, dir}` fijado al **entrar** al segmento: la congestión es la **snapshot** de ese momento y la llegada no se recalcula al variar la congestión después.
 - **Índices de barrido del motor de tránsito (v1.4, 0009):** `ix_vehicles_in_transit (segment_entered_sim) WHERE status = 'in_transit'` (segmentos por vencer) y `ix_vehicles_broken (repair_until_sim) WHERE status = 'broken'` (averías por reanudar) — coherentes con el invariante de coste ∝ eventos.
 - **Fórmula de tiempo de viaje (v1.4, 0009):** `world.segment_travel_seconds(advance_fn)` `IMMUTABLE` es la fuente ÚNICA en SQL: `t_viaje(seg) = ceil(length_km × congestion_ema / base_speed_kmh) × 3600` (factor = 1/`congestion_ema`, >1 = más lento). La comparten la derivación de la posición (GET vehicle) y el barrido de vencimiento del motor; el código Go no la reimplementa para no divergir.
+- **Opex de flota (v1.5):** `maintenance_paid_until_sim` es el marcador del opex liquidado. El barrido de mantenimiento (`world/enforcement`) cobra `vehicle_types.operating_cost_per_day × días-sim vencidos` como sink `maintenance` **cobrando solo lo disponible**; los días que no puede pagar se **condonan** (sin deuda, GDD 5.9). El vehículo **no tiene condición aquí**: su desgaste (`wear_pct`) y su avería (`broken`) los sigue manejando el motor de tránsito (`world/fleet`, v1.4), no la cascada de insolvencia. Ver *v1.5* más abajo.
 - El protocolo formal de handoff (SELLADO→COPIADO→ACTIVADO→PURGADO, `transfer_id` idempotente, ledger como árbitro) está **especificado pero no construido** (ADR-015); mientras todos los shards convivan en un proceso, el cruce de frontera es un traspaso local entre colas.
 
 ### 27. `world.shipments`
@@ -1119,6 +1140,7 @@ CREATE TRIGGER trg_transactions_immutable
 - Cualquier duplicación o pérdida de valor es una **violación contable detectable de inmediato**, no un bug silencioso (invariante nº 1 de la arquitectura).
 - `transaction_kind` clasifica faucets (`seed_capital`, `bot_capitalization`) y sinks (`tax`, `canon`, `maintenance`, sanciones de liquidación) — la política monetaria y la densidad de bots comparten libro (ADR-010).
 - `production_output`/`consumption` son los movimientos de **stock** contra la cuenta `world_source` (ADR-022, v1.2): faucet y sink físicos del inventario, análogos a `emission`/absorción para el dinero.
+- **Asientos de la cascada de insolvencia (v1.5):** `maintenance` (mantenimiento de edificios y opex de flota) y `canon` (renovación de concesiones) son los **sinks periódicos** que cobra el motor `world/enforcement` cobrando **solo lo disponible**; `auction` mueve el stock libre embargado al banco central (doble entrada por producto) y emite el colateral de garantía de la subasta; `bot_retirement` es la **absorción** de la caja del bot retirado (`cash → emission`, inverso de `bot_capitalization`). Ninguno deja una caja en negativo (el trigger de no-negatividad lo garantiza). Detalle en la sección *v1.5* más abajo.
 
 ### 33. `ledger.publications`
 
@@ -1385,6 +1407,25 @@ CREATE INDEX ix_freight_carrier ON ledger.freight_contracts (carrier_account_id,
 - Se publica en el **mismo tablón** (filtrable como servicio), misma ventana de sorteo, aceptación parcial por tramos/tonelaje y liquidación pro-rata.
 - El fallo del transportista reparte su garantía entre compensación al cargador y sink.
 
+### 38. `ledger.system_liquidations`
+
+**Descripción**: registro de **idempotencia de la subasta pública** del stock embargado (**nueva en v1.5**, migración `0012_system_liquidation`; GDD 11.2, cierre de la cascada de insolvencia). El consumidor `contracts`/`system_liquidator` consume `building.seized` (emitido por `world/enforcement` al embargar) y **subasta** el stock libre del edificio: cada `building_id` se liquida **una sola vez**. Es defensa en profundidad sobre el *exactly-once por cursor* del outbox — un embargo re-emitido o un redespliegue no re-subastan.
+
+```sql
+CREATE TABLE ledger.system_liquidations (
+    building_id       uuid PRIMARY KEY,          -- edificio embargado (clave de idempotencia)
+    seized_at_sim     sim_time NOT NULL,         -- sim-time del embargo (del payload building.seized)
+    liquidated_at_sim sim_time NOT NULL,         -- sim-time en que el liquidador procesó la subasta
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+```
+
+#### Reglas de Negocio
+
+- **Sin FK a `world.buildings`**: es un registro de auditoría/idempotencia del **contexto de contratos**, no una proyección del mundo. La frontera entre `contracts` y `world` es de **código Go** (SAD §7 / ADR-006): `contracts` nunca importa `internal/world` ni referencia sus tablas por FK — la integración es **solo por el outbox** (evento `building.seized`).
+- El liquidador **reclama** el embargo (`INSERT` de esta fila) **antes** de mover stock o publicar la oferta; si la fila ya existía, ignora el evento sin re-subastar. Toda la subasta ocurre en la **misma transacción del lote** del consumidor (los efectos se confirman con el avance del cursor).
+- El detalle de la subasta —transferencia del stock al banco central (asiento `auction`), precio de remate, garantía y absorción de proceeds— vive en la sección *v1.5* más abajo.
+
 ---
 
 ## ⚖️ Interpretaciones operativas del CCRI (v1.2 — Incremento 1)
@@ -1625,11 +1666,116 @@ El **Logistics Service** (`internal/logistics`) no es un worker del engine: sus 
 
 ---
 
+## 🩸 Interpretaciones operativas de la insolvencia/embargo (v1.5 — Incremento 6a)
+
+Decisiones de diseño **vinculantes** con las que el Incremento 6a (cascada de insolvencia, Fase 1) materializa los **dos últimos escalones** de *saldo = 0, nunca deuda* (GDD 5.9) y el ciclo *abandono → embargo → subasta* (GDD 11.2) que el Incremento 2 había dejado pendientes. No cambian el diseño del GDD: fijan cómo lo opera el subpaquete `internal/world/enforcement` (motor de **consecuencias físicas**, proceso *engine*), el consumidor `contracts`/`system_liquidator` (subasta del stock) y el `RetirementJob` del orquestador (`cmd/bots`, retiro de bots). Añaden **dos migraciones** (`0011_enforcement`, `0012_system_liquidation`) —tres columnas de estado, seis índices y una tabla de idempotencia, sin enums nuevos—. Son coherentes con las invariantes SQL del ledger (`0004_ledger`) y con el contrato de eventos fijo del incremento.
+
+> **La regla que gobierna toda la cascada:** el saldo `cash` **jamás baja de 0** (lo garantiza `ck_accounts_non_negative`, verificado por trigger). El motor **no intenta** dejar una caja en negativo: en cada obligación **lee lo disponible y cobra solo eso**. Las obligaciones que la caja no cubre **no se convierten en deuda** — se saldan con el **patrimonio** (degradación del edificio, reversión del suelo) o se **condonan** (opex de flota). El jugador que vuelve tras una ausencia larga encuentra *menos imperio, nunca una deuda*.
+
+### Columnas de estado del barrido (0011) — «obligaciones liquidadas hasta»
+
+- `world.buildings.maintenance_paid_until_sim` (`sim_time NOT NULL DEFAULT 0`): sim-time hasta el que las obligaciones de **mantenimiento** del edificio están **liquidadas** (pagadas en efectivo **o** saldadas por degradación). El barrido cobra por día-sim desde este marcador. En un edificio **abandonado** el marcador pasa a ser el **instante del abandono**: arranca el conteo del periodo de gracia previo al embargo.
+- `world.vehicles.maintenance_paid_until_sim` (`sim_time NOT NULL DEFAULT 0`): idéntico para el **opex** del vehículo (`vehicle_types.operating_cost_per_day`). El vehículo **no tiene condición** en esta cascada: el impago solo drena caja; su desgaste/avería los maneja el motor de tránsito (`world/fleet`, v1.4). Los días que la caja no puede pagar se **condonan** (sin deuda).
+- `world.land_concessions.grace_until_sim` (`sim_time` **NULLABLE**): vencimiento del periodo de gracia del **canon**. Se fija al pasar a `delinquent`; `NULL` mientras la concesión está al día.
+
+### Máquina de estados del EDIFICIO — rama mantenimiento (3º de la cascada)
+
+```
+operational ──(mantenimiento vencido; caja insuficiente; condición > II_ABANDON_CONDITION_PCT)──▶ damaged
+damaged     ──(mantenimiento al día de nuevo; condición recuperada +2/día-sim hasta 100)────────▶ operational
+operational/damaged ──(condición ≤ II_ABANDON_CONDITION_PCT)────────────────────────────────────▶ abandoned
+abandoned   ──(gracia agotada + EMBARGO de su concesión)────────────────────────────────────────▶ seized
+```
+
+- **Barrido de mantenimiento** (`II_MAINTENANCE_INTERVAL`): sobre los edificios `operational`/`damaged` con día-sim vencido (`ix_buildings_maintenance_due`), cada uno en su **propia tx serializable** con `FOR UPDATE SKIP LOCKED`. Cobra `building_types.maintenance_cost × días-sim vencidos` como sink `maintenance`, **cobrando solo lo disponible**:
+  - **Cubre todo** → avanza el marcador y **recupera** condición (`+2/día-sim`, fijo; `damaged`→`operational` al llegar a 100).
+  - **No cubre** → cobra los días que pueda, **degrada** los impagados (`−II_DEGRADE_PCT_PER_SIM_DAY` por día, mín. 0) y marca `damaged`. Al cruzar `≤ II_ABANDON_CONDITION_PCT` pasa a `abandoned`, **para su producción** (lotes `running` → `paused_no_workers`) y fija `maintenance_paid_until_sim = simNow` (arranca la gracia).
+- **Cada día vencido se salda exactamente una vez** (en efectivo o por degradación): el marcador avanza por **todos** los días vencidos, así que nunca hay deuda ni doble degradación. `abandoned` y `seized` **no se barren** (terminales de la rama); `under_construction` e `in_maintenance` quedan fuera (aún no operativo / mantenimiento manual del jugador).
+
+### Máquina de estados de la CONCESIÓN — rama canon (4º de la cascada)
+
+```
+active     ──(periodo vencido; canon cobrado)────▶ active      [expires_at_sim += period_sim_days; grace_until_sim = NULL]
+active     ──(periodo vencido; caja insuficiente)▶ delinquent  [grace_until_sim = simNow + II_SEIZE_GRACE_SIM_SECONDS]
+delinquent ──(grace_until_sim vencido)───────────▶ grace       [marcada para embargo]
+grace      ──(EMBARGO)───────────────────────────▶ reverted    [suelo libre]
+<cualquiera ≠ reverted> ──(EMBARGO por edificio abandonado de gracia agotada)──▶ reverted
+```
+
+- **Barrido de canon** (`II_MAINTENANCE_INTERVAL`, junto al de mantenimiento): renueva las concesiones vencidas (`ix_concessions_expiry`) si la caja cubre el canon (sink `canon`, `expires_at_sim += period_sim_days`); si no, las marca `delinquent` fijando `grace_until_sim`. Después promueve `delinquent → grace` las que ya agotaron la gracia (`ix_concessions_grace`).
+- El periodo de gracia (GDD 11.2: *semanas reales*, aquí en sim-time vía `II_SEIZE_GRACE_SIM_SECONDS`, default 14 días-sim) se **sirve** en `delinquent`; `grace` es el marcador transitorio "embargo pendiente". Se usan los **cuatro** valores del enum de forma coherente, sin inventar estados (ADR-020).
+
+### EMBARGO — unifica ambas ramas (`II_ENFORCEMENT_INTERVAL`)
+
+El barrido de embargo procesa, cada concesión en su propia tx serializable, el conjunto formado por: (a) las concesiones en `grace` (rama canon, `ix_concessions_pending_seizure`) **y** (b) las que tienen algún edificio `abandoned` con la gracia agotada (`simNow − maintenance_paid_until_sim ≥ II_SEIZE_GRACE_SIM_SECONDS`, rama mantenimiento) — revirtiendo el suelo **aunque el canon estuviese al día** (GDD 11.2: el embargo del inmueble abandonado revierte su suelo). Por cada edificio no `seized` de la concesión, en la misma tx:
+
+1. **Lee su stock LIBRE** (cuentas `stock_free` del edificio en su almacén).
+2. **Emite `building.seized`** con ese stock y su `origin_node_id` (nodo logístico del edificio: retirada **in situ**) — el stock **no se mueve aquí**, lo publicará/moverá la liquidación de `contracts`. `reason = "abandoned"` si el edificio estaba abandonado, `"canon_reverted"` en otro caso.
+3. **Congela** el edificio (`status = 'seized'`: incomandable, no produce) y **para** sus lotes.
+
+Después revierte la concesión (`status = 'reverted'`) y emite `concession.reverted`. La **parcela queda libre**: el alta de concesiones (`POST /world/concessions`) solo valida solape contra concesiones **activas**, así que otro jugador puede volver a pedirla. **Idempotencia por estados**: se salta las concesiones ya `reverted` y los edificios ya `seized` (un re-barrido no re-embarga).
+
+### Asientos contables de la cascada
+
+| Asiento (`transaction_kind`) | Partidas | Lectura |
+|---|---|---|
+| **Mantenimiento** `maintenance` | `−charged cash(dueño)` / `+charged sink` | Sink periódico del edificio/vehículo; `charged ≤ disponible` por construcción (saldo nunca < 0). Los edificios además degradan condición por los días **no** cobrados |
+| **Canon** `canon` | `−canon cash(titular)` / `+canon sink` | Sink de renovación de la concesión; si la caja no cubre el canon íntegro, **no se cobra parcialmente**: se marca `delinquent` |
+| **Subasta — transferencia del stock** `auction` | `−N stock_free(moroso, producto, almacén)` / `+N stock_free(banco central, producto, almacén)` | El stock embargado cambia de dueño **in situ** (no se mueve físicamente; se retira en la subasta desde su nodo de origen). Doble entrada por producto |
+| **Subasta — colateral de garantía** `auction` | `+faltante cash(banco central)` / `−faltante emission` | Si la caja del banco central no cubre la garantía del 10% de la oferta, **emite** el faltante (la `emission` puede quedar negativa; la caja jamás). Retorna a la caja al liquidarse la venta: neutral para la masa monetaria de los jugadores |
+| **Retiro de bot** `bot_retirement` | `−cashBal cash(bot)` / `+cashBal emission` | **Absorción**: la caja del bot retirado vuelve a la cuenta de emisión (inverso de `bot_capitalization`), reduciendo la masa emitida neta. Solo si `cashBal > 0` |
+
+> El `transaction_kind` `transfer` es el del **mercado secundario** de concesiones (traspaso con `system_fee` al sink, Incremento 2), distinto del `auction` de la subasta de embargo. El embargo del stock usa `auction`, no `transfer`.
+
+### Liquidación del stock: oferta sell del sistema (consumidor `system_liquidator`)
+
+`contracts`/`system_liquidator` consume `building.seized` (nunca importa `internal/world`: la frontera es de código Go, SAD §7 / ADR-006) y, en la **misma tx del lote** del consumidor (exactly-once por cursor + idempotencia por `building_id` en `ledger.system_liquidations`), por cada línea de stock:
+
+1. **Transfiere** el stock del moroso al banco central (asiento `auction`, arriba).
+2. **Publica una oferta `sell` del sistema** por esa cantidad, al **precio de remate** `base_price × II_LIQUIDATION_PRICE_BP / 10000` (default 6000 bp = **60%**), por el **mismo camino que cualquier venta del CCRI** (bloqueo de `stock_reserved` + garantía del 10%, plazo generoso de retirada in situ desde `origin_node_id`).
+
+Cuando la oferta se **vende**, el comprador paga y **los proceeds los cobra la caja del banco central** (el vendedor de la subasta): un **efecto sink/absorción** —el dinero sale de la circulación de los jugadores— coherente con *"lo recaudado se aplica a las deudas del moroso y el remanente se destruye como sink"* (GDD 11.2). El moroso **no tiene deuda monetaria residual**: su caja se agotó en la cascada (`saldo = 0`, nunca deuda). El **stock reservado por contratos vivos** del edificio embargado no se subasta directamente: sigue las reglas normales del CCRI (el contrato falla por no-entrega y el stock se libera **in situ**, incorporándose entonces al mundo).
+
+### Refinamiento diferido a Fase 2 (divergencia de implementación documentada)
+
+En 6a el embargo **(i)** congela el edificio (`seized`), **(ii)** publica su stock libre vía CCRI del sistema y **(iii)** revierte el suelo. El **reclamo físico completo del edificio en pie** —demolición o **traspaso intacto a otro jugador vía subasta con pujas** (GDD 11.2: *"el edificio … se subasta igualmente"*)— es **refinamiento de Fase 2**: requiere el mecanismo de subasta con pujas que aún no existe. La divergencia se anota también en `gdd.md` (nota de implementación de 11.2); la mecánica de diseño no cambia.
+
+### Parámetros de configuración del incremento
+
+Motor `world/enforcement` (`WorkerOptionsFromEnv`, valores inválidos impiden el arranque):
+
+| Variable | Default | Efecto |
+|---|---|---|
+| `II_MAINTENANCE_INTERVAL` | `30s` | Cadencia (wall-clock) del barrido de mantenimiento (edificios + flota) y canon |
+| `II_ENFORCEMENT_INTERVAL` | `15s` | Cadencia (wall-clock) del barrido de embargo |
+| `II_ENFORCEMENT_BATCH_SIZE` | `100` | Máximo de entidades por iteración de cada barrido (cada una en su tx) |
+| `II_DEGRADE_PCT_PER_SIM_DAY` | `5` | `condition_pct` que pierde un edificio por día-sim de mantenimiento impagado (1..100) |
+| `II_ABANDON_CONDITION_PCT` | `20` | Umbral (`≤`) de condición por debajo del cual el edificio pasa a `abandoned` (0..100) |
+| `II_SEIZE_GRACE_SIM_SECONDS` | `1209600` | Periodo de gracia en sim-time (14 días-sim) previo al embargo, tanto para el canon (`delinquent`→`grace`) como para el edificio `abandoned` |
+
+Subasta (`contracts.Options`): `II_LIQUIDATION_PRICE_BP` (default **6000**, 1..10000) — precio de remate como fracción del `base_price`. Retiro de bots (`cmd/bots`): `II_BOTS_RETIRE_INTERVAL` (default `60s`), `II_BOTS_RETIRE_CASH_FLOOR` (default `1000`, piso de caja bajo el que un bot es candidato), `II_BOT_RETIRE_IDLE_SIM_SECONDS` (default `604800`, 7 días-sim de insolvencia-inactividad sostenida antes del retiro). La recuperación de condición (`+2/día-sim`) es fija, no configurable.
+
+### Métricas Prometheus del incremento
+
+Motor `world/enforcement` (engine, `:8081/metrics`): `ii_maintenance_charged_total`, `ii_buildings_degraded_total`, `ii_buildings_abandoned_total`, `ii_canon_charged_total`, `ii_concessions_delinquent_total`, `ii_concessions_reverted_total`, `ii_buildings_seized_total` y el histograma `ii_enforcement_sweep_duration_seconds{sweep}` (`building_maintenance`/`vehicle_maintenance`/`canon`/`embargo`). Consumidor `system_liquidator` (engine): `ii_liquidation_publications_total`, `ii_liquidated_stock_total{product}`, `ii_liquidation_skipped_total`. `RetirementJob` (orquestador `cmd/bots`, `II_BOTS_ADDR`): `ii_bots_retired_total`, `ii_bots_absorbed_cash_total`, `ii_bots_retire_sweep_duration_seconds`.
+
+### Eventos de outbox del incremento (contratos de evento FIJOS)
+
+| Evento | Agregado | Emisor | Consumidor | Payload (dinero/stock como string; sim-time entero; uuid string) |
+|---|---|---|---|---|
+| `building.seized` | `building` | `world/enforcement` | `contracts`/`system_liquidator` | `{building_id, owner_account_id, region_id, origin_node_id, reason:"canon_reverted"\|"abandoned", stock:[{product_id, quantity, warehouse_building_id}], seized_at_sim}` |
+| `concession.reverted` | `concession` | `world/enforcement` | informativo/WS | `{concession_id, former_holder, region_id, reverted_at_sim}` |
+| `bot.retired` | `bot` | `cmd/bots` (`RetirementJob`) | informativo/WS | `{account_id, absorbed_cash, retired_at_sim}` |
+
+`origin_node_id` es el nodo logístico del edificio (retirada in situ de la subasta); `stock` es **todo** el `stock_free` del edificio en el momento del embargo. Cada evento se emite con `outbox.Emit` **en la misma tx** que el cambio de estado que lo causa.
+
+---
+
 ## 📈 Módulo Analítica (esquema `analytics`)
 
 Escrito por el job **Analytics** (batch de baja prioridad, deliberadamente separado de Persistence). Son los **agregados permanentes** del mundo que nunca se resetea: crecen lento y se conservan para siempre (GDD 17.2).
 
-### 38. `analytics.market_ohlc`
+### 39. `analytics.market_ohlc`
 
 **Descripción**: velas OHLC por producto y **región de destino** construidas a partir de **contratos efectivamente liquidados** con entrega > 0 (no de órdenes vivas) — la referencia de precio de mercado visible para todos (GDD 5.2/5.4). `region_id` es la región del `destination_node_id` del contrato: el precio se imputa donde la mercancía se entrega (o se retira, en las ventas in situ).
 
@@ -1658,7 +1804,7 @@ CREATE INDEX ix_ohlc_region_time ON analytics.market_ohlc (region_id, bucket_sta
 
 - Escrita por el consumidor **`ohlc_aggregator`** (patrón outbox, ver módulo Outbox), no por el Contract Service: al recibir un `contract.settled` con `status = 'settled'` y entrega > 0, hace el **UPSERT de la vela dentro de la misma transacción en que avanza su cursor** — exactly-once, reejecutar no duplica volumen. `GET /market/ohlc` es lectura pura de esta tabla, no re-agrega.
 
-### 39. `analytics.city_snapshots`, 40. `analytics.region_stats`, 41. `analytics.economy_indicators`
+### 40. `analytics.city_snapshots`, 41. `analytics.region_stats`, 42. `analytics.economy_indicators`
 
 **Descripción**: evolución histórica de ciudades; estadísticas regionales (la `industrial_occupation` alimenta la fórmula laboral de GDD 5.7); e indicadores macro del Economy Balancer — las métricas que disparan decisiones de arquitectura y de expansión de mapa son **requisitos de primer nivel** (Arquitectura §11.1).
 
@@ -1707,7 +1853,7 @@ CREATE TABLE analytics.economy_indicators (
 
 ## 📬 Módulo Outbox (esquema `outbox`)
 
-### 42. `outbox.events` y 43. `outbox.consumer_cursors`
+### 43. `outbox.events` y 44. `outbox.consumer_cursors`
 
 **Descripción**: **transactional outbox** — la mensajería entre módulos en Fases 0–1 (ADR-008). El módulo emisor inserta el evento **en la misma transacción** que su cambio de estado, de modo que lo publicado nunca diverge del estado que lo causó; los consumidores (Notification Gateway con interest management, módulos del motor, Balancer) hacen polling por cursor.
 
@@ -1736,8 +1882,9 @@ CREATE TABLE outbox.consumer_cursors (
 #### Reglas de Negocio
 
 - `seq` (`IDENTITY`) da el orden total de polling — la única PK no-UUID del sistema, por diseño; `event_id` conserva la identidad UUID global del evento.
-- Eventos típicos: `contract.settled`, `vehicle.arrived`, `batch.completed`, `city.level_up` — los hitos del motor event-driven. El Incremento 1 emite el ciclo del CCRI (`publication.*`, `acceptance.*`, `contract.confirmed/delivered/settled`; ver «Interpretaciones operativas del CCRI»); el Incremento 2, los del mundo/producción (`concession.*`, `building.*`, `batch.*`); el Incremento 3, los de la logística física (`vehicle.*`, `shipment.*`, `contract.expired_undelivered`; ver «Interpretaciones operativas de la logística»).
+- Eventos típicos: `contract.settled`, `vehicle.arrived`, `batch.completed`, `city.level_up` — los hitos del motor event-driven. El Incremento 1 emite el ciclo del CCRI (`publication.*`, `acceptance.*`, `contract.confirmed/delivered/settled`; ver «Interpretaciones operativas del CCRI»); el Incremento 2, los del mundo/producción (`concession.*`, `building.*`, `batch.*`); el Incremento 3, los de la logística física (`vehicle.*`, `shipment.*`, `contract.expired_undelivered`; ver «Interpretaciones operativas de la logística»); el Incremento 6a, los de la cascada de insolvencia (`building.seized`, `concession.reverted`, `bot.retired`; ver «Interpretaciones operativas de la insolvencia/embargo»).
 - **Consumidores cross-context del Incremento 3** (patrón de integración event-driven entre bounded contexts, cada uno con su cursor propio): `shipment_creator` (módulo `world`, suscrito a `contract.confirmed`) materializa el cargamento de las compras cross-node; `delivery_confirmer` (módulo `contracts`, suscrito a `shipment.arrived`) confirma la entrega y liquida. `world` y `contracts` **nunca se importan**: toda su coordinación pasa por estos eventos.
+- **Consumidor cross-context del Incremento 6a**: `system_liquidator` (módulo `contracts`, suscrito a `building.seized`) subasta el stock libre del edificio embargado que emite `world/enforcement` — mismo patrón de fronteras firmes por outbox, sin imports cruzados. `bot.retired` lo emite el orquestador (`cmd/bots`, `RetirementJob`) al absorber la caja de un bot insolvente-inactivo; `concession.reverted` es informativo/WS.
 - **API del módulo (v1.2, materializada en el Incremento 1):** `outbox.Emit(ctx, tx, simTime, aggregateType, aggregateID, eventType, payload)` inserta el evento **en la misma transacción** que el cambio de estado que lo causa; `outbox.NewConsumer(pool, name, eventTypes)` con `Run(ctx, interval, handler)` procesa los eventos **en orden de `seq`** y **avanza el cursor en la misma transacción del handler** — de ahí el *exactly-once por consumidor*: reejecutar un lote no duplica su efecto. Cada consumidor lógico tiene su propia fila en `consumer_cursors`.
 - **Primer consumidor real: `ohlc_aggregator`** (módulo `market`), suscrito a `contract.settled`, que construye las velas `analytics.market_ohlc`.
 - Los eventos consumidos por todos los cursores se purgan en la ventana de mantenimiento diaria.
@@ -1749,7 +1896,7 @@ CREATE TABLE outbox.consumer_cursors (
 
 Tablas que no pertenecen a ningún dominio: son infraestructura de la plataforma, del mismo modo que `schema_migrations` (registro del runner de migraciones, ADR-020). Viven en `public` porque PostgreSQL ya le concede `USAGE` a `PUBLIC` por defecto.
 
-### 44. `public.idempotency_keys`
+### 45. `public.idempotency_keys`
 
 **Descripción**: almacén de respuestas para la cabecera **`Idempotency-Key`** del contrato v1.2.0 (**nueva en v1.2**, migración `0008_ccri_support`). Hace **reintentables con seguridad** los comandos que mueven valor: misma clave ⇒ misma respuesta reproducida, nunca doble ejecución. Propiedad del gateway (`ii_gateway` la lee, inserta y purga).
 
@@ -1887,6 +2034,7 @@ Notas:
   - Índices parciales sobre colas vivas (`production_batches`, `sessions.expires_at`, outbox por `seq`).
   - `ix_vehicles_in_transit (segment_entered_sim) WHERE status='in_transit'` y `ix_vehicles_broken (repair_until_sim) WHERE status='broken'` (v1.4) — barridos del motor de tránsito (segmentos vencidos y averías por reanudar), coste ∝ eventos.
   - `ux_contract_deliveries_shipment (shipment_id)` (v1.4) — idempotencia estructural de la entrega del CCRI (`ON CONFLICT DO NOTHING` del `delivery_confirmer`).
+  - Índices parciales de barrido de la **cascada de insolvencia** (v1.5, `0011`): `ix_buildings_maintenance_due` / `ix_buildings_abandoned` (`maintenance_paid_until_sim` filtrado por estado), `ix_concessions_grace` / `ix_concessions_pending_seizure`, `ix_vehicles_maintenance_due` y `ix_buildings_concession` — todos alineados con el invariante coste ∝ eventos (el barrido solo toca las entidades con obligación vencida o marcadas para embargo).
 - El trigger de balance serializa las escrituras por cuenta caliente (p. ej. el sink del banco central): es el coste aceptado de tener la invariante en la base. Si una cuenta de sistema se vuelve cuello de botella, la mitigación diseñada es el particionado del ledger **por cuenta** (Fase 2+, vía ADR).
 - Los jobs Analytics y Persistence no compiten: Analytics es batch de baja prioridad, Persistence tiene prioridad y RPO/RTO definidos.
 
@@ -1904,6 +2052,7 @@ Notas:
 - **Contrapartida física del stock = `world_source`** (ADR-022, v1.2): `emission`/`world_source` son las dos únicas cuentas *fiat* del banco central que pueden ser negativas —masa monetaria y masa física emitidas—; con ellas producción y consumo se asientan sin excepción al trigger de doble entrada por activo.
 - **Logística física con posición analítica** (v1.4, Incremento 3): ningún bien se mueve sin transporte físico; el stock reservado viaja etiquetado por contrato (`world.shipments`) entre `building_inventories` y su destino, y la reconciliación física↔contable incluye los cargamentos en vuelo (`físico(edificio) + físico(en vuelo) = free + reserved`). La posición de un vehículo en tránsito se persiste como `(segmento, t_entrada, advance_fn)` y se **deriva** bajo demanda con `world.segment_travel_seconds`; solo los hitos escriben (coste ∝ eventos). La integración CCRI↔Logística cruza contextos **solo por outbox** (`shipment_creator` en `world`, `delivery_confirmer` en `contracts`), sin imports cruzados.
 - **Planificación sin estado de tránsito** (v1.4, ADR-006): `internal/logistics` planifica rutas (Dijkstra ponderado por congestión EMA) y define `world.routes`, pero no simula el movimiento — eso lo hace el shard (`internal/world`). HPA* (GDD 7.4) queda diferido como optimización por escala (no cambia la arquitectura; la interfaz `Planner` lo deja listo) — sin ADR nuevo.
+- **Insolvencia = parada progresiva, nunca deuda** (v1.5, Incremento 6a): la cascada `saldo = 0` → salarios → combustible → mantenimiento → canon → gracia → embargo → subasta (GDD 5.9/11.2) se completa con el motor `internal/world/enforcement`. El `cash` **jamás baja de 0** (trigger `ck_accounts_non_negative`): el motor cobra **solo lo disponible** y las obligaciones impagadas se saldan con el **patrimonio** (degradación → abandono → embargo del edificio; reversión del suelo) o se **condonan** (opex de flota), nunca como deuda. El stock embargado se subasta **vía CCRI estándar** (oferta `sell` del sistema, `system_liquidator`), con los proceeds absorbidos por el banco central (efecto sink); el retiro de un bot insolvente-inactivo **absorbe** su caja (`bot_retirement`, `cash`→`emission`). La integración `world/enforcement`↔`contracts` cruza contextos **solo por outbox** (`building.seized`), sin imports cruzados. El traspaso del edificio **en pie** con pujas es refinamiento de **Fase 2**.
 - **Idempotencia de comandos que mueven valor** (contrato v1.2.0): la cabecera `Idempotency-Key` se persiste por `(key, account_id)` en `public.idempotency_keys`; misma clave ⇒ misma respuesta reproducida (solo `status < 500`), reintentos seguros sin doble ejecución.
 - **El esquema físico no impone la topología**: las cajas lógicas (shards, Contract Service, Balancer) comparten instancia con fronteras por esquema y credenciales por servicio; la extracción a procesos/instancias separadas es una decisión medida posterior (ADR-008), y este modelo de datos no la bloquea.
 - **Casos borde conocidos** (a resolver en la capa de orquestación, documentados aquí deliberadamente):

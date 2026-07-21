@@ -357,6 +357,8 @@ El jugador que regresa tras una ausencia larga encuentra **menos imperio, nunca 
 
 > **Nota de implementación (Incremento 2):** de esta cascada, la Fase 1 materializa **los dos primeros escalones** como pausas de producción sin deuda: `paused_no_workers` (salario impagable, 1º) y `paused_no_fuel` (sin combustible, 2º). La degradación por mantenimiento (3º) y el ciclo canon→embargo→subasta (4º, 11.2) se materializan en el Incremento 6; la parte ya construida garantiza el invariante "producción parada, nunca deuda".
 
+> **Nota de implementación (Incremento 6a):** los **dos últimos escalones** ya están materializados por el motor `internal/world/enforcement`: la **degradación por mantenimiento** (3º; edificio `operational`→`damaged`→`abandoned` según los umbrales `II_DEGRADE_PCT_PER_SIM_DAY`/`II_ABANDON_CONDITION_PCT`) y el ciclo **canon → gracia → embargo → subasta** (4º; concesión `active`→`delinquent`→`grace`→`reverted`, gracia `II_SEIZE_GRACE_SIM_SECONDS`). El invariante *saldo = 0, nunca deuda* se respeta literalmente: el motor cobra **solo lo disponible** (el trigger del ledger garantiza `cash ≥ 0`) y las obligaciones impagadas se saldan con el **patrimonio** o se **condonan** (opex de flota). Sin cambio de diseño. El detalle vive en la sección *v1.5* de `documentacion_base_de_datos.md`.
+
 ---
 
 ## 6. Sistema industrial
@@ -504,6 +506,8 @@ OPERATIVA → (impago de mantenimiento) → DEGRADACIÓN progresiva
 - El **stock reservado por contratos vivos** sigue las reglas normales del CCRI: el contrato fallará por no-entrega y el stock se liberará in situ (sección 5.3), incorporándose entonces a la subasta.
 - El **edificio** (y el traspaso de su concesión de suelo) se subasta igualmente; el jugador que vuelve tras una ausencia larga encuentra sus deudas saldadas con su patrimonio, no una deuda impagable.
 - El **periodo de gracia** antes del embargo se calibra para distinguir vacaciones de abandono real (orden de magnitud: semanas reales, no días).
+
+> **Nota de implementación (Incremento 6a — divergencia acotada, sin cambio de diseño):** el motor `internal/world/enforcement` materializa el ciclo completo salvo el **traspaso del edificio en pie con pujas**, que queda **diferido a Fase 2** (requiere un mecanismo de subasta con pujas aún inexistente). En 6a el embargo **(i)** congela el edificio (`seized`: incomandable, no produce), **(ii)** publica su **stock libre** en el tablón como oferta `sell` del sistema —reutilizando el CCRI estándar, retirada in situ desde el nodo del edificio, precio de remate `II_LIQUIDATION_PRICE_BP`, proceeds absorbidos por el banco central como sink— y **(iii)** revierte el suelo (la parcela queda libre y otro jugador puede volver a concesionarla). El stock reservado por contratos vivos sigue las reglas normales del CCRI (falla por no-entrega y se libera in situ). El periodo de gracia se sirve en sim-time (`II_SEIZE_GRACE_SIM_SECONDS`, default 14 días-sim, calibrable). El ciclo de estados y los asientos exactos están en la sección *v1.5* de `documentacion_base_de_datos.md` y la materialización en §5.8 de `arquitectura_imperio_industrial.md`.
 
 ---
 

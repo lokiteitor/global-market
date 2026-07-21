@@ -30,6 +30,11 @@ const (
 	// al comprador en un fallo de entrega, en puntos básicos (el resto va al
 	// sink del banco central). Default 5000 (50/50).
 	EnvCompensationBP = "II_COMPENSATION_BP"
+	// EnvLiquidationPriceBP es el precio de remate de la subasta pública del
+	// stock embargado (system_liquidator, GDD 11.2), en puntos básicos del
+	// base_price del producto: la oferta sell del sistema vale
+	// base_price * II_LIQUIDATION_PRICE_BP / 10000. Default 6000 (60%: remate).
+	EnvLiquidationPriceBP = "II_LIQUIDATION_PRICE_BP"
 )
 
 // Valores por defecto documentados.
@@ -39,7 +44,11 @@ const (
 	DefaultCancelCooldownSeconds    int64 = 10
 	DefaultPublicationTTLSimSeconds int64 = 604_800
 	DefaultCompensationBP                 = 5000
+	DefaultLiquidationPriceBP             = 6000
 )
+
+// bpDenominator es la base de los puntos básicos (10000 = 100%).
+const bpDenominator = 10000
 
 // Límites de paginación FIJADOS por el contrato OpenAPI (limit: default 50,
 // maximum 200). No son configurables.
@@ -68,6 +77,9 @@ type Options struct {
 	// CompensationBP es el reparto compensación/sink de la garantía en fallo
 	// (0..10000 puntos básicos).
 	CompensationBP int
+	// LiquidationPriceBP es el precio de remate de la subasta del sistema como
+	// fracción del base_price del producto (1..10000 puntos básicos).
+	LiquidationPriceBP int
 }
 
 // DefaultOptions devuelve la configuración por defecto del módulo.
@@ -78,6 +90,7 @@ func DefaultOptions() Options {
 		CancelCooldownSeconds:    DefaultCancelCooldownSeconds,
 		PublicationTTLSimSeconds: DefaultPublicationTTLSimSeconds,
 		CompensationBP:           DefaultCompensationBP,
+		LiquidationPriceBP:       DefaultLiquidationPriceBP,
 	}
 }
 
@@ -105,6 +118,13 @@ func OptionsFromEnv() (Options, error) {
 		}
 		opts.CompensationBP = bp
 	}
+	if v := strings.TrimSpace(os.Getenv(EnvLiquidationPriceBP)); v != "" {
+		bp, err := strconv.Atoi(v)
+		if err != nil {
+			return Options{}, fmt.Errorf("contracts: %s inválido %q (entero 1..10000): %w", EnvLiquidationPriceBP, v, err)
+		}
+		opts.LiquidationPriceBP = bp
+	}
 	if err := opts.Validate(); err != nil {
 		return Options{}, err
 	}
@@ -127,6 +147,9 @@ func (o Options) Validate() error {
 	}
 	if o.CompensationBP < 0 || o.CompensationBP > 10000 {
 		return fmt.Errorf("contracts: %s debe estar en 0..10000 (actual %d)", EnvCompensationBP, o.CompensationBP)
+	}
+	if o.LiquidationPriceBP < 1 || o.LiquidationPriceBP > 10000 {
+		return fmt.Errorf("contracts: %s debe estar en 1..10000 (actual %d)", EnvLiquidationPriceBP, o.LiquidationPriceBP)
 	}
 	return nil
 }

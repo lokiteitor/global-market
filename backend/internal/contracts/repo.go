@@ -808,6 +808,70 @@ func (r *Repo) GetNodeByBuilding(ctx context.Context, buildingID uuid.UUID) (uui
 	return row.ID, row.RegionID, nil
 }
 
+// ─── Subasta del sistema (system_liquidator, GDD 11.2) ───────────────────────
+
+// EnsureCashAccount localiza (o crea, on-demand) la caja de una corporación. La
+// usa el liquidador para la caja del banco central (que el seed no crea): es el
+// vendedor de la subasta, cobra los proceeds (absorción) y aporta la garantía.
+func (r *Repo) EnsureCashAccount(ctx context.Context, owner uuid.UUID) (ledgerAccount, error) {
+	acc, err := r.GetCashAccount(ctx, owner)
+	switch {
+	case err == nil:
+		return acc, nil
+	case !errors.Is(err, pgx.ErrNoRows):
+		return ledgerAccount{}, fmt.Errorf("contracts: consultando la caja de %s: %w", owner, err)
+	}
+	id, err := newUUIDv7()
+	if err != nil {
+		return ledgerAccount{}, err
+	}
+	o := owner
+	row, err := r.q.CreateLedgerAccount(ctx, sqlcgen.CreateLedgerAccountParams{
+		ID:             id,
+		Kind:           sqlcgen.LedgerAccountKindCash,
+		OwnerAccountID: &o,
+	})
+	if err != nil {
+		return ledgerAccount{}, fmt.Errorf("contracts: creando la caja de %s: %w", owner, err)
+	}
+	return toLedgerAccount(row), nil
+}
+
+// GetEmissionAccount devuelve la cuenta de emisión del banco central (la única
+// cuenta monetaria que puede quedar negativa); pgx.ErrNoRows si el seed no la
+// creó.
+func (r *Repo) GetEmissionAccount(ctx context.Context) (ledgerAccount, error) {
+	row, err := r.q.GetEmissionAccount(ctx)
+	if err != nil {
+		return ledgerAccount{}, err
+	}
+	return toLedgerAccount(row), nil
+}
+
+// GetProductBasePrice devuelve el ancla administrada del producto; pgx.ErrNoRows
+// si no existe.
+func (r *Repo) GetProductBasePrice(ctx context.Context, productID uuid.UUID) (int64, error) {
+	return r.q.GetProductBasePrice(ctx, productID)
+}
+
+// ClaimSystemLiquidation reclama un embargo para su subasta de forma idempotente
+// por building_id. Devuelve claimed=false (sin error) si ya se había liquidado:
+// reprocesar el mismo building.seized no re-subasta.
+func (r *Repo) ClaimSystemLiquidation(ctx context.Context, buildingID uuid.UUID, seizedAtSim, liquidatedAtSim simtime.SimTime) (bool, error) {
+	_, err := r.q.InsertSystemLiquidationIfNew(ctx, sqlcgen.InsertSystemLiquidationIfNewParams{
+		BuildingID:      buildingID,
+		SeizedAtSim:     int64(seizedAtSim),
+		LiquidatedAtSim: int64(liquidatedAtSim),
+	})
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return false, nil
+	case err != nil:
+		return false, fmt.Errorf("contracts: reclamando la liquidación del edificio %s: %w", buildingID, err)
+	}
+	return true, nil
+}
+
 // ─── Conversión de filas generadas a tipos de dominio ────────────────────────
 
 func toPublication(row sqlcgen.LedgerPublication) Publication {

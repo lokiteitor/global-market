@@ -17,6 +17,7 @@ func TestOptionsFromEnvDefaults(t *testing.T) {
 		CancelCooldownSeconds:    10,
 		PublicationTTLSimSeconds: 604_800,
 		CompensationBP:           5000,
+		LiquidationPriceBP:       6000,
 	}
 	if opts != want {
 		t.Fatalf("defaults: %+v, esperado %+v", opts, want)
@@ -30,6 +31,7 @@ func TestOptionsFromEnvCustom(t *testing.T) {
 	t.Setenv(EnvCancelCooldownSeconds, "0")
 	t.Setenv(EnvPublicationTTLSimSeconds, "86400")
 	t.Setenv(EnvCompensationBP, "2500")
+	t.Setenv(EnvLiquidationPriceBP, "7500")
 
 	opts, err := OptionsFromEnv()
 	if err != nil {
@@ -41,6 +43,7 @@ func TestOptionsFromEnvCustom(t *testing.T) {
 		CancelCooldownSeconds:    0,
 		PublicationTTLSimSeconds: 86_400,
 		CompensationBP:           2500,
+		LiquidationPriceBP:       7500,
 	}
 	if opts != want {
 		t.Fatalf("opciones: %+v, esperado %+v", opts, want)
@@ -60,6 +63,10 @@ func TestOptionsFromEnvInvalid(t *testing.T) {
 		{EnvCompensationBP, "10001"},
 		{EnvCompensationBP, "-1"},
 		{EnvCompensationBP, "x"},
+		{EnvLiquidationPriceBP, "0"},
+		{EnvLiquidationPriceBP, "10001"},
+		{EnvLiquidationPriceBP, "-1"},
+		{EnvLiquidationPriceBP, "x"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.key+"="+tc.value, func(t *testing.T) {
