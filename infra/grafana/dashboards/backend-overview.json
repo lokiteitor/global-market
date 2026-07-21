@@ -1,7 +1,7 @@
 {
   "uid": "ii-backend-overview",
   "title": "Imperio - Backend Overview",
-  "description": "Vision general del backend (gateway + engine): trafico HTTP, latencia, errores y salud del proceso Go.",
+  "description": "Vision general del backend (gateway + engine + bots): trafico HTTP, latencia, errores, salud del proceso Go, poblacion de bots y Notification Gateway WS.",
   "tags": ["imperio", "backend"],
   "timezone": "browser",
   "schemaVersion": 39,
@@ -21,7 +21,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "up{job=~\"gateway|engine\"}",
+          "expr": "up{job=~\"gateway|engine|bots\"}",
           "legendFormat": "{{job}}",
           "instant": true
         }
@@ -170,7 +170,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "go_goroutines{job=~\"gateway|engine\"}",
+          "expr": "go_goroutines{job=~\"gateway|engine|bots\"}",
           "legendFormat": "{{job}}"
         }
       ],
@@ -201,12 +201,12 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "go_memstats_heap_alloc_bytes{job=~\"gateway|engine\"}",
+          "expr": "go_memstats_heap_alloc_bytes{job=~\"gateway|engine|bots\"}",
           "legendFormat": "heap {{job}}"
         },
         {
           "refId": "B",
-          "expr": "process_resident_memory_bytes{job=~\"gateway|engine\"}",
+          "expr": "process_resident_memory_bytes{job=~\"gateway|engine|bots\"}",
           "legendFormat": "rss {{job}}"
         }
       ],
@@ -217,6 +217,179 @@
       "fieldConfig": {
         "defaults": {
           "unit": "bytes",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 7,
+      "type": "row",
+      "title": "Bots (Bot Orchestration Service)",
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 32 },
+      "panels": []
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Decisiones/s por bot",
+      "description": "Tasa de decisiones auditables (rate 5m) de ii_bot_decisions_total, por bot.",
+      "gridPos": { "h": 9, "w": 8, "x": 0, "y": 33 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (bot) (rate(ii_bot_decisions_total[5m]))",
+          "legendFormat": "{{bot}}"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "lastNotNull"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Errores de decisión por bot",
+      "description": "Tasa de fallos de la pasada Decide (rate 5m) de ii_bot_errors_total, incluidos pánicos recuperados.",
+      "gridPos": { "h": 9, "w": 8, "x": 8, "y": 33 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (bot) (rate(ii_bot_errors_total[5m]))",
+          "legendFormat": "{{bot}}"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "lastNotNull"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 25,
+            "showPoints": "never"
+          },
+          "color": { "mode": "fixed", "fixedColor": "red" }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Caja por bot",
+      "description": "ii_bot_cash: caja de cada bot en unidades menores de dinero, actualizada al decidir.",
+      "gridPos": { "h": 9, "w": 8, "x": 16, "y": 33 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "ii_bot_cash",
+          "legendFormat": "{{bot}}"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "min"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 11,
+      "type": "row",
+      "title": "Notification Gateway WS",
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 42 },
+      "panels": []
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Conexiones WS",
+      "description": "ii_ws_connections: conexiones WebSocket registradas en el hub del Notification Gateway.",
+      "gridPos": { "h": 9, "w": 8, "x": 0, "y": 43 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "ii_ws_connections",
+          "legendFormat": "{{job}}"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          },
+          "min": 0
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Eventos WS enrutados/s por tipo",
+      "description": "Tasa de eventos del outbox despachados por el router del Notification Gateway (rate 5m de ii_ws_events_routed_total), por tipo de evento.",
+      "gridPos": { "h": 9, "w": 16, "x": 8, "y": 43 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (event_type) (rate(ii_ws_events_routed_total[5m]))",
+          "legendFormat": "{{event_type}}"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "lastNotNull"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
           "custom": {
             "drawStyle": "line",
             "lineWidth": 1,

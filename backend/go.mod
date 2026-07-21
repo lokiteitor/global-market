@@ -3,6 +3,7 @@ module github.com/lokiteitor/global-market/backend
 go 1.25.12
 
 require (
+	github.com/coder/websocket v1.8.15
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/prometheus/client_golang v1.23.2

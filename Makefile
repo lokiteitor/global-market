@@ -27,7 +27,7 @@ clean: ## Elimina artefactos de build
 	rm -rf backend/bin frontend/.output frontend/.nuxt
 
 # ─── Ejecución ───────────────────────────────────────────────────────────
-.PHONY: dev run backend frontend
+.PHONY: dev run backend bots frontend
 dev: infra-core migrate-up seed ## Prepara el entorno local: BD+observabilidad, esquema y seed
 	@echo ""
 	@echo "Entorno listo. En terminales separados:"
@@ -37,6 +37,8 @@ run: ## Levanta el stack completo en Docker (perfil full)
 	$(COMPOSE) --profile full up -d --build
 backend: ## Ejecuta gateway + engine en local
 	./scripts/run-backend.sh
+bots: ## Ejecuta el Bot Orchestration Service en local
+	cd backend && $(GO) run ./cmd/bots
 frontend: ## Ejecuta el frontend en modo dev
 	cd frontend && $(NPM) run dev
 

@@ -19,6 +19,8 @@ Los quince primeros ADRs (motor event-driven, sim-time 24×, ventana de mantenim
 | [ADR-020](ADR-020-migraciones-manuales.md) | Migraciones SQL manuales con runner propio; sqlc solo queries | Aceptado | Drizzle ORM (SAD §4.1/§6.1) |
 | [ADR-021](ADR-021-frontend-autonomo.md) | Frontend autónomo sin workspaces; tipos generados del contrato | Aceptado | FAD §10.1/§10.7/§23.1 |
 | [ADR-022](ADR-022-world-source-stock.md) | Cuentas `world_source`: contrapartida física del ledger para producción/consumo de stock | Aceptado | Modelo contable (DB doc, migración 0004/0008) |
+| [ADR-023](ADR-023-notification-gateway-ws.md) | Protocolo del Notification/Event Gateway (WebSocket) | Aceptado | Resuelve FAD §27.5 nº1; completa ADR-017 §5 |
+| [ADR-024](ADR-024-sdk-bots.md) | SDK oficial de bots y Bot Orchestration Service | Aceptado | Desarrolla ADR-010, GDD §13/§15.4 |
 
 ## Formato
 

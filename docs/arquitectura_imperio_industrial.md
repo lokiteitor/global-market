@@ -105,8 +105,8 @@ El sistema define **7 servicios lógicos y 2 jobs de plataforma** cuyas frontera
 | Contract Service | Tablón global de contratos, ventana de sorteo, bloqueo triple de garantías (stock reservado + garantía monetaria + escrow), verificación de entrega y liquidación pro-rata, para los dos tipos de contrato (CCRI de bienes y CCRI-Flete). Historial de contratos liquidados (OHLC). |
 | Logistics Service | Planificación **sin estado de tránsito**: topología del grafo global, pathfinding ponderado por congestión suavizada (EMA), ETAs y definición de rutas propietarias. No simula vehículos. **Materializado en el Incremento 3** como `internal/logistics` (Dijkstra ponderado; HPA* jerárquico diferido como optimización por escala — ver §5.6). |
 | Economy Balancer Service | Monitoreo macro (masa monetaria vs. PIB simulado), ajuste de impuestos/cánones dentro de rangos, curvas de demanda de ciudades, costo laboral regional por fórmula. Actúa como **agente decisor de las ciudades**, publicando sus solicitudes de compra por la API estándar del Contract Service (sin canal privilegiado). |
-| Bot Orchestration Service | Población permanente de bots, densidad dinámica según actividad humana regional, aprovisionamiento del stress test. |
-| Notification/Event Gateway | Distribución WebSocket de eventos por área de interés; el tablón global se consulta bajo demanda (pull), nunca por push mundial. |
+| Bot Orchestration Service | Población permanente de bots, densidad dinámica según actividad humana regional, aprovisionamiento del stress test. **Materializado en el Incremento 4** como `cmd/bots` + `internal/bots` sobre el SDK público `pkg/botsdk` (ADR-024): proceso aparte que aprovisiona el ciclo de vida por paquetes internos y juega exclusivamente por la API pública. Ver §5.7. |
+| Notification/Event Gateway | Distribución WebSocket de eventos por área de interés; el tablón global se consulta bajo demanda (pull), nunca por push mundial. **Materializado en el Incremento 4** como `internal/notify` dentro del proceso gateway (protocolo ADR-023, referencia de uso en `docs/api/ws-protocol.md`). Ver §5.7. |
 | *Job:* World Persistence | Snapshots periódicos de shards y backups (RPO/RTO definidos; snapshot global consistente en la ventana de mantenimiento diaria). Aislado de cargas batch. |
 | *Job:* Analytics | Agregación de métricas y estadísticas de mercado (batch de baja prioridad, nunca compite con Persistence). |
 
@@ -167,6 +167,13 @@ El tercer incremento materializa el pilar **ningún bien se mueve sin transporte
 - **World Simulation Service ⇒ `internal/world/fleet` (simulación de tránsito).** Completa el enunciado lógico del §5.1: el shard simula el movimiento. Su motor `TransitWorker` (proceso *engine*, event-driven, barrido `II_TRANSIT_SWEEP_INTERVAL` con `FOR UPDATE SKIP LOCKED`, cada vehículo en su tx serializable) procesa los segmentos vencidos —combustible, desgaste, **avería probabilística** (la carga espera a bordo, GDD 7.3), avance/llegada y **entrega física**—, reanuda averías y recalcula la **congestión por segmento (EMA)**. La posición del vehículo es **analítica** (`segmento + t_entrada + advance_fn`, derivada bajo demanda; solo los hitos escriben), coherente con el invariante nº 2. Los handlers HTTP de flota/cargamentos los monta el *gateway*: el mismo rol dual gateway↔engine ya visto en `contracts` y `world`.
 - **Integración CCRI↔Logística: el patrón event-driven entre bounded contexts.** Es el ejemplo canónico de fronteras firmes sin imports cruzados (SAD §7). `contracts` emite `contract.confirmed` **enriquecido** (payload fijo con `kind`/origen/destino/`deadline_sim`); el consumidor `world` **`shipment_creator`** materializa el cargamento de las **compras cross-node** (mueve el stock físico fuera del almacén) y omite las ventas in situ. Al llegar el cargamento, `world` emite `shipment.arrived`, que el consumidor `contracts` **`delivery_confirmer`** consume para asentar la entrega (idempotente por `shipment_id`), acumular lo entregado a tiempo y **liquidar** al completarse. El vencimiento con cantidad sin entregar viaja como `contract.expired_undelivered` para coordinar la **liberación in situ** del lado físico. Nuevos eventos de outbox: `vehicle.*` (`purchased`/`updated`/`arrived`/`broken`/`stranded`), `shipment.*` (`created`/`dispatched`/`arrived`). El detalle contable, los payloads y la coherencia física↔contable ampliada (stock físico = `building_inventories` + cargamentos en vuelo) viven en la sección *v1.4* de `documentacion_base_de_datos.md`.
 
+### 5.7 Nota de materialización (Incremento 4 — Notification Gateway, SDK de bots y Bot Orchestration Service)
+
+El cuarto incremento materializa los dos servicios lógicos del §5.1 que faltaban para cerrar la Fase 0 del GDD (bots de reglas fijas validando el loop económico en tiempo real):
+
+- **Notification/Event Gateway ⇒ `internal/notify` (en el proceso gateway).** Materializa ADR-023: el endpoint `GET /api/v1/ws` (librería `github.com/coder/websocket`), un **hub** de conexiones con suscripción por rooms (v1: solo `corp`, con buffer de envío acotado por conexión y cierre `1013` al consumidor lento) y un **router** que es un consumidor de outbox más (`notification_gateway`, mismo patrón del §5.4) con una diferencia deliberada: su cursor **avanza siempre** tras el fan-out — los sockets son efímeros y un cliente ausente re-sincroniza por REST; la entrega hacia clientes es at-least-once desde el `watermark`, no exactly-once. El protocolo es frames JSON con autenticación **en banda** (primer frame `auth`, cierre `4401` al vencer el plazo), `joined` con watermark para el bootstrap REST + deltas, y enrutado por interés resolviendo titularidades con lecturas puntuales a la BD (el paquete pertenece al contexto del gateway: puede leer la BD, pero no importa `internal/auth` — la validación de tokens llega por la interfaz `TokenValidator` del composition root). **No hay snapshots ni replay por el socket**: coherente con "el tablón es pull" (C10 del FAD) y con el modelo snapshot(REST)+deltas(WS) de ADR-FE-004. Referencia para integradores: `docs/api/ws-protocol.md`. Config `II_WS_*`; métricas `ii_ws_*`.
+- **Bot Orchestration Service ⇒ `cmd/bots` + `internal/bots` + `pkg/botsdk` (proceso aparte, ADR-010/024).** El SDK `pkg/botsdk` es la **única vía soportada** para construir bots y en runtime consume **solo la API pública** (REST del contrato v1.3.0 + WS de ADR-023): sesión bearer, reintentos con `Idempotency-Key` estable por mutación, backoff ante 429 respetando `Retry-After`, paginación por cursor, cliente WS con re-join automático y watermark, y dinero/stock **como strings del contrato** (tipo propio, jamás float). Prohibido importar `internal/*` desde su runtime. El orquestador (`cmd/bots`, binario propio con `/healthz`, `/readyz` y `/metrics` en `II_BOTS_ADDR`) tiene la doble naturaleza asumida en ADR-024 con frontera nítida: el **ciclo de vida** (cuentas `kind=bot` con secreto derivado de `II_BOTS_SECRET_SEED`, `bot_profiles`, capitalización única `bot_capitalization`: +cash/−emission del banco central) va por paquetes internos y BD porque es operación monetaria, no comando de juego; **todo el gameplay** pasa por el SDK — mismos endpoints y rate limits que un humano (igualdad de API literal). Los **arquetipos v1** (`internal/bots`: `coal_producer`, `iron_producer`, `trader`) implementan la interfaz `Behavior` con reglas fijas **auditables**: cada decisión emite un log slog estructurado (bot, arquetipo, decisión, motivo, ids) y la métrica `ii_bot_decisions_total`. La densidad de población es la válvula de carga del GDD §19 (`II_BOTS_COAL_PRODUCERS`/`IRON_PRODUCERS`/`TRADERS`); el retiro de bots (liquidación + absorción monetaria) queda para el ciclo de embargo (Incremento 6).
+
 ---
 
 ## 6. Stack Tecnológico
@@ -175,7 +182,7 @@ El tercer incremento materializa el pilar **ningún bien se mueve sin transporte
 
 - Runtime: procesos nativos Go (gateway y motor), sobre Docker Compose
 - Lenguajes: **Go** para todo el backend — gateway, auth, motor de simulación, Contract Service, bots y su SDK (ADR-017; el código que mueve dinero se decide explícitamente, no por descarte). TypeScript existe **solo en el cliente web**
-- Stack Go: `net/http` de la librería estándar (Go ≥1.22, sin framework web; middleware propio), `log/slog` con salida JSON, `pgx/v5` como driver de PostgreSQL, `prometheus/client_golang` para métricas y `golang.org/x/crypto` (argon2id) para credenciales; **sqlc solo como codegen de queries SQL escritas a mano, nunca de esquema** (ADR-020)
+- Stack Go: `net/http` de la librería estándar (Go ≥1.22, sin framework web; middleware propio), `log/slog` con salida JSON, `pgx/v5` como driver de PostgreSQL, `prometheus/client_golang` para métricas, `golang.org/x/crypto` (argon2id) para credenciales y `github.com/coder/websocket` para el Notification Gateway (ADR-023); **sqlc solo como codegen de queries SQL escritas a mano, nunca de esquema** (ADR-020)
 - Persistencia: **PostgreSQL 18, una sola instancia** con esquemas por dominio; extensiones PostGIS 3.6 (espacial) y TimescaleDB (solo si el volumen lo justifica)
 - Migraciones: SQL escritas a mano en `backend/db/migrations`, aplicadas por un **runner propio** (`cmd/migrate`, targets `make migrate-*`) — ADR-020
 - Mensajería: **outbox table + polling sobre PostgreSQL** en Fases 0–1; Kafka con schema registry en Fase 2+ solo si el volumen lo exige
@@ -203,8 +210,9 @@ global-market/
 │   ├── cmd/
 │   │   ├── gateway/             # main del gateway: API REST pública, auth/sesiones, Notification Gateway (WebSocket)
 │   │   ├── engine/              # main del proceso único del motor (shards, contratos, logística, balancer)
+│   │   ├── bots/                # main del Bot Orchestration Service (Incremento 4, ADR-024): lifecycle interno + gameplay por pkg/botsdk
 │   │   ├── migrate/             # runner propio de migraciones (ADR-020)
-│   │   └── seed/                # datos semilla (cmd/bots se añade en su fase — ADR-016/017)
+│   │   └── seed/                # datos semilla
 │   ├── internal/
 │   │   ├── auth/                # identidad y sesiones (humanos y bots); propietario del esquema auth
 │   │   ├── sim/                 # simtime + reloj: cola de eventos y sim-time compartidos
@@ -213,11 +221,13 @@ global-market/
 │   │   ├── market/              # consumidores de outbox del CCRI (ohlc_aggregator) — Incremento 1
 │   │   ├── logistics/           # Logistics Service (Incremento 3): planificación de rutas (Dijkstra ponderado por congestión), ETAs — sin estado de tránsito + sqlcgen propio
 │   │   ├── balancer/            # Economy Balancer + agente decisor de ciudades
+│   │   ├── notify/              # Notification/Event Gateway (Incremento 4, ADR-023): hub WS, router sobre outbox — contexto del proceso gateway
+│   │   ├── bots/                # arquetipos de bots (Incremento 4, ADR-024): reglas fijas auditables; juegan SOLO vía pkg/botsdk
 │   │   ├── ledger/              # acceso al esquema ledger (sqlc); invariantes en SQL
 │   │   ├── outbox/              # publicación/consumo de eventos sobre PostgreSQL
 │   │   └── platform/            # transversales: middleware HTTP, config, logging (slog), métricas
 │   ├── pkg/
-│   │   └── botsdk/              # SDK público de bots: consume exclusivamente la API pública del gateway (ADR-010)
+│   │   └── botsdk/              # SDK público de bots (ADR-010/024): consume exclusivamente la API pública (REST + WS); sin imports de internal/*
 │   └── db/
 │       └── migrations/          # migraciones SQL escritas a mano: NNNN_nombre.up.sql / NNNN_nombre.down.sql
 ├── frontend/                    # cliente web autónomo: Nuxt 4 + Vue 3 + TS estricto + Pinia + Sass (npm, sin workspaces)
@@ -341,7 +351,7 @@ La plataforma de despliegue definitiva (Compose, hosts manuales) impone un **tec
 
 ## 12. Architecture Decision Records (ADR)
 
-Las decisiones arquitectónicas se documentan siguiendo el formato ADR. El GDD (Anexo B, v1.3) mantiene el registro histórico completo; aquí se consolidan las **estructurales para la arquitectura de software**. ADR-001 a ADR-015 están renumeradas para este documento con referencia a su origen en el GDD; **ADR-016 a ADR-022** son documentos ADR de pleno derecho cuyo detalle íntegro (contexto, decisión, consecuencias) vive en `docs/adr/`.
+Las decisiones arquitectónicas se documentan siguiendo el formato ADR. El GDD (Anexo B, v1.3) mantiene el registro histórico completo; aquí se consolidan las **estructurales para la arquitectura de software**. ADR-001 a ADR-015 están renumeradas para este documento con referencia a su origen en el GDD; **ADR-016 a ADR-024** son documentos ADR de pleno derecho cuyo detalle íntegro (contexto, decisión, consecuencias) vive en `docs/adr/`.
 
 ### 12.1 Formato ADR
 
@@ -380,6 +390,8 @@ Las decisiones arquitectónicas se documentan siguiendo el formato ADR. El GDD (
 | ADR-020 | `docs/adr/` | Aceptado | **Migraciones SQL a mano** en `backend/db/migrations` (`NNNN_nombre.up/down.sql`) con **runner propio** (`cmd/migrate`: transacciones, checksums SHA-256); sqlc solo como codegen de queries | Coste de mantener el runner y escribir el `down` de cada migración, a cambio de reproducibilidad total y cero magia |
 | ADR-021 | `docs/adr/` | Aceptado | **Frontend autónomo** (npm, sin workspaces); tipos generados con `openapi-typescript` desde `docs/api/openapi.yaml` vía `make generate`; prohibidas las librerías de componentes/CSS utilitario | Sin paquete compartido de tipos entre cliente y servidor: la coherencia la garantiza el contrato, no un paquete común |
 | ADR-022 | `docs/adr/` | Aceptado | **Cuentas `world_source`**: contrapartida física del ledger para el alta (`production_output`) y baja (`consumption`) de stock — cuenta de stock por producto del banco central, única de stock que puede ser negativa (masa física emitida), simétrica a `emission` para el dinero | Una fila de cuenta por producto; la doble entrada por activo se mantiene estricta sin excepciones al trigger |
+| ADR-023 | `docs/adr/` (resuelve FAD §27.5 nº1; completa ADR-017 §5) | Aceptado | **Protocolo del Notification/Event Gateway (WebSocket)**: `GET /api/v1/ws` con `github.com/coder/websocket`; frames JSON con auth en banda, room `corp`, `joined` con watermark y bootstrap por REST + deltas at-least-once; router = consumidor outbox `notification_gateway` cuyo cursor avanza siempre. Referencia de uso: `docs/api/ws-protocol.md` | Sin replay histórico: reconectar implica re-pull REST (asumido: es el patrón snapshot+deltas del propio backend) |
+| ADR-024 | `docs/adr/` (desarrolla ADR-010, GDD §13/§15.4) | Aceptado | **SDK oficial de bots (`pkg/botsdk`) como única vía soportada** (runtime solo API pública, sin `internal/*`) **y Bot Orchestration Service (`cmd/bots`)**: lifecycle (cuentas bot, perfiles, capitalización = emisión contabilizada) por paquetes internos; todo el gameplay por el SDK; arquetipos v1 de reglas fijas auditables (`coal_producer`, `iron_producer`, `trader`) tras la interfaz `Behavior` | Doble naturaleza del orquestador (admin por BD + jugador por API) con frontera nítida: lifecycle=interno, gameplay=SDK |
 
 Toda nueva decisión estructural (adopción de Kafka, extracción de un módulo, particionado del ledger por cuenta) **debe** registrarse como ADR antes de implementarse, incluyendo la medición que la justifica.
 

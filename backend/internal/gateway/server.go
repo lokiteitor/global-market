@@ -23,6 +23,7 @@ import (
 	"github.com/lokiteitor/global-market/backend/internal/ledger"
 	"github.com/lokiteitor/global-market/backend/internal/logistics"
 	"github.com/lokiteitor/global-market/backend/internal/market"
+	"github.com/lokiteitor/global-market/backend/internal/notify"
 	"github.com/lokiteitor/global-market/backend/internal/platform/httpx"
 	"github.com/lokiteitor/global-market/backend/internal/platform/idempotency"
 	"github.com/lokiteitor/global-market/backend/internal/sim/clock"
@@ -69,6 +70,9 @@ type Options struct {
 	// Logistics es la configuración del bounded context logistics (Logistics
 	// Service: grafo, route-plans y rutas propietarias).
 	Logistics logistics.Options
+	// Notify es la configuración del Notification/Event Gateway WS (ADR-023):
+	// buffers, ping, límites por cuenta y el router del outbox.
+	Notify notify.Options
 	// ClockReader es la caché del lector del reloj de simulación.
 	ClockReader clock.ReaderOptions
 }
@@ -117,6 +121,10 @@ func OptionsFromEnv() (Options, error) {
 	if err != nil {
 		return Options{}, err
 	}
+	notifyOpts, err := notify.OptionsFromEnv()
+	if err != nil {
+		return Options{}, err
+	}
 	readerOpts, err := clock.ReaderOptionsFromEnv()
 	if err != nil {
 		return Options{}, err
@@ -132,6 +140,7 @@ func OptionsFromEnv() (Options, error) {
 		Production:  productionOpts,
 		Fleet:       fleetOpts,
 		Logistics:   logisticsOpts,
+		Notify:      notifyOpts,
 		ClockReader: readerOpts,
 	}, nil
 }
@@ -149,12 +158,46 @@ type Deps struct {
 	Options Options
 }
 
+// Server es el gateway compuesto: el árbol de rutas del contrato (Handler) y
+// los procesos de fondo del proceso gateway — hoy, el router del
+// Notification/Event Gateway WS (ADR-023). cmd/gateway monta Handler y
+// arranca Run como goroutine; los tests E2E que solo necesitan REST pueden
+// seguir usando BuildHandler.
+type Server struct {
+	// Handler es el árbol de rutas del contrato bajo APIPrefix, listo para
+	// montarse en el mux del servicio.
+	Handler http.Handler
+
+	notifyRouter *notify.Router
+}
+
+// Run ejecuta los procesos de fondo del gateway (el consumidor outbox
+// notification_gateway que alimenta el fan-out WS) hasta que ctx se cancele.
+// Devuelve nil en el apagado limpio.
+func (s *Server) Run(ctx context.Context) error {
+	return s.notifyRouter.Run(ctx)
+}
+
 // BuildHandler construye el árbol de rutas del contrato bajo APIPrefix y lo
 // devuelve listo para montarse en el mux del servicio (patrón
 // `mux.Handle(APIPrefix+"/", handler)`). Toda respuesta — incluidos los 404 y
 // 405 que el ServeMux resolvería en texto plano — usa los envelopes del
-// contrato. cmd/gateway y los tests E2E comparten esta única definición.
+// contrato. Equivale a BuildServer sin arrancar los procesos de fondo (el
+// endpoint /ws queda montado; sin el router, los joins responden con el
+// watermark de max(seq) y no fluyen eventos).
 func BuildHandler(deps Deps) (http.Handler, error) {
+	s, err := BuildServer(deps)
+	if err != nil {
+		return nil, err
+	}
+	return s.Handler, nil
+}
+
+// BuildServer compone el gateway completo: el árbol de rutas del contrato
+// (incluido GET /api/v1/ws, FUERA de RequireAuth: la autenticación WS va en
+// banda, ADR-023) y el router de notificaciones listo para Run. cmd/gateway y
+// los tests comparten esta única definición.
+func BuildServer(deps Deps) (*Server, error) {
 	if deps.Pool == nil {
 		return nil, errors.New("gateway: Deps.Pool es obligatorio")
 	}
@@ -307,7 +350,28 @@ func BuildHandler(deps Deps) (http.Handler, error) {
 	api.Handle(APIPrefix+"/logistics/",
 		http.StripPrefix(APIPrefix, authMW.RequireAuth(authMW.RateLimitAPI(idempotentWrites(idemMW, logisticsMux)))))
 
-	return contractErrors(api), nil
+	// Notification/Event Gateway WS (ADR-023): GET /api/v1/ws se monta SIN
+	// RequireAuth — la autenticación va en banda (primer frame auth, cierre
+	// 4401) porque los navegadores no pueden fijar cabeceras en el upgrade. El
+	// TokenValidator es el propio servicio auth (sesión por hash, igual que el
+	// middleware REST); el SimSource del auth_ok es el mismo lector del reloj
+	// que estampa el meta; el watermark del joined lo entrega el router. Las
+	// Options en cero (llamantes previos a este incremento, p. ej. tests E2E
+	// que construyen gateway.Options a mano) caen a los defaults documentados.
+	notifyOpts := deps.Options.Notify
+	if notifyOpts.SendBuffer == 0 {
+		notifyOpts = notify.DefaultOptions()
+	}
+	if err := notifyOpts.Validate(); err != nil {
+		return nil, err
+	}
+	notifyMetrics := notify.NewMetrics(deps.Registry)
+	hub := notify.NewHub(notifyOpts, notifyMetrics, deps.Logger)
+	notifyRouter := notify.NewRouter(deps.Pool, hub, notifyOpts, notifyMetrics, deps.Logger)
+	wsHandler := notify.NewHandler(hub, wsTokenValidator{svc: authSvc}, meta.reader, notifyRouter, notifyOpts, deps.Logger)
+	api.Handle("GET "+APIPrefix+"/ws", wsHandler)
+
+	return &Server{Handler: contractErrors(api), notifyRouter: notifyRouter}, nil
 }
 
 // idempotentWrites aplica el protocolo Idempotency-Key únicamente a los
@@ -356,6 +420,22 @@ func (sessionIdentity) AccountID(ctx context.Context) (uuid.UUID, bool) {
 		return uuid.Nil, false
 	}
 	return acc.ID, true
+}
+
+// ─── Validación de tokens del WS sobre la sesión de auth ────────────────────
+
+// wsTokenValidator implementa notify.TokenValidator con el módulo auth: el
+// token en banda del frame auth se resuelve a su sesión vigente por hash,
+// exactamente igual que el middleware REST (RequireAuth). Es el único puente
+// entre notify y auth: notify no importa auth.
+type wsTokenValidator struct{ svc *auth.Service }
+
+func (v wsTokenValidator) Validate(ctx context.Context, token string) (uuid.UUID, error) {
+	_, acc, err := v.svc.Authenticate(ctx, token)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	return acc.ID, nil
 }
 
 // ─── 404/405 con envelope del contrato ──────────────────────────────────────

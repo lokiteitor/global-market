@@ -22,3 +22,8 @@ scrape_configs:
       - targets:
           - host.docker.internal:8081
           # - engine:8081    # perfil full (servicio en la red de compose)
+
+  - job_name: bots
+    static_configs:
+      - targets:
+          - host.docker.internal:8082

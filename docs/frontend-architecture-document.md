@@ -202,6 +202,8 @@ La superficie de tiempo real del backend es la restricción de infraestructura m
 
 **Por qué esto es lo correcto.** Es el patrón *Ports & Adapters* aplicado a una restricción de infraestructura: preserva (a) el mandato "backend no se modifica"; (b) la coherencia de ingeniería (nada finge un protocolo estándar donde hay uno propio); (c) la testabilidad (el puerto se sustituye por dobles). El riesgo residual —divergencia entre lo que el cliente asume y el protocolo real del Gateway— se concentra en un solo archivo (`GatewayTransportAdapter`) y se vigila con la suite de contract-tests de red (§22.6). **El protocolo exacto del Gateway debe acordarse con el equipo de backend antes de la Fase 4** (Networking) del roadmap; es el primer punto de sincronización inter-equipo.
 
+> **Actualización (Incremento 4 del backend).** El protocolo del Gateway quedó **ACORDADO e implementado**: lo fija el **ADR-023** del backend (`docs/adr/ADR-023-notification-gateway-ws.md`) y lo documenta para integradores **`docs/api/ws-protocol.md`** (frames JSON con auth en banda, room `corp`, `joined` con watermark, bootstrap por REST + deltas at-least-once, re-sincronización por REST). La cuestión abierta nº 1 de §27.5 queda **cerrada**; los contract-tests de §22.6 ya tienen protocolo real contra el que fijar sus fixtures. El modelo de este ADR-FE-004 encaja sin cambios: el `GatewayTransportAdapter` sintetiza los *snapshots* desde REST y traduce cada frame `event` a un *patch*.
+
 > **Nota para el lector.** En el resto del documento, "el cliente se une a una room" o "recibe un patch" se refiere a la abstracción del puerto `NetworkTransport`; el cable real es el WebSocket propio del Notification/Event Gateway.
 
 ---
@@ -405,7 +407,7 @@ Formato: contexto → decisión → alternativas descartadas → consecuencias/t
 
 | Campo | Contenido |
 |---|---|
-| **Estado** | Aceptado — **requiere acordar el protocolo del Gateway con backend antes de Fase 4** |
+| **Estado** | Aceptado — protocolo del Gateway **ACORDADO e implementado** (ADR-023 del backend + `docs/api/ws-protocol.md`; ver nota en §4.4) |
 | **Contexto** | El backend fijo expone un Notification/Event Gateway WebSocket con protocolo **propio y fuera del OpenAPI** + tablón pull REST; el backend no se modifica (ver §4.4). |
 | **Decisión** | Definir un puerto `NetworkTransport` con un **modelo de sincronización canónico** (room/snapshot/patch/message), independiente del cable. Un único adaptador real, `GatewayTransportAdapter`, actúa como ACL sobre el WS propio del backend; un `MockTransportAdapter` guionizado implementa el mismo puerto para desarrollo/pruebas. |
 | **Alternativa descartada — acoplar la UI/dominio directamente al protocolo del WS** | Filtraría la idiosincrasia del Gateway (formato de frame, envelopes) a toda la app; un cambio del protocolo obligaría a tocar N archivos en vez de uno. |
@@ -2846,7 +2848,7 @@ gantt
 
 ### 27.5 Cuestiones abiertas para el equipo de backend (sincronización requerida)
 
-1. **Protocolo exacto del Notification/Event Gateway** (formato de frame, autenticación del WS, semántica de suscripción/interest, forma de snapshots vs deltas, heartbeats). *Bloqueante para ADR-FE-004 / FE4.*
+1. ~~**Protocolo exacto del Notification/Event Gateway** (formato de frame, autenticación del WS, semántica de suscripción/interest, forma de snapshots vs deltas, heartbeats). *Bloqueante para ADR-FE-004 / FE4.*~~ **CERRADA (Incremento 4 del backend):** el protocolo quedó acordado e implementado en el **ADR-023** del backend y documentado en **`docs/api/ws-protocol.md`** — frames JSON, auth en banda (primer frame `auth`, cierre `4401`), room `corp`, `joined` con watermark + bootstrap por REST, deltas at-least-once, heartbeat ping/pong. Ver la nota de §4.4.
 2. **Estabilidad de `meta.sim_time`** y de los timestamps para calibrar el `SimClock` (frecuencia, monotonicidad).
 3. **Rooms/interest disponibles**: ¿el Gateway soporta suscripción por bbox de viewport, o el interest se define por región? Afecta §12.3/§16.
 4. **Rate limits concretos** (valores de `429`, cabeceras de backoff) para calibrar coalescing/backpressure (§12.10).

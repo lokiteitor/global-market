@@ -53,6 +53,7 @@ func TestSeedIntegration(t *testing.T) {
 
 	first := snapshot(t, ctx, pool)
 	assertWorldContent(t, ctx, pool)
+	assertCoalChain(t, ctx, pool)
 	assertCoherence(t, ctx, pool)
 
 	if err := seed.Run(ctx, pool, opts, logger); err != nil {
@@ -68,7 +69,117 @@ func TestSeedIntegration(t *testing.T) {
 		t.Fatalf("IDs inestables entre ejecuciones: antes %v, después %v",
 			first.ids, second.ids)
 	}
+	assertCoalChain(t, ctx, pool)
 	assertCoherence(t, ctx, pool)
+}
+
+// assertCoalChain valida la cadena del carbón del Incremento 4 (los bots deben
+// poder producir su propio combustible): el tipo coal_mine con su regla
+// near_resource, la receta mine_coal SIN combustible (decisión de arranque v1:
+// extraer carbón no consume carbón) con salida coal 60, y el yacimiento de coal
+// en suelo libre de Askadia, dentro de la región y lejos de toda concesión
+// sembrada (un bot puede tomar una parcela libre a <8000 m).
+func assertCoalChain(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
+	t.Helper()
+
+	// Tipo coal_mine: catálogo, placement_rules y curva de nivel de iron_mine.
+	var (
+		footprintCells, maxLevel            int
+		baseStorage, buildCost, maintenance int64
+		nearResource                        string
+		maxDistanceM                        float64
+		sameCurveAsIronMine                 bool
+	)
+	if err := pool.QueryRow(ctx, `
+		SELECT footprint_cells, max_level, base_storage, build_cost, maintenance_cost,
+		       placement_rules->>'near_resource',
+		       (placement_rules->>'max_distance_m')::float8,
+		       level_curve = (SELECT level_curve FROM world.building_types WHERE code = 'iron_mine')
+		  FROM world.building_types WHERE code = 'coal_mine'`).
+		Scan(&footprintCells, &maxLevel, &baseStorage, &buildCost, &maintenance,
+			&nearResource, &maxDistanceM, &sameCurveAsIronMine); err != nil {
+		t.Fatalf("building_type coal_mine: %v", err)
+	}
+	if footprintCells != 4 || maxLevel != 4 || baseStorage != 50_000 ||
+		buildCost != 60_000 || maintenance != 80 {
+		t.Fatalf("coal_mine inesperada: cells=%d maxLevel=%d storage=%d build=%d maint=%d",
+			footprintCells, maxLevel, baseStorage, buildCost, maintenance)
+	}
+	if nearResource != "coal" || maxDistanceM != 8_000 || !sameCurveAsIronMine {
+		t.Fatalf("reglas de coal_mine inesperadas: near_resource=%s max_distance_m=%f curvaComoIronMine=%v",
+			nearResource, maxDistanceM, sameCurveAsIronMine)
+	}
+
+	// Receta mine_coal: sin combustible, 3 trabajadores, salida coal 60 y sin
+	// más ingredientes.
+	var (
+		buildingCode                            string
+		batchSeconds, fuelPerBatch, outputQty   int64
+		workers, minCityLevel, ingredientsTotal int
+		fuelIsNull, outputIsCoal                bool
+	)
+	if err := pool.QueryRow(ctx, `
+		SELECT bt.code, r.batch_sim_seconds, r.fuel_product_id IS NULL,
+		       r.fuel_per_batch, r.workers_required, r.min_city_level,
+		       (SELECT count(*) FROM world.recipe_ingredients ri WHERE ri.recipe_id = r.id),
+		       ri.quantity, p.code = 'coal'
+		  FROM world.recipes r
+		  JOIN world.building_types bt ON bt.id = r.building_type_id
+		  JOIN world.recipe_ingredients ri ON ri.recipe_id = r.id AND ri.role = 'output'
+		  JOIN world.products p ON p.id = ri.product_id
+		 WHERE r.code = 'mine_coal'`).
+		Scan(&buildingCode, &batchSeconds, &fuelIsNull, &fuelPerBatch, &workers,
+			&minCityLevel, &ingredientsTotal, &outputQty, &outputIsCoal); err != nil {
+		t.Fatalf("receta mine_coal: %v", err)
+	}
+	if buildingCode != "coal_mine" || batchSeconds != 3_600 || workers != 3 || minCityLevel != 1 {
+		t.Fatalf("mine_coal inesperada: building=%s batch=%d workers=%d minCityLevel=%d",
+			buildingCode, batchSeconds, workers, minCityLevel)
+	}
+	if !fuelIsNull || fuelPerBatch != 0 {
+		t.Fatalf("mine_coal debe extraer SIN combustible (arranque v1): fuelNull=%v fuelPerBatch=%d",
+			fuelIsNull, fuelPerBatch)
+	}
+	if ingredientsTotal != 1 || !outputIsCoal || outputQty != 60 {
+		t.Fatalf("salida de mine_coal inesperada: ingredientes=%d salidaEsCoal=%v qty=%d",
+			ingredientsTotal, outputIsCoal, outputQty)
+	}
+
+	// Yacimiento de coal: finito, intacto, en (40000,15000) dentro de la región
+	// y en suelo libre (ninguna concesión sembrada a menos de 8000 m: hay sitio
+	// para que un bot tome una parcela libre que cumpla near_resource).
+	var (
+		initial, remaining   int64
+		renewable, inRegion  bool
+		depositX, depositY   float64
+		concessionsWithin8km int
+	)
+	if err := pool.QueryRow(ctx, `
+		SELECT d.initial_amount, d.remaining_amount, d.renewable,
+		       ST_X(d.location), ST_Y(d.location),
+		       ST_Contains(r.bounds, d.location),
+		       (SELECT count(*) FROM world.land_concessions c
+		         WHERE ST_DWithin(c.parcel, d.location, 8000))
+		  FROM world.resource_deposits d
+		  JOIN world.products p ON p.id = d.product_id
+		  JOIN world.regions r ON r.id = d.region_id
+		 WHERE p.code = 'coal'`).
+		Scan(&initial, &remaining, &renewable, &depositX, &depositY,
+			&inRegion, &concessionsWithin8km); err != nil {
+		t.Fatalf("yacimiento de coal: %v", err)
+	}
+	if initial != 2_000_000 || remaining != initial || renewable {
+		t.Fatalf("yacimiento de coal inesperado: initial=%d remaining=%d renewable=%v",
+			initial, remaining, renewable)
+	}
+	if depositX != 40_000 || depositY != 15_000 || !inRegion {
+		t.Fatalf("ubicación del yacimiento de coal inesperada: (%f,%f) enRegión=%v",
+			depositX, depositY, inRegion)
+	}
+	if concessionsWithin8km != 0 {
+		t.Fatalf("el yacimiento de coal no está en suelo libre: %d concesiones a <8000 m",
+			concessionsWithin8km)
+	}
 }
 
 // dbSnapshot captura filas por tabla e IDs por clave natural para comparar
@@ -88,6 +199,8 @@ func snapshot(t *testing.T, ctx context.Context, pool *pgxpool.Pool) dbSnapshot 
 		"world.regions", "world.products", "world.building_types",
 		"world.land_concessions", "world.buildings", "world.network_nodes",
 		"world.building_inventories", "world.sim_clock",
+		"world.recipes", "world.recipe_ingredients", "world.resource_deposits",
+		"world.cities", "world.city_demand",
 	}
 	counts := make(map[string]int, len(tables))
 	for _, table := range tables {
@@ -113,6 +226,11 @@ func snapshot(t *testing.T, ctx context.Context, pool *pgxpool.Pool) dbSnapshot 
 		            FROM world.network_nodes n
 		            JOIN world.buildings b ON b.id = n.building_id
 		            JOIN auth.accounts a ON a.id = b.owner_account_id
+		UNION ALL SELECT 'recipe:'||code, id::text FROM world.recipes
+		UNION ALL SELECT 'deposit:'||p.code, d.id::text
+		            FROM world.resource_deposits d
+		            JOIN world.products p ON p.id = d.product_id
+		UNION ALL SELECT 'city:'||name, id::text FROM world.cities
 		UNION ALL SELECT 'ledger:'||la.kind||':'||COALESCE(a.name,'-')||':'||COALESCE(p.code,'-'), la.id::text
 		            FROM ledger.accounts la
 		            LEFT JOIN auth.accounts a ON a.id = la.owner_account_id

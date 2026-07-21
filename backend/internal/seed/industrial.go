@@ -6,10 +6,13 @@ package seed
 // de instalación extractiva (iron_mine) y de manufactura (blast_furnace), sus
 // recetas (mine_iron, smelt_steel), una ciudad consumidora con su curva de
 // demanda (Nueva Askadia) y un yacimiento finito de iron_ore— junto a una parcela
-// libre reservada para levantar una mina cerca de él. Todo se localiza por su
-// clave natural (code/name o relación con su dueño) antes de crearse: los datos
-// sembrados son estables entre ejecuciones y re-ejecutar el seed nunca los
-// duplica. Geometrías: SRID 0 planar, metros de mundo (ADR-019).
+// libre reservada para levantar una mina cerca de él. El Incremento 4 añade la
+// cadena del carbón que necesitan los bots (coal_mine, mine_coal y un yacimiento
+// de coal en suelo libre): sin ella nadie puede producir el combustible del que
+// dependen mine_iron y smelt_steel. Todo se localiza por su clave natural
+// (code/name o relación con su dueño) antes de crearse: los datos sembrados son
+// estables entre ejecuciones y re-ejecutar el seed nunca los duplica.
+// Geometrías: SRID 0 planar, metros de mundo (ADR-019).
 
 import (
 	"context"
@@ -60,6 +63,19 @@ const (
 	blastFurnaceMaintenance    int64 = 200
 )
 
+// Tipo de instalación extractiva de carbón (Incremento 4, cadena del carbón):
+// más barata de levantar y mantener que la mina de hierro para que un bot
+// productor con capital semilla pueda arrancarla pronto (GDD 13/15.4).
+const (
+	coalMineCode                 = "coal_mine"
+	coalMineName                 = "Mina de carbón"
+	coalMineFootprintCells       = 4
+	coalMineMaxLevel             = 4
+	coalMineBaseStorage    int64 = 50_000
+	coalMineBuildCost      int64 = 60_000
+	coalMineMaintenance    int64 = 80
+)
+
 // curva de nivel común a los dos tipos (índice nivel-1): líneas paralelas,
 // factores de velocidad y almacén crecientes, y el factor de coste de mejora no
 // lineal por nivel destino (GDD 6.3; convención de world/production y
@@ -70,6 +86,10 @@ const industrialLevelCurve = `{"lines":[1,2,4,8],"speed_mult":[1,2,3,4],"storage
 // dentro de ironMineMaxDistanceM del centroide de su footprint.
 const ironMinePlacementRules = `{"near_resource":"iron_ore","max_distance_m":8000}`
 
+// placement_rules de la mina de carbón: misma regla near_resource que la de
+// hierro, sobre un yacimiento de coal.
+const coalMinePlacementRules = `{"near_resource":"coal","max_distance_m":8000}`
+
 // Receta extractiva mine_iron (mina de hierro): un lote de 3600 s de sim consume
 // 5 de coal y 3 trabajadores para extraer 50 de iron_ore del yacimiento.
 const (
@@ -79,6 +99,19 @@ const (
 	mineIronFuelPerBatch    = 5
 	mineIronWorkers         = 3
 	mineIronOutputQty       = 50
+)
+
+// Receta extractiva mine_coal (mina de carbón, Incremento 4): un lote de 3600 s
+// de sim con 3 trabajadores extrae 60 de coal del yacimiento. SIN combustible
+// (fuel_product NULL, fuel_per_batch 0): decisión de arranque v1 — extraer
+// carbón no consume carbón, para romper la circularidad de bootstrap (nadie
+// podría producir el primer coal si producirlo ya exigiera coal).
+const (
+	mineCoalCode            = "mine_coal"
+	mineCoalName            = "Extracción de carbón"
+	mineCoalBatchSimSeconds = 3_600
+	mineCoalWorkers         = 3
+	mineCoalOutputQty       = 60
 )
 
 // Receta de manufactura smelt_steel (alto horno): un lote de 7200 s de sim
@@ -114,6 +147,17 @@ const (
 	ironDepositX       int64 = 20_000
 	ironDepositY       int64 = 20_000
 	ironDepositInitial int64 = 1_000_000
+)
+
+// Yacimiento de coal (Incremento 4): en una zona LIBRE de Askadia, lejos de las
+// parcelas sembradas (Demo (10k,10k), Norte (30k,30k), ciudad (20k,22k),
+// yacimiento de hierro (20k,20k), junction (20k,20k)) y con >8 km de suelo libre
+// alrededor dentro de la región (50 km × 50 km), de modo que un bot pueda tomar
+// una parcela libre a <8000 m (coalMinePlacementRules) y levantar su coal_mine.
+const (
+	coalDepositX       int64 = 40_000
+	coalDepositY       int64 = 15_000
+	coalDepositInitial int64 = 2_000_000
 )
 
 // Demanda urbana por producto (city_demand): d0 razonable, supply_ema > 0 (suelo
@@ -168,14 +212,34 @@ func ensureIndustrialWorld(ctx context.Context, pool *pgxpool.Pool, repo *auth.P
 	if err != nil {
 		return err
 	}
+	coalMineTypeID, err := ensureBuildingType(ctx, pool, buildingTypeSpec{
+		code: coalMineCode, name: coalMineName, footprintCells: coalMineFootprintCells,
+		maxLevel: coalMineMaxLevel, baseStorage: coalMineBaseStorage,
+		placementRules: coalMinePlacementRules, levelCurve: industrialLevelCurve,
+		buildCost: coalMineBuildCost, maintenanceCost: coalMineMaintenance,
+	}, logger)
+	if err != nil {
+		return err
+	}
 
-	// (c) Recetas: extracción (mine_iron) y manufactura (smelt_steel).
+	// (c) Recetas: extracción (mine_iron, mine_coal) y manufactura (smelt_steel).
 	fuelCoal := coalID
 	if err := ensureRecipe(ctx, pool, recipeSpec{
 		code: mineIronCode, name: mineIronName, buildingTypeID: ironMineTypeID,
 		batchSimSeconds: mineIronBatchSimSeconds, fuelProductID: &fuelCoal,
 		fuelPerBatch: mineIronFuelPerBatch, workersRequired: mineIronWorkers,
 		ingredients: []ingredientSpec{{productID: ironOreID, role: "output", quantity: mineIronOutputQty}},
+	}, logger); err != nil {
+		return err
+	}
+	// mine_coal arranca la cadena del combustible: fuelProductID nil y
+	// fuelPerBatch 0 a propósito (extraer carbón no consume carbón en v1; ver
+	// el comentario de las constantes mineCoal*).
+	if err := ensureRecipe(ctx, pool, recipeSpec{
+		code: mineCoalCode, name: mineCoalName, buildingTypeID: coalMineTypeID,
+		batchSimSeconds: mineCoalBatchSimSeconds, fuelProductID: nil,
+		fuelPerBatch: 0, workersRequired: mineCoalWorkers,
+		ingredients: []ingredientSpec{{productID: coalID, role: "output", quantity: mineCoalOutputQty}},
 	}, logger); err != nil {
 		return err
 	}
@@ -207,8 +271,12 @@ func ensureIndustrialWorld(ctx context.Context, pool *pgxpool.Pool, repo *auth.P
 		return err
 	}
 
-	// (e) Yacimiento finito de iron_ore en la zona industrial libre.
+	// (e) Yacimientos finitos en suelo libre: iron_ore (Incremento 2) y coal
+	// (Incremento 4, cadena del carbón para los bots).
 	if err := ensureResourceDeposit(ctx, pool, cat.RegionID, ironOreID, ironDepositX, ironDepositY, ironDepositInitial, logger); err != nil {
+		return err
+	}
+	if err := ensureResourceDeposit(ctx, pool, cat.RegionID, coalID, coalDepositX, coalDepositY, coalDepositInitial, logger); err != nil {
 		return err
 	}
 

@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 
 	"github.com/lokiteitor/global-market/backend/internal/gateway"
@@ -51,7 +52,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	api, err := gateway.BuildHandler(gateway.Deps{
+	srv, err := gateway.BuildServer(gateway.Deps{
 		Pool:     app.Pool(),
 		Logger:   app.Logger(),
 		Registry: app.Metrics().Registry(),
@@ -60,13 +61,33 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	app.Mux().Handle(gateway.APIPrefix+"/", api)
+	app.Mux().Handle(gateway.APIPrefix+"/", srv.Handler)
 	app.Logger().Info("rutas del contrato montadas",
 		slog.String("prefix", gateway.APIPrefix),
 		slog.Int("login_per_min", opts.Auth.LoginPerMin),
 		slog.Float64("api_rps", opts.Auth.APIRPS),
 		slog.Int("api_burst", opts.Auth.APIBurst),
 		slog.Duration("simclock_cache_ttl", opts.ClockReader.CacheTTL))
+
+	// Router del Notification Gateway (ADR-023): consumidor outbox
+	// notification_gateway en goroutine propia. Comparte el ctx de la señal:
+	// al apagar observa ctx.Done() y retorna nil; wg lo sincroniza antes de
+	// cerrar el pool (defer app.Close()).
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := srv.Run(ctx); err != nil {
+			app.Logger().Error("notify: el router del gateway WS terminó con error", slog.Any("error", err))
+		}
+	}()
+	defer wg.Wait()
+	app.Logger().Info("notification gateway WS en marcha",
+		slog.String("endpoint", gateway.APIPrefix+"/ws"),
+		slog.Duration("router_interval", opts.Notify.RouterInterval),
+		slog.Int("send_buffer", opts.Notify.SendBuffer),
+		slog.Duration("ping_interval", opts.Notify.PingInterval),
+		slog.Int("max_conns_per_account", opts.Notify.MaxConnsPerAccount))
 
 	return app.Run(ctx)
 }

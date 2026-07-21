@@ -69,6 +69,12 @@ VALUES ($1, $2)
 ON CONFLICT (account_id) DO NOTHING
 `
 
+const ensureBotProfileSQL = `
+INSERT INTO auth.bot_profiles (id, account_id, archetype, behavior)
+VALUES ($1, $2, $3::auth.bot_archetype, $4)
+ON CONFLICT (account_id) DO NOTHING
+`
+
 // EnsureCredential fija la credencial de la cuenta solo si aún no tiene una
 // (idempotente: nunca sobrescribe un secreto existente). secretHash debe ser
 // una codificación PHC producida por HashSecret. Devuelve si la creó.
@@ -76,6 +82,26 @@ func (r *PGRepository) EnsureCredential(ctx context.Context, accountID uuid.UUID
 	tag, err := r.db.Exec(ctx, ensureCredentialSQL, accountID, secretHash)
 	if err != nil {
 		return false, fmt.Errorf("auth: creando la credencial de %s: %w", accountID, err)
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
+// EnsureBotProfile crea el perfil de bot de la cuenta (arquetipo + behavior
+// JSON con los umbrales) solo si aún no existe (idempotente: nunca pisa un
+// perfil vigente). archetype debe ser un valor del enum auth.bot_archetype;
+// behavior debe ser JSON válido. Devuelve si lo creó. Lo usa el Bot
+// Orchestration Service (ADR-024: lifecycle interno).
+func (r *PGRepository) EnsureBotProfile(ctx context.Context, accountID uuid.UUID, archetype string, behavior []byte) (bool, error) {
+	id, err := uuid.NewV7()
+	if err != nil {
+		return false, fmt.Errorf("auth: generando UUIDv7: %w", err)
+	}
+	if len(behavior) == 0 {
+		behavior = []byte("{}")
+	}
+	tag, err := r.db.Exec(ctx, ensureBotProfileSQL, id, accountID, archetype, behavior)
+	if err != nil {
+		return false, fmt.Errorf("auth: creando el bot_profile de %s (%s): %w", accountID, archetype, err)
 	}
 	return tag.RowsAffected() > 0, nil
 }

@@ -31,6 +31,13 @@ Audiencia: cualquier desarrollador que se incorpora al proyecto. Complementa (no
 - `make backend-test` ejecuta unit tests siempre; con `II_TEST_DATABASE_URL` apuntando a un servidor PG18 (el de dev vale: el usuario necesita `CREATEDB`) se habilitan integración y E2E, que crean **bases efímeras propias** y no ensucian la de desarrollo.
 - `scripts/db-smoke.sh` valida las invariantes del ledger contra la BD de desarrollo (9 casos).
 
+### Bots (ADR-024)
+
+- **El SDK `pkg/botsdk` es la ÚNICA vía soportada para construir bots.** En runtime consume solo la API pública (REST del contrato + WS de ADR-023, ver `docs/api/ws-protocol.md`); prohibido importar `internal/*` desde su código de runtime (sus tests de integración sí pueden). Dinero/stock como strings del contrato — jamás float.
+- **Añadir un arquetipo**: implementa la interfaz `Behavior` de `internal/bots` (`Name() string` + `Decide(ctx, *botsdk.Client, *State) error`), regístralo en la población del orquestador y dale variable de densidad propia (`II_BOTS_*`). `Decide` es UNA pasada idempotente: el estado observable de la API manda, `State` solo cachea. Las heurísticas son **auditables**: cada decisión pasa por `decide()` (log slog con bot/arquetipo/decisión/motivo/ids + métrica `ii_bot_decisions_total`) — sin reglas implícitas.
+- **`make bots`** arranca el Bot Orchestration Service (`cmd/bots`) contra el gateway local: aprovisiona la población (cuentas `kind=bot`, capitalización del banco central) y la ejecuta. Observabilidad propia en `II_BOTS_ADDR` (default `:8082`).
+- Variables `II_BOTS_*` (defaults en `internal/bots/options.go`): `II_BOTS_COAL_PRODUCERS` / `II_BOTS_IRON_PRODUCERS` / `II_BOTS_TRADERS` (densidad, default 1 c/u — la válvula de carga del GDD §19), `II_BOTS_SECRET_SEED` (derivación reproducible de secretos), `II_BOTS_CAPITAL` (capitalización única, default 500000), `II_BOTS_TICK` (periodo de decisión, default `5s`, jitter ±20%), `II_BOTS_API_URL` (default `http://localhost:8080/api/v1`), `II_BOTS_ADDR`.
+
 ## 3. Frontend (Nuxt 4)
 
 - Paquete autónomo con **npm sin workspaces** (ADR-021). Kernel puro en `shared/` (Money BigInt, SimTime, uuidv7, Result, mini-i18n) y dominio en `domain/`: **jamás importan vue/nuxt/pinia** (regla de ESLint).

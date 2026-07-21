@@ -12,8 +12,9 @@ Los tres invariantes que gobiernan todo el diseño:
 
 ```
 /backend      Servidor completo en Go: gateway (REST+WS+auth), engine (simulación),
-              runner de migraciones, seed, SDK de bots. Módulo único con bounded
-              contexts sin imports cruzados (internal/{auth,ledger,sim,...}).
+              orquestador de bots (cmd/bots), runner de migraciones, seed y SDK
+              oficial de bots (pkg/botsdk). Módulo único con bounded contexts sin
+              imports cruzados (internal/{auth,ledger,sim,...}).
 /frontend     Cliente web autónomo: Nuxt 4 + Vue 3 + TypeScript estricto + Pinia +
               Sass propio (sin frameworks CSS) + Phaser (top-down, Incremento 5).
 /infra        Docker Compose (PostgreSQL 18 + PostGIS, Prometheus, Grafana, Caddy),
@@ -48,6 +49,7 @@ Stack completo en Docker: `make run` (perfil `full`, entra por Caddy en :80).
 | `make generate` | Codegen: sqlc (queries Go) + tipos TS del contrato |
 | `make migrate-up` / `migrate-down` / `migrate-status` / `migrate-create name=x` / `reset-db` | Migraciones manuales con runner propio (ADR-020) |
 | `make seed` | Datos mínimos de desarrollo (idempotente) |
+| `make bots` | Bot Orchestration Service (`cmd/bots`, ADR-024): aprovisiona y ejecuta la población de bots jugando por la API pública vía `pkg/botsdk` (densidad con `II_BOTS_*`; métricas en :8082) |
 | `make infra-core` / `infra-down` / `infra-logs` | Infraestructura local |
 
 ## Observabilidad
@@ -59,7 +61,7 @@ Stack completo en Docker: `make run` (perfil `full`, entra por Caddy en :80).
 
 - **Diseño y arquitectura**: [`docs/gdd.md`](docs/gdd.md) (normativo), [`docs/arquitectura_imperio_industrial.md`](docs/arquitectura_imperio_industrial.md), [`docs/frontend-architecture-document.md`](docs/frontend-architecture-document.md)
 - **Modelo de datos**: [`docs/documentacion_base_de_datos.md`](docs/documentacion_base_de_datos.md) (fuente de verdad del esquema: `backend/db/migrations/`)
-- **Contrato de API** (API-first): [`docs/api/openapi.yaml`](docs/api/openapi.yaml)
+- **Contrato de API** (API-first): [`docs/api/openapi.yaml`](docs/api/openapi.yaml) (REST) · [`docs/api/ws-protocol.md`](docs/api/ws-protocol.md) (WebSocket `GET /api/v1/ws` del Notification/Event Gateway, ADR-023: eventos en tiempo real con bootstrap por REST + deltas)
 - **Decisiones**: [`docs/adr/`](docs/adr/README.md)
 - **Guías**: [`docs/guias/desarrollo.md`](docs/guias/desarrollo.md) · **Runbooks**: [`docs/runbooks/local.md`](docs/runbooks/local.md)
 
