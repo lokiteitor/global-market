@@ -116,6 +116,12 @@ func (c *DeliveryConfirmer) Handle(ctx context.Context, tx pgx.Tx, ev outbox.Eve
 	if err := json.Unmarshal(ev.Payload, &e); err != nil {
 		return fmt.Errorf("contracts: leyendo shipment.arrived (seq %d): %w", ev.Seq, err)
 	}
+	// Un cargamento SOLO de flete (sin contract_id de bienes) no lo liquida este
+	// consumidor: lo hace el freight_settler por su freight_contract_id. Un
+	// cargamento con ambos ids (composición plena flete↔venta) dispara ambos.
+	if e.ContractID == "" {
+		return nil
+	}
 	contractID, err := uuid.Parse(e.ContractID)
 	if err != nil {
 		return fmt.Errorf("contracts: contract_id inválido en shipment.arrived (seq %d): %w", ev.Seq, err)

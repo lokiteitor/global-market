@@ -35,6 +35,14 @@ const (
 	// base_price del producto: la oferta sell del sistema vale
 	// base_price * II_LIQUIDATION_PRICE_BP / 10000. Default 6000 (60%: remate).
 	EnvLiquidationPriceBP = "II_LIQUIDATION_PRICE_BP"
+	// EnvFreightGuaranteeBP es la garantía del transportista en un CCRI-Flete,
+	// en puntos básicos del valor declarado de la carga (GDD 5.3.2). Default
+	// 1000 (10% del valor declarado).
+	EnvFreightGuaranteeBP = "II_FREIGHT_GUARANTEE_BP"
+	// EnvFreightCompensationBP es la parte de la garantía del transportista que
+	// compensa al cargador en un fallo de entrega del flete, en puntos básicos
+	// (el resto va al sink). Default 5000 (50/50).
+	EnvFreightCompensationBP = "II_FREIGHT_COMPENSATION_BP"
 )
 
 // Valores por defecto documentados.
@@ -45,6 +53,8 @@ const (
 	DefaultPublicationTTLSimSeconds int64 = 604_800
 	DefaultCompensationBP                 = 5000
 	DefaultLiquidationPriceBP             = 6000
+	DefaultFreightGuaranteeBP             = 1000
+	DefaultFreightCompensationBP          = 5000
 )
 
 // bpDenominator es la base de los puntos básicos (10000 = 100%).
@@ -80,6 +90,12 @@ type Options struct {
 	// LiquidationPriceBP es el precio de remate de la subasta del sistema como
 	// fracción del base_price del producto (1..10000 puntos básicos).
 	LiquidationPriceBP int
+	// FreightGuaranteeBP es la garantía del transportista como fracción del
+	// valor declarado de la carga (1..10000 puntos básicos).
+	FreightGuaranteeBP int
+	// FreightCompensationBP es el reparto compensación/sink de la garantía del
+	// transportista en un fallo de flete (0..10000 puntos básicos).
+	FreightCompensationBP int
 }
 
 // DefaultOptions devuelve la configuración por defecto del módulo.
@@ -91,6 +107,8 @@ func DefaultOptions() Options {
 		PublicationTTLSimSeconds: DefaultPublicationTTLSimSeconds,
 		CompensationBP:           DefaultCompensationBP,
 		LiquidationPriceBP:       DefaultLiquidationPriceBP,
+		FreightGuaranteeBP:       DefaultFreightGuaranteeBP,
+		FreightCompensationBP:    DefaultFreightCompensationBP,
 	}
 }
 
@@ -125,6 +143,20 @@ func OptionsFromEnv() (Options, error) {
 		}
 		opts.LiquidationPriceBP = bp
 	}
+	if v := strings.TrimSpace(os.Getenv(EnvFreightGuaranteeBP)); v != "" {
+		bp, err := strconv.Atoi(v)
+		if err != nil {
+			return Options{}, fmt.Errorf("contracts: %s inválido %q (entero 1..10000): %w", EnvFreightGuaranteeBP, v, err)
+		}
+		opts.FreightGuaranteeBP = bp
+	}
+	if v := strings.TrimSpace(os.Getenv(EnvFreightCompensationBP)); v != "" {
+		bp, err := strconv.Atoi(v)
+		if err != nil {
+			return Options{}, fmt.Errorf("contracts: %s inválido %q (entero 0..10000): %w", EnvFreightCompensationBP, v, err)
+		}
+		opts.FreightCompensationBP = bp
+	}
 	if err := opts.Validate(); err != nil {
 		return Options{}, err
 	}
@@ -150,6 +182,12 @@ func (o Options) Validate() error {
 	}
 	if o.LiquidationPriceBP < 1 || o.LiquidationPriceBP > 10000 {
 		return fmt.Errorf("contracts: %s debe estar en 1..10000 (actual %d)", EnvLiquidationPriceBP, o.LiquidationPriceBP)
+	}
+	if o.FreightGuaranteeBP < 1 || o.FreightGuaranteeBP > 10000 {
+		return fmt.Errorf("contracts: %s debe estar en 1..10000 (actual %d)", EnvFreightGuaranteeBP, o.FreightGuaranteeBP)
+	}
+	if o.FreightCompensationBP < 0 || o.FreightCompensationBP > 10000 {
+		return fmt.Errorf("contracts: %s debe estar en 0..10000 (actual %d)", EnvFreightCompensationBP, o.FreightCompensationBP)
 	}
 	return nil
 }

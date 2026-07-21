@@ -112,7 +112,8 @@ type Publication struct {
 	CancelCooldownUntil   *time.Time // fin del cooldown anti-parpadeo (wall-clock de la BD)
 	StockReserveAccountID *uuid.UUID // espejo sell: stock congelado
 	GuaranteeAccountID    *uuid.UUID // espejo sell: garantía monetaria del 10%
-	EscrowAccountID       *uuid.UUID // espejo buy: 100% del pago retenido
+	EscrowAccountID       *uuid.UUID // espejo buy/freight: 100% del pago retenido
+	DeclaredValue         *int64     // freight: valor declarado de la carga (base de la garantía del transportista)
 	PublishedAtSim        simtime.SimTime
 	CreatedAt             time.Time
 	UpdatedAt             time.Time
@@ -239,6 +240,10 @@ type PublicationInput struct {
 	OriginNodeID          *uuid.UUID
 	DestinationNodeID     *uuid.UUID
 	DeliverySimSeconds    int64
+	// DeclaredValue es el valor declarado de la carga en una solicitud de flete
+	// (kind=freight): base de la garantía del transportista. Obligatorio y > 0
+	// en freight; ignorado en sell/buy.
+	DeclaredValue int64
 }
 
 // AcceptInput son los parámetros de Accept (schema AcceptanceCreate).
@@ -270,6 +275,61 @@ func (s BoardSort) Valid() bool {
 		return true
 	}
 	return false
+}
+
+// ─── CCRI-Flete (GDD 5.3.2) ──────────────────────────────────────────────────
+
+// FreightContract es un contrato de flete (schema FreightContract): el cargador
+// paga el precio del flete a escrow y el transportista deposita una garantía
+// proporcional al valor declarado; la carga viaja en una cuenta de CUSTODIA a
+// nombre del contrato (el transportista la lleva pero no puede venderla). Nace
+// activo al servirse la aceptación y se liquida pro-rata contra la entrega.
+type FreightContract struct {
+	ID                        uuid.UUID
+	PublicationID             *uuid.UUID
+	Channel                   Channel
+	ShipperAccountID          uuid.UUID // cargador (dueño de la mercancía)
+	CarrierAccountID          uuid.UUID // transportista
+	OriginNodeID              uuid.UUID
+	DestinationNodeID         uuid.UUID
+	FreightPrice              int64 // precio del flete de este contrato (escrow del cargador)
+	DeclaredValue             int64 // valor declarado de la carga de este contrato
+	DeadlineSim               simtime.SimTime
+	Status                    ContractStatus
+	FillBP                    *int32
+	EscrowAccountID           uuid.UUID
+	CarrierGuaranteeAccountID uuid.UUID
+	CustodyAccountID          uuid.UUID
+	ConfirmedAtSim            simtime.SimTime
+	SettledAtSim              *simtime.SimTime
+	CreatedAt                 time.Time
+}
+
+// IsParty indica si account es el cargador o el transportista del flete (la
+// autorización de GetFreightContract: solo las partes).
+func (f FreightContract) IsParty(account uuid.UUID) bool {
+	return account == f.ShipperAccountID || account == f.CarrierAccountID
+}
+
+// FreightRole es el rol de la corporación autenticada en el filtro de fletes
+// (query param role de /contracts/freight-contracts).
+type FreightRole string
+
+// Valores de FreightRole.
+const (
+	RoleShipper FreightRole = "shipper"
+	RoleCarrier FreightRole = "carrier"
+)
+
+// Valid indica si el valor pertenece al enum del contrato.
+func (r FreightRole) Valid() bool { return r == RoleShipper || r == RoleCarrier }
+
+// FreightContractFilter son los filtros y la paginación de ListFreightContracts.
+type FreightContractFilter struct {
+	Role   FreightRole
+	Status ContractStatus
+	Cursor string
+	Limit  int
 }
 
 // BoardFilter son los filtros, el orden y la paginación de QueryBoard

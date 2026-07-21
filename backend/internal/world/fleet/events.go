@@ -5,8 +5,12 @@ import "strconv"
 // Tipos de agregado y de evento que world/fleet emite por el outbox
 // transaccional (SAD/ADR-008), en la MISMA tx que el cambio de estado.
 const (
-	AggregateVehicle  = "vehicle"
-	AggregateShipment = "shipment"
+	AggregateVehicle      = "vehicle"
+	AggregateShipment     = "shipment"
+	AggregateTerminalSlot = "terminal_slot"
+
+	// EventSlotPurchased lo emite la compra de un slot de prioridad de terminal.
+	EventSlotPurchased = "slot.purchased"
 
 	EventVehiclePurchased = "vehicle.purchased"
 	EventVehicleUpdated   = "vehicle.updated"
@@ -59,7 +63,8 @@ type VehicleUpdatedPayload struct {
 // materializa el cargamento de un contrato de compra cross-node).
 type ShipmentCreatedPayload struct {
 	ShipmentID        string `json:"shipment_id"`
-	ContractID        string `json:"contract_id"`
+	ContractID        string `json:"contract_id,omitempty"`
+	FreightContractID string `json:"freight_contract_id,omitempty"`
 	OwnerAccountID    string `json:"owner_account_id"`
 	ProductID         string `json:"product_id"`
 	Quantity          string `json:"quantity"`
@@ -115,7 +120,8 @@ type VehicleStrandedPayload struct {
 // puntualidad, asentar la entrega y liquidar (GDD 5.3 pasos 5-6).
 type ShipmentArrivedPayload struct {
 	ShipmentID        string `json:"shipment_id"`
-	ContractID        string `json:"contract_id"`
+	ContractID        string `json:"contract_id,omitempty"`
+	FreightContractID string `json:"freight_contract_id,omitempty"`
 	Quantity          string `json:"quantity"`
 	DestinationNodeID string `json:"destination_node_id"`
 	ArrivedAtSim      int64  `json:"arrived_at_sim"`
@@ -139,13 +145,26 @@ type ShipmentAtTerminalPayload struct {
 // ShipmentReleasedPayload es el payload de shipment.released (liberación in situ
 // de un cargamento de contrato vencido, en su ubicación física actual).
 type ShipmentReleasedPayload struct {
-	ShipmentID     string `json:"shipment_id"`
-	ContractID     string `json:"contract_id"`
-	OwnerAccountID string `json:"owner_account_id"`
-	ProductID      string `json:"product_id"`
-	Quantity       string `json:"quantity"`
-	NodeID         string `json:"node_id"`
-	ReleasedAtSim  int64  `json:"released_at_sim"`
+	ShipmentID        string `json:"shipment_id"`
+	ContractID        string `json:"contract_id,omitempty"`
+	FreightContractID string `json:"freight_contract_id,omitempty"`
+	OwnerAccountID    string `json:"owner_account_id"`
+	ProductID         string `json:"product_id"`
+	Quantity          string `json:"quantity"`
+	NodeID            string `json:"node_id"`
+	ReleasedAtSim     int64  `json:"released_at_sim"`
+}
+
+// SlotPurchasedPayload es el payload de slot.purchased (compra de un slot de
+// prioridad de terminal, GDD 7.3).
+type SlotPurchasedPayload struct {
+	SlotID          string `json:"slot_id"`
+	TerminalID      string `json:"terminal_id"`
+	HolderAccountID string `json:"holder_account_id"`
+	Price           string `json:"price"`
+	PriorityTier    int64  `json:"priority_tier"`
+	ValidUntilSim   int64  `json:"valid_until_sim"`
+	PurchasedAtSim  int64  `json:"purchased_at_sim"`
 }
 
 // fixed serializa un importe/cantidad de punto fijo como string del contrato.

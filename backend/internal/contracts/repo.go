@@ -54,6 +54,7 @@ type insertPublicationParams struct {
 	StockReserveAccountID *uuid.UUID
 	GuaranteeAccountID    *uuid.UUID
 	EscrowAccountID       *uuid.UUID
+	DeclaredValue         *int64
 	PublishedAtSim        simtime.SimTime
 }
 
@@ -77,6 +78,7 @@ func (r *Repo) InsertPublication(ctx context.Context, p insertPublicationParams)
 		StockReserveAccountID: p.StockReserveAccountID,
 		GuaranteeAccountID:    p.GuaranteeAccountID,
 		EscrowAccountID:       p.EscrowAccountID,
+		DeclaredValue:         p.DeclaredValue,
 		PublishedAtSim:        int64(p.PublishedAtSim),
 	})
 	if err != nil {
@@ -895,6 +897,7 @@ func toPublication(row sqlcgen.LedgerPublication) Publication {
 		StockReserveAccountID: row.StockReserveAccountID,
 		GuaranteeAccountID:    row.GuaranteeAccountID,
 		EscrowAccountID:       row.EscrowAccountID,
+		DeclaredValue:         row.DeclaredValue,
 		PublishedAtSim:        simtime.SimTime(row.PublishedAtSim),
 		CreatedAt:             row.CreatedAt,
 		UpdatedAt:             row.UpdatedAt,

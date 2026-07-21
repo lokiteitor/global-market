@@ -245,17 +245,20 @@ WHERE id = sqlc.arg(id);
 -- ruta multimodal (at_terminal tras un transbordo). pgx.ErrNoRows si no existe.
 -- name: LockShipmentForDispatch :one
 SELECT id, owner_account_id, product_id, quantity, contract_id, freight_contract_id,
-       vehicle_id, at_node_id, destination_node_id, deadline_sim, status, updated_at_sim
+       vehicle_id, at_node_id, destination_node_id, deadline_sim, status, updated_at_sim,
+       transship_ready_at_sim
 FROM world.shipments
 WHERE id = sqlc.arg(id)
 FOR UPDATE;
 
 -- DispatchShipment pone un cargamento a bordo del vehículo y en tránsito (deja el
--- almacén: at_node_id = NULL).
+-- almacén: at_node_id = NULL). Limpia transship_ready_at_sim: si el cargamento
+-- venía at_terminal (tramo posterior de una ruta multimodal), abandona la cola de
+-- esa terminal; un transbordo futuro se sirve de cero.
 -- name: DispatchShipment :exec
 UPDATE world.shipments
    SET vehicle_id = sqlc.arg(vehicle_id), at_node_id = NULL,
-       status = 'in_transit', updated_at_sim = sqlc.arg(sim_now)
+       status = 'in_transit', transship_ready_at_sim = NULL, updated_at_sim = sqlc.arg(sim_now)
  WHERE id = sqlc.arg(id);
 
 -- DispatchVehicle arranca un vehículo idle: lo pone in_transit sobre el primer
@@ -287,3 +290,79 @@ RETURNING id;
 -- (guarda de idempotencia del consumidor ante reprocesos, defensiva).
 -- name: ShipmentExistsForContract :one
 SELECT EXISTS (SELECT 1 FROM world.shipments WHERE contract_id = sqlc.arg(contract_id))::boolean AS present;
+
+-- ─── Consumidor freight_shipment_creator (freight.confirmed → cargamento) ─────
+
+-- InsertFreightShipmentInWarehouse crea el cargamento del CARGADOR (owner=shipper)
+-- in_warehouse en el nodo de origen del flete, etiquetado por freight_contract_id
+-- (contract_id NULL: flete puro). El transportista lo despacha en su vehículo; la
+-- mercancía ya está en custodia contable (la asentó el Contract Service al confirmar).
+-- name: InsertFreightShipmentInWarehouse :one
+INSERT INTO world.shipments
+    (id, owner_account_id, product_id, quantity, freight_contract_id, at_node_id, destination_node_id, deadline_sim, status, updated_at_sim)
+VALUES
+    (sqlc.arg(id), sqlc.arg(owner_account_id), sqlc.arg(product_id), sqlc.arg(quantity),
+     sqlc.arg(freight_contract_id), sqlc.arg(at_node_id), sqlc.arg(destination_node_id), sqlc.arg(deadline_sim),
+     'in_warehouse', sqlc.arg(sim_now))
+RETURNING id;
+
+-- ShipmentExistsForFreightContract indica si ya hay un cargamento para un flete
+-- (idempotencia del freight_shipment_creator ante reprocesos).
+-- name: ShipmentExistsForFreightContract :one
+SELECT EXISTS (SELECT 1 FROM world.shipments WHERE freight_contract_id = sqlc.arg(freight_contract_id))::boolean AS present;
+
+-- GetFreightCarrier devuelve el transportista de un flete: el despacho de un
+-- cargamento de flete lo autoriza el TRANSPORTISTA (no el dueño=cargador). world
+-- lee ledger.freight_contracts (cross-schema) sin importar internal/contracts.
+-- name: GetFreightCarrier :one
+SELECT carrier_account_id FROM ledger.freight_contracts WHERE id = sqlc.arg(id);
+
+-- ═════════════════════════════════════════════════════════════════════════════
+-- Terminales y slots de prioridad (GDD 7.3, Incremento 8). Las terminales tienen
+-- dueño y venden slots de prioridad de atraque/transbordo (priority_tier menor =
+-- más prioritario). El transbordo del motor de tránsito sirve ANTES a los
+-- cargamentos de un dueño/transportista con slot vigente.
+-- ═════════════════════════════════════════════════════════════════════════════
+
+-- GetTerminal devuelve una terminal por id; pgx.ErrNoRows si no existe.
+-- name: GetTerminal :one
+SELECT id, node_id, owner_account_id, transshipment_per_hour, queue_length, updated_at_sim
+FROM world.terminals WHERE id = sqlc.arg(id);
+
+-- ListTerminalSlots lista los slots de una terminal; only_available filtra los
+-- que están en venta (sin titular vigente en sim_now).
+-- name: ListTerminalSlots :many
+SELECT id, terminal_id, priority_tier, price, holder_account_id, valid_until_sim
+FROM world.terminal_slots
+WHERE terminal_id = sqlc.arg(terminal_id)
+  AND (NOT sqlc.arg(only_available)::boolean
+       OR holder_account_id IS NULL
+       OR (valid_until_sim IS NOT NULL AND valid_until_sim < sqlc.arg(sim_now)::bigint))
+ORDER BY priority_tier, id;
+
+-- GetSlotForPurchase bloquea un slot (FOR UPDATE) con el dueño de su terminal:
+-- la compra valida vigencia y asienta el pago bajo el lock. pgx.ErrNoRows si no existe.
+-- name: GetSlotForPurchase :one
+SELECT s.id, s.terminal_id, s.priority_tier, s.price, s.holder_account_id, s.valid_until_sim,
+       t.owner_account_id AS terminal_owner_account_id
+FROM world.terminal_slots s
+JOIN world.terminals t ON t.id = s.terminal_id
+WHERE s.id = sqlc.arg(id)
+FOR UPDATE OF s;
+
+-- SetSlotHolder asigna el titular y la vigencia de un slot (compra).
+-- name: SetSlotHolder :one
+UPDATE world.terminal_slots
+   SET holder_account_id = sqlc.arg(holder_account_id), valid_until_sim = sqlc.arg(valid_until_sim)
+ WHERE id = sqlc.arg(id)
+RETURNING id, terminal_id, priority_tier, price, holder_account_id, valid_until_sim;
+
+-- La prioridad de un dueño en una terminal (mejor priority_tier vigente) la resuelve
+-- ListTerminalTransshipQueue (transit.sql) por subconsulta, al servir la cola.
+
+-- CreateCashAccount crea la caja de una corporación (on-demand): el dueño de una
+-- terminal —p. ej. el banco central— puede no tener caja aún al cobrar un slot.
+-- name: CreateCashAccount :one
+INSERT INTO ledger.accounts (id, kind, owner_account_id)
+VALUES (sqlc.arg(id), 'cash', sqlc.arg(owner_account_id))
+RETURNING id, balance;

@@ -38,6 +38,11 @@ type fakeAPI struct {
 	contractErr  error
 	deliveries   []contracts.ContractDelivery
 	deliveriesEr error
+
+	freights    []contracts.FreightContract
+	freightsErr error
+	freight     contracts.FreightContract
+	freightErr  error
 }
 
 func (f *fakeAPI) QueryBoard(context.Context, contracts.BoardFilter) ([]contracts.Publication, string, error) {
@@ -69,6 +74,12 @@ func (f *fakeAPI) GetContract(context.Context, uuid.UUID, uuid.UUID) (contracts.
 }
 func (f *fakeAPI) ListContractDeliveries(context.Context, uuid.UUID, uuid.UUID) ([]contracts.ContractDelivery, error) {
 	return f.deliveries, f.deliveriesEr
+}
+func (f *fakeAPI) ListFreightContracts(context.Context, uuid.UUID, contracts.FreightContractFilter) ([]contracts.FreightContract, string, error) {
+	return f.freights, "", f.freightsErr
+}
+func (f *fakeAPI) GetFreightContract(context.Context, uuid.UUID, uuid.UUID) (contracts.FreightContract, error) {
+	return f.freight, f.freightErr
 }
 
 // fakeIdentity/fakeMeta implementan las interfaces del composition root.
@@ -130,10 +141,10 @@ func TestHandlersUnauthorized(t *testing.T) {
 	}
 }
 
-func TestHandlersFreightPhase2(t *testing.T) {
-	srv := newTestServer(&fakeAPI{}, true)
+func TestHandlersFreight(t *testing.T) {
+	srv := newTestServer(&fakeAPI{freightErr: contracts.ErrFreightContractNotFound}, true)
 
-	// Lista vacía paginada.
+	// Lista vacía paginada (sin fletes de la cuenta).
 	code, body := do(t, srv, "GET", "/contracts/freight-contracts", "")
 	if code != http.StatusOK {
 		t.Fatalf("freight list: %d, esperado 200", code)
@@ -145,7 +156,7 @@ func TestHandlersFreightPhase2(t *testing.T) {
 		t.Fatal("freight list: falta meta")
 	}
 
-	// Detalle → 404.
+	// Detalle de un flete inexistente → 404.
 	code, _ = do(t, srv, "GET", "/contracts/freight-contracts/"+uuid.New().String(), "")
 	if code != http.StatusNotFound {
 		t.Fatalf("freight detail: %d, esperado 404", code)

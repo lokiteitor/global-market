@@ -59,6 +59,8 @@ type API interface {
 	ListContracts(ctx context.Context, account uuid.UUID, f ContractFilter) ([]Contract, string, error)
 	GetContract(ctx context.Context, viewer, id uuid.UUID) (Contract, error)
 	ListContractDeliveries(ctx context.Context, viewer, contractID uuid.UUID) ([]ContractDelivery, error)
+	ListFreightContracts(ctx context.Context, account uuid.UUID, f FreightContractFilter) ([]FreightContract, string, error)
+	GetFreightContract(ctx context.Context, viewer, id uuid.UUID) (FreightContract, error)
 }
 
 var _ API = (*Service)(nil)
@@ -358,25 +360,54 @@ func (h *Handlers) listDeliveries(w http.ResponseWriter, r *http.Request) {
 	h.writeData(w, r, http.StatusOK, data, "")
 }
 
-// ─── GET /contracts/freight-contracts (CCRI-Flete, Fase 2) ───────────────────
+// ─── GET /contracts/freight-contracts (CCRI-Flete, GDD 5.3.2) ────────────────
 
-// listFreightContracts devuelve una lista vacía paginada: el CCRI-Flete se
-// activa en Fase 2 (decisión del incremento).
 func (h *Handlers) listFreightContracts(w http.ResponseWriter, r *http.Request) {
-	if _, ok := h.identity.AccountID(r.Context()); !ok {
+	account, ok := h.identity.AccountID(r.Context())
+	if !ok {
 		unauthorized(w)
 		return
 	}
-	h.writeData(w, r, http.StatusOK, []freightContractJSON{}, "")
+	q := r.URL.Query()
+	filter := FreightContractFilter{
+		Role:   FreightRole(q.Get("role")),
+		Status: ContractStatus(q.Get("status")),
+		Cursor: q.Get("cursor"),
+	}
+	var err error
+	if filter.Limit, err = parseLimit(q); err != nil {
+		writeValidationError(w, "limit", err.Error())
+		return
+	}
+	freights, next, err := h.svc.ListFreightContracts(r.Context(), account, filter)
+	if err != nil {
+		h.writeError(w, r, err, "listando contratos de flete")
+		return
+	}
+	data := make([]freightContractJSON, len(freights))
+	for i, fc := range freights {
+		data[i] = toFreightContractJSON(fc)
+	}
+	h.writeData(w, r, http.StatusOK, data, next)
 }
 
-// getFreightContract responde 404: no existen contratos de flete en Fase 0.
 func (h *Handlers) getFreightContract(w http.ResponseWriter, r *http.Request) {
-	if _, ok := h.identity.AccountID(r.Context()); !ok {
+	viewer, ok := h.identity.AccountID(r.Context())
+	if !ok {
 		unauthorized(w)
 		return
 	}
-	notFound(w, "el contrato de flete no existe (CCRI-Flete se activa en Fase 2)")
+	id, err := uuid.Parse(r.PathValue("freightContractId"))
+	if err != nil {
+		notFound(w, "el contrato de flete no existe")
+		return
+	}
+	fc, err := h.svc.GetFreightContract(r.Context(), viewer, id)
+	if err != nil {
+		h.writeError(w, r, err, "consultando el contrato de flete")
+		return
+	}
+	h.writeData(w, r, http.StatusOK, toFreightContractJSON(fc), "")
 }
 
 // ─── Escritura de respuestas y mapeo de errores ──────────────────────────────
@@ -422,11 +453,13 @@ func (h *Handlers) writeError(w http.ResponseWriter, r *http.Request, err error,
 		notFound(w, "la aceptación no existe")
 	case errors.Is(err, ErrContractNotFound):
 		notFound(w, "el contrato no existe")
+	case errors.Is(err, ErrFreightContractNotFound):
+		notFound(w, "el contrato de flete no existe")
 	case errors.Is(err, ErrPublicationExhausted):
 		httpx.WriteError(w, http.StatusConflict, codePublicationExhausted, err.Error(), nil)
 	case errors.Is(err, ErrNotPublisher), errors.Is(err, ErrNotParty),
 		errors.Is(err, ErrNotAcceptor), errors.Is(err, ErrNotNodeOwner),
-		errors.Is(err, ErrNotContractParty):
+		errors.Is(err, ErrNotContractParty), errors.Is(err, ErrNotFreightParty):
 		httpx.WriteError(w, http.StatusForbidden, codeNotResourceOwner, err.Error(), nil)
 	default:
 		logging.WithRequestID(h.logger, httpx.RequestIDFromContext(r.Context())).LogAttrs(
@@ -665,10 +698,54 @@ func toDeliveryJSON(d ContractDelivery) deliveryJSON {
 	}
 }
 
-// freightContractJSON es el schema FreightContract (siempre lista vacía en
-// Fase 0; declarado para tipar la respuesta paginada del contrato).
+// freightContractJSON es el schema FreightContract (CCRI-Flete, GDD 5.3.2).
 type freightContractJSON struct {
-	ID string `json:"id"`
+	ID                        string    `json:"id"`
+	PublicationID             string    `json:"publication_id,omitempty"`
+	Channel                   string    `json:"channel"`
+	ShipperAccountID          string    `json:"shipper_account_id"`
+	CarrierAccountID          string    `json:"carrier_account_id"`
+	OriginNodeID              string    `json:"origin_node_id"`
+	DestinationNodeID         string    `json:"destination_node_id"`
+	FreightPrice              string    `json:"freight_price"`
+	DeclaredValue             string    `json:"declared_value"`
+	DeadlineSim               int64     `json:"deadline_sim"`
+	Status                    string    `json:"status"`
+	FillBP                    *int32    `json:"fill_bp,omitempty"`
+	EscrowAccountID           string    `json:"escrow_account_id"`
+	CarrierGuaranteeAccountID string    `json:"carrier_guarantee_account_id"`
+	CustodyAccountID          string    `json:"custody_account_id"`
+	ConfirmedAtSim            int64     `json:"confirmed_at_sim"`
+	SettledAtSim              *int64    `json:"settled_at_sim,omitempty"`
+	CreatedAt                 time.Time `json:"created_at"`
+}
+
+func toFreightContractJSON(fc FreightContract) freightContractJSON {
+	var settled *int64
+	if fc.SettledAtSim != nil {
+		v := int64(*fc.SettledAtSim)
+		settled = &v
+	}
+	return freightContractJSON{
+		ID:                        fc.ID.String(),
+		PublicationID:             uuidOrEmpty(fc.PublicationID),
+		Channel:                   string(fc.Channel),
+		ShipperAccountID:          fc.ShipperAccountID.String(),
+		CarrierAccountID:          fc.CarrierAccountID.String(),
+		OriginNodeID:              fc.OriginNodeID.String(),
+		DestinationNodeID:         fc.DestinationNodeID.String(),
+		FreightPrice:              fixed(fc.FreightPrice),
+		DeclaredValue:             fixed(fc.DeclaredValue),
+		DeadlineSim:               int64(fc.DeadlineSim),
+		Status:                    string(fc.Status),
+		FillBP:                    fc.FillBP,
+		EscrowAccountID:           fc.EscrowAccountID.String(),
+		CarrierGuaranteeAccountID: fc.CarrierGuaranteeAccountID.String(),
+		CustodyAccountID:          fc.CustodyAccountID.String(),
+		ConfirmedAtSim:            int64(fc.ConfirmedAtSim),
+		SettledAtSim:              settled,
+		CreatedAt:                 fc.CreatedAt,
+	}
 }
 
 // ─── DTOs de entrada (cuerpo de las peticiones) ──────────────────────────────
@@ -714,6 +791,11 @@ func (b publicationCreateJSON) toInput() (PublicationInput, *fieldError) {
 	}
 	if b.DeliverySimSeconds != nil {
 		in.DeliverySimSeconds = *b.DeliverySimSeconds
+	}
+	if b.DeclaredValue != nil && *b.DeclaredValue != "" {
+		if in.DeclaredValue, err = parseFixed(*b.DeclaredValue); err != nil {
+			return PublicationInput{}, &fieldError{"declared_value", err.Error()}
+		}
 	}
 	if in.CounterpartyAccountID, err = bodyUUID(b.CounterpartyAccountID); err != nil {
 		return PublicationInput{}, &fieldError{"counterparty_account_id", err.Error()}

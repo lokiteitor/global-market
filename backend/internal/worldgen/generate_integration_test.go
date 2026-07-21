@@ -202,8 +202,21 @@ func assertStructure(t *testing.T, ctx context.Context, pool *pgxpool.Pool, summ
 	}
 
 	// Terminales intermodales creadas.
-	if term := count(t, ctx, pool, `SELECT count(*) FROM world.terminals`); term == 0 {
+	term := count(t, ctx, pool, `SELECT count(*) FROM world.terminals`)
+	if term == 0 {
 		t.Fatal("no se crearon terminales intermodales")
+	}
+	// Slots de prioridad a la venta: cada terminal ofrece varios (GDD 7.3).
+	if summary.SlotsCreated == 0 {
+		t.Fatal("no se crearon slots de prioridad de terminal")
+	}
+	slots := count(t, ctx, pool, `SELECT count(*) FROM world.terminal_slots`)
+	if slots != term*int64(3) {
+		t.Fatalf("slots de terminal = %d, esperado %d (3 por terminal)", slots, term*3)
+	}
+	// Todos a la venta (sin titular) al generarse.
+	if held := count(t, ctx, pool, `SELECT count(*) FROM world.terminal_slots WHERE holder_account_id IS NOT NULL`); held != 0 {
+		t.Fatalf("slots con titular al generarse = %d, esperado 0 (todos a la venta)", held)
 	}
 	// Catálogo aditivo de vehículos rail/sea.
 	if v := count(t, ctx, pool, `SELECT count(*) FROM world.vehicle_types WHERE mode IN ('rail','sea')`); v < 2 {

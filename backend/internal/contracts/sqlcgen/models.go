@@ -428,6 +428,28 @@ type LedgerContractDelivery struct {
 	CreatedAt      time.Time
 }
 
+type LedgerFreightContract struct {
+	ID                        uuid.UUID
+	PublicationID             *uuid.UUID
+	Channel                   LedgerContractChannel
+	ShipperAccountID          uuid.UUID
+	CarrierAccountID          uuid.UUID
+	OriginNodeID              uuid.UUID
+	DestinationNodeID         uuid.UUID
+	FreightPrice              int64
+	DeclaredValue             int64
+	DeadlineSim               int64
+	Status                    LedgerContractStatus
+	FillBp                    *int32
+	EscrowAccountID           uuid.UUID
+	CarrierGuaranteeAccountID uuid.UUID
+	CustodyAccountID          uuid.UUID
+	ConfirmedAtSim            int64
+	SettledAtSim              *int64
+	CreatedAt                 time.Time
+	UpdatedAt                 time.Time
+}
+
 type LedgerPublication struct {
 	ID                    uuid.UUID
 	Kind                  LedgerPublicationKind
@@ -451,6 +473,8 @@ type LedgerPublication struct {
 	PublishedAtSim        int64
 	CreatedAt             time.Time
 	UpdatedAt             time.Time
+	// CCRI-Flete: valor declarado de la carga, base de la garantía del transportista (NULL salvo kind=freight).
+	DeclaredValue *int64
 }
 
 type LedgerPublicationAcceptance struct {

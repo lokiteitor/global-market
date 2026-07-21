@@ -1450,7 +1450,10 @@ export interface components {
             channel: components["schemas"]["ContractChannel"];
             /** @description Contraparte fija en negociación privada. */
             counterparty_account_id?: components["schemas"]["AccountId"];
-            /** @description Requerido en `sell` y `buy`; ausente en `freight`. */
+            /**
+             * @description Requerido en los tres tipos. En `freight` identifica el **producto de la carga**:
+             *     la custodia del ledger es por producto (una cuenta `custody` nombra siempre su activo).
+             */
             product_id?: components["schemas"]["ProductId"];
             quantity_total: components["schemas"]["StockQty"];
             quantity_remaining: components["schemas"]["StockQty"];
@@ -1497,9 +1500,18 @@ export interface components {
             channel: components["schemas"]["ContractChannel"];
             /** @description Requerido si `channel = private`. */
             counterparty_account_id?: components["schemas"]["AccountId"];
-            /** @description Requerido en `sell` y `buy`. */
+            /**
+             * @description Requerido en los tres tipos. En `freight` es el **producto de la carga**
+             *     (la custodia del ledger es por producto).
+             */
             product_id?: components["schemas"]["ProductId"];
+            /** @description En `freight`, la cantidad de carga a transportar. */
             quantity_total: components["schemas"]["StockQty"];
+            /**
+             * @description En `sell`/`buy`, precio unitario de la mercancía. En `freight`, **tarifa del flete
+             *     por unidad de carga**: el cargador bloquea en escrow `quantity_total × unit_price`
+             *     al publicar.
+             */
             unit_price: components["schemas"]["MoneyAmount"];
             /** @default 1 */
             min_lot: components["schemas"]["StockQty"];
@@ -1508,7 +1520,10 @@ export interface components {
             /** @description Requerido en `buy` y en `freight`. */
             destination_node_id?: components["schemas"]["NodeId"];
             delivery_sim_seconds: components["schemas"]["SimTime"];
-            /** @description Solo `freight`. */
+            /**
+             * @description Solo `freight` (obligatorio): valor declarado de la carga. Es la base de la
+             *     **garantía del transportista**, que se bloquea al aceptar.
+             */
             declared_value?: components["schemas"]["MoneyAmount"];
         };
         AcceptanceCreate: {

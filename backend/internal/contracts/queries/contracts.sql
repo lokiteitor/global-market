@@ -25,7 +25,7 @@ INSERT INTO ledger.publications (
     origin_node_id, destination_node_id, delivery_sim_seconds, status,
     window_closes_at, cancel_cooldown_until,
     stock_reserve_account_id, guarantee_account_id, escrow_account_id,
-    published_at_sim)
+    declared_value, published_at_sim)
 VALUES (
     sqlc.arg(id), sqlc.arg(kind), sqlc.arg(publisher_account_id),
     sqlc.arg(channel), sqlc.narg(counterparty_account_id),
@@ -36,7 +36,7 @@ VALUES (
     now() + sqlc.arg(draw_window_seconds)::bigint * interval '1 second',
     now() + sqlc.arg(cancel_cooldown_seconds)::bigint * interval '1 second',
     sqlc.narg(stock_reserve_account_id), sqlc.narg(guarantee_account_id),
-    sqlc.narg(escrow_account_id), sqlc.arg(published_at_sim))
+    sqlc.narg(escrow_account_id), sqlc.narg(declared_value), sqlc.arg(published_at_sim))
 RETURNING *;
 
 -- GetPublication devuelve una publicación por id (la autorización de canal
@@ -473,3 +473,94 @@ SELECT base_price FROM world.products WHERE id = sqlc.arg(id);
 -- pgx.ErrNoRows si el seed no la creó.
 -- name: GetEmissionAccount :one
 SELECT * FROM ledger.accounts WHERE kind = 'emission' ORDER BY id LIMIT 1;
+
+-- ═════════════════════════════════════════════════════════════════════════════
+-- CCRI-Flete (GDD 5.3.2, Incremento 8). El flete REUTILIZA el tablón, la ventana
+-- de sorteo y la aceptación de las publicaciones de bienes (kind='freight'); estas
+-- queries añaden la creación/lectura del ledger.freight_contracts, el barrido de
+-- vencimiento y la idempotencia de entrega. Las funciones todo-o-nada
+-- ledger.confirm_freight / settle_freight_prorata se invocan por Exec directo
+-- (repo.go) para pasar el array de UUID pre-generados, como confirm_contract.
+-- ═════════════════════════════════════════════════════════════════════════════
+
+-- InsertFreightContract crea el contrato de flete en estado active con sus cuentas
+-- espejo (escrow del cargador, garantía del transportista y custodia), creadas
+-- antes en la misma transacción. confirm_freight asienta a continuación el
+-- movimiento de escrow/garantía/custodia.
+-- name: InsertFreightContract :one
+INSERT INTO ledger.freight_contracts (
+    id, publication_id, channel, shipper_account_id, carrier_account_id,
+    origin_node_id, destination_node_id, freight_price, declared_value,
+    deadline_sim, escrow_account_id, carrier_guarantee_account_id,
+    custody_account_id, confirmed_at_sim)
+VALUES (
+    sqlc.arg(id), sqlc.arg(publication_id), sqlc.arg(channel),
+    sqlc.arg(shipper_account_id), sqlc.arg(carrier_account_id),
+    sqlc.arg(origin_node_id), sqlc.arg(destination_node_id),
+    sqlc.arg(freight_price), sqlc.arg(declared_value),
+    sqlc.arg(deadline_sim), sqlc.arg(escrow_account_id),
+    sqlc.arg(carrier_guarantee_account_id), sqlc.arg(custody_account_id),
+    sqlc.arg(confirmed_at_sim))
+RETURNING *;
+
+-- GetFreightContract devuelve un contrato de flete por id (autorización por partes
+-- —cargador/transportista— en la capa de servicio).
+-- name: GetFreightContract :one
+SELECT * FROM ledger.freight_contracts WHERE id = sqlc.arg(id);
+
+-- GetFreightContractForUpdate bloquea el contrato de flete (SELECT FOR UPDATE):
+-- el freight_settler fija estado/liquidación bajo el lock, serializándose con el
+-- barrido de vencimiento (que lo bloquea con SKIP LOCKED).
+-- name: GetFreightContractForUpdate :one
+SELECT * FROM ledger.freight_contracts WHERE id = sqlc.arg(id) FOR UPDATE;
+
+-- ListFreightContracts lista los contratos de flete en los que account_id es
+-- cargador (role 'shipper') o transportista (role 'carrier'), con filtro de estado
+-- y paginación keyset (id DESC).
+-- name: ListFreightContracts :many
+SELECT * FROM ledger.freight_contracts
+WHERE (shipper_account_id = sqlc.arg(account_id) OR carrier_account_id = sqlc.arg(account_id))
+  AND (sqlc.narg(role)::text IS NULL
+       OR (sqlc.narg(role)::text = 'shipper' AND shipper_account_id = sqlc.arg(account_id))
+       OR (sqlc.narg(role)::text = 'carrier' AND carrier_account_id = sqlc.arg(account_id)))
+  AND (sqlc.narg(status)::text IS NULL OR status::text = sqlc.narg(status)::text)
+  AND (sqlc.narg(after_id)::uuid IS NULL OR id < sqlc.narg(after_id)::uuid)
+ORDER BY id DESC
+LIMIT sqlc.arg(page_limit);
+
+-- ListDueFreightIDs lista los contratos de flete ACTIVOS vencidos (deadline pasado)
+-- cuya carga NO llegó a entregarse (ningún cargamento de flete delivered): son los
+-- que el barrido debe fallar (custodia liberada in situ, garantía repartida). Si la
+-- carga se entregó (aún tarde), la liquida el freight_settler, no el barrido.
+-- name: ListDueFreightIDs :many
+SELECT fc.id FROM ledger.freight_contracts fc
+WHERE fc.status = 'active' AND fc.deadline_sim <= sqlc.arg(sim_now)::bigint
+  AND NOT EXISTS (
+        SELECT 1 FROM world.shipments sh
+        WHERE sh.freight_contract_id = fc.id AND sh.status = 'delivered')
+ORDER BY fc.deadline_sim
+LIMIT sqlc.arg(page_limit);
+
+-- LockDueFreight bloquea un flete activo vencido y sin entrega (re-verifica bajo el
+-- lock; SKIP LOCKED salta los tomados por otra instancia).
+-- name: LockDueFreight :one
+SELECT * FROM ledger.freight_contracts
+WHERE id = sqlc.arg(id) AND status = 'active' AND deadline_sim <= sqlc.arg(sim_now)::bigint
+FOR UPDATE SKIP LOCKED;
+
+-- InsertFreightDeliveryIfNew registra la entrega de un cargamento de flete de forma
+-- IDEMPOTENTE por (freight_contract_id, shipment_id): un cargamento llega una vez.
+-- Si ya existe (clave primaria), no inserta y no devuelve fila (pgx.ErrNoRows).
+-- name: InsertFreightDeliveryIfNew :one
+INSERT INTO ledger.freight_deliveries (
+    freight_contract_id, shipment_id, quantity, delivered_at_sim, on_time)
+VALUES (
+    sqlc.arg(freight_contract_id), sqlc.arg(shipment_id),
+    sqlc.arg(quantity), sqlc.arg(delivered_at_sim), sqlc.arg(on_time))
+ON CONFLICT (freight_contract_id, shipment_id) DO NOTHING
+RETURNING freight_contract_id;
+
+-- ShipmentDestinationNode devuelve el nodo destino de un cargamento (el
+-- freight_settler ubica ahí el stock_free del cargador al entregar).
+-- name: ShipmentDestinationNode :one
+SELECT destination_node_id FROM world.shipments WHERE id = sqlc.arg(id);

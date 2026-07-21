@@ -248,6 +248,39 @@ func (s *Service) createPublicationTx(ctx context.Context, r *Repo, tx pgx.Tx, p
 			{AccountID: escrowAcc.ID, Amount: value},
 		}
 		description = fmt.Sprintf("Publicación buy: %d retenido en escrow (100%%)", value)
+
+	case KindFreight:
+		// Solicitud de flete (GDD 5.3.2): el CARGADOR bloquea el precio del flete
+		// (unit_price * quantity_total) en escrow, como una compra, y declara el
+		// valor de la carga. El origen y el destino deben ser almacenes; la carga
+		// debe existir YA en el almacén de origen (no se congela hasta confirmar:
+		// la custody_load la asienta el sorteo al servir la aceptación).
+		originNode, err := s.warehouseNode(ctx, r, *in.OriginNodeID, "origen")
+		if err != nil {
+			return Publication{}, err
+		}
+		if _, err := s.warehouseNode(ctx, r, *in.DestinationNodeID, "destino"); err != nil {
+			return Publication{}, err
+		}
+		if _, err := s.stockFreeOrCollateral(ctx, r, publisher, *in.ProductID, *originNode.BuildingID, in.QuantityTotal); err != nil {
+			return Publication{}, err
+		}
+		cash, err := s.cashOrCollateral(ctx, r, publisher, value)
+		if err != nil {
+			return Publication{}, err
+		}
+		escrowAcc, err := r.CreateMirrorAccount(ctx, accountKindEscrow, publisher, nil, nil, pubID)
+		if err != nil {
+			return Publication{}, err
+		}
+		params.EscrowAccountID = &escrowAcc.ID
+		declared := in.DeclaredValue
+		params.DeclaredValue = &declared
+		entries = []entryAmount{
+			{AccountID: cash.ID, Amount: -value},
+			{AccountID: escrowAcc.ID, Amount: value},
+		}
+		description = fmt.Sprintf("Publicación freight: precio del flete %d en escrow, valor declarado %d", value, in.DeclaredValue)
 	}
 
 	out, err := r.InsertPublication(ctx, params)
@@ -269,6 +302,7 @@ func (s *Service) createPublicationTx(ctx context.Context, r *Repo, tx pgx.Tx, p
 		OriginNodeID:       uuidOrEmpty(out.OriginNodeID),
 		DestinationNodeID:  uuidOrEmpty(out.DestinationNodeID),
 		DeliverySimSeconds: int64(out.DeliverySimSeconds),
+		DeclaredValue:      fixedOrEmpty(out.DeclaredValue),
 		PublishedAtSim:     int64(out.PublishedAtSim),
 	}); err != nil {
 		return Publication{}, err
@@ -281,9 +315,6 @@ func (s *Service) createPublicationTx(ctx context.Context, r *Repo, tx pgx.Tx, p
 func normalizePublicationInput(publisher uuid.UUID, in *PublicationInput) error {
 	if !in.Kind.Valid() {
 		return fmt.Errorf("%w: kind inválido %q", ErrValidation, in.Kind)
-	}
-	if in.Kind == KindFreight {
-		return ErrFreightPhase2
 	}
 	if in.Channel == "" {
 		in.Channel = ChannelBoard
@@ -321,6 +352,20 @@ func normalizePublicationInput(publisher uuid.UUID, in *PublicationInput) error 
 		}
 		if in.OriginNodeID != nil {
 			return fmt.Errorf("%w: origin_node_id no aplica a publicaciones buy (lo aporta cada aceptante)", ErrValidation)
+		}
+	case KindFreight:
+		// Solicitud de flete: el cargador publica origen (dónde está la carga),
+		// destino y el valor declarado de la carga (base de la garantía del
+		// transportista). unit_price es el precio del flete por unidad; el
+		// escrow bloqueado es unit_price * quantity_total (como una compra).
+		if in.OriginNodeID == nil || in.DestinationNodeID == nil {
+			return fmt.Errorf("%w: origin_node_id y destination_node_id son obligatorios en publicaciones freight", ErrValidation)
+		}
+		if *in.OriginNodeID == *in.DestinationNodeID {
+			return fmt.Errorf("%w: el origen y el destino del flete deben ser distintos", ErrValidation)
+		}
+		if in.DeclaredValue <= 0 {
+			return fmt.Errorf("%w: declared_value debe ser > 0 en publicaciones freight", ErrValidation)
 		}
 	}
 	if in.QuantityTotal <= 0 {
@@ -622,9 +667,6 @@ func (s *Service) Accept(ctx context.Context, acceptor, publicationID uuid.UUID,
 		case err != nil:
 			return fmt.Errorf("contracts: bloqueando la publicación %s: %w", publicationID, err)
 		}
-		if p.Kind == KindFreight {
-			return ErrFreightPhase2
-		}
 		if p.Channel == ChannelPrivate && (p.CounterpartyAccountID == nil || *p.CounterpartyAccountID != acceptor) {
 			return fmt.Errorf("%w (%s)", ErrNotParty, publicationID)
 		}
@@ -709,6 +751,30 @@ func (s *Service) Accept(ctx context.Context, acceptor, publicationID uuid.UUID,
 				{AccountID: guaranteeAcc.ID, Amount: guarantee},
 			}
 			description = fmt.Sprintf("Aceptación de compra: %d de stock congelado + garantía %d (10%%)", in.Quantity, guarantee)
+
+		case KindFreight: // el aceptante es TRANSPORTISTA: garantía = bp * valor declarado (proporcional a la carga aceptada)
+			if p.DeclaredValue == nil {
+				return fmt.Errorf("%w: la publicación de flete %s no tiene valor declarado", ErrValidation, p.ID)
+			}
+			declaredPortion := freightDeclaredPortion(*p.DeclaredValue, in.Quantity, p.QuantityTotal)
+			freightGuar := freightGuarantee(declaredPortion, s.opts.FreightGuaranteeBP)
+			if freightGuar <= 0 {
+				return fmt.Errorf("%w: el valor declarado es demasiado pequeño para una garantía de flete > 0", ErrValidation)
+			}
+			cash, err := s.cashOrCollateral(ctx, r, acceptor, freightGuar)
+			if err != nil {
+				return err
+			}
+			guaranteeAcc, err := r.CreateMirrorAccount(ctx, accountKindGuarantee, acceptor, nil, nil, accID)
+			if err != nil {
+				return err
+			}
+			params.GuaranteeAccountID = &guaranteeAcc.ID
+			entries = []entryAmount{
+				{AccountID: cash.ID, Amount: -freightGuar},
+				{AccountID: guaranteeAcc.ID, Amount: freightGuar},
+			}
+			description = fmt.Sprintf("Aceptación de flete: garantía del transportista %d (%d bp del valor declarado de la carga aceptada)", freightGuar, s.opts.FreightGuaranteeBP)
 		}
 
 		if err := r.PostLedgerTransaction(ctx, txKindAcceptanceLock, simNow, accID, description, entries); err != nil {

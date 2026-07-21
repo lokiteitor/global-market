@@ -204,7 +204,7 @@ func TestContractsIntegration(t *testing.T) {
 			in   contracts.PublicationInput
 			want error
 		}{
-			{"freight es Fase 2", contracts.PublicationInput{Kind: contracts.KindFreight}, contracts.ErrFreightPhase2},
+			{"freight incompleto (sin producto/destino/valor)", contracts.PublicationInput{Kind: contracts.KindFreight}, contracts.ErrValidation},
 			{"producto inexistente", func() contracts.PublicationInput {
 				in := sellInput(w, 10, 10, 1)
 				in.ProductID = &ghost

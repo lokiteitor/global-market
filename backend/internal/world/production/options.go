@@ -29,6 +29,13 @@ const (
 	// EnvReconcileInterval es el periodo del job de reconciliación
 	// física↔contable (ADR-004), en formato time.ParseDuration. Default 300s.
 	EnvReconcileInterval = "II_RECONCILE_INTERVAL"
+
+	// EnvReconcileGrace es el número de PASADAS CONSECUTIVAS que una divergencia
+	// física↔contable debe persistir antes de escalar a ERROR (Incremento 8): una
+	// divergencia transitoria (la ventana ~250 ms entre la entrega física y el
+	// asiento contable de un cargamento) aparece a lo sumo en una pasada y se
+	// trata como DEBUG/esperada; una divergencia real persiste. Default 2.
+	EnvReconcileGrace = "II_RECONCILE_GRACE"
 )
 
 // Defaults documentados del subpaquete.
@@ -48,6 +55,10 @@ const (
 
 	// DefaultReconcileInterval es el periodo por defecto de la reconciliación.
 	DefaultReconcileInterval = 300 * time.Second
+
+	// DefaultReconcileGrace es la persistencia por defecto (pasadas consecutivas)
+	// antes de escalar una divergencia a ERROR.
+	DefaultReconcileGrace = 2
 
 	// DefaultExtractionRadiusM es el radio de influencia por defecto para
 	// localizar el yacimiento de una mina cuando su tipo no declara
@@ -108,6 +119,9 @@ type WorkerOptions struct {
 	BuildSimSeconds int64
 	// ReconcileInterval es el periodo del job de reconciliación. > 0.
 	ReconcileInterval time.Duration
+	// ReconcileGrace es la persistencia (pasadas consecutivas) antes de escalar
+	// una divergencia a ERROR. >= 1.
+	ReconcileGrace int
 }
 
 // DefaultWorkerOptions devuelve la configuración por defecto del motor.
@@ -117,6 +131,7 @@ func DefaultWorkerOptions() WorkerOptions {
 		BatchSize:         DefaultSweepBatchSize,
 		BuildSimSeconds:   DefaultBuildSimSeconds,
 		ReconcileInterval: DefaultReconcileInterval,
+		ReconcileGrace:    DefaultReconcileGrace,
 	}
 }
 
@@ -152,6 +167,13 @@ func WorkerOptionsFromEnv() (WorkerOptions, error) {
 		}
 		opts.ReconcileInterval = d
 	}
+	if v := strings.TrimSpace(os.Getenv(EnvReconcileGrace)); v != "" {
+		var n int
+		if _, err := fmt.Sscanf(v, "%d", &n); err != nil {
+			return WorkerOptions{}, fmt.Errorf("world/production: %s inválido %q (entero): %w", EnvReconcileGrace, v, err)
+		}
+		opts.ReconcileGrace = n
+	}
 	if err := opts.Validate(); err != nil {
 		return WorkerOptions{}, err
 	}
@@ -171,6 +193,9 @@ func (o WorkerOptions) Validate() error {
 	}
 	if o.ReconcileInterval <= 0 {
 		return fmt.Errorf("world/production: %s debe ser una duración positiva (actual %s)", EnvReconcileInterval, o.ReconcileInterval)
+	}
+	if o.ReconcileGrace < 1 {
+		return fmt.Errorf("world/production: %s debe ser >= 1 (actual %d)", EnvReconcileGrace, o.ReconcileGrace)
 	}
 	return nil
 }

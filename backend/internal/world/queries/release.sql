@@ -45,3 +45,20 @@ UPDATE world.shipments
    SET status = 'released_in_situ', at_node_id = sqlc.arg(at_node_id), vehicle_id = NULL,
        updated_at_sim = sqlc.arg(sim_now)
  WHERE id = sqlc.arg(id);
+
+-- ListFreightShipmentsToRelease lista los cargamentos AÚN VIVOS de un flete vencido
+-- (in_warehouse/in_transit/at_terminal) con el nodo y el almacén de ORIGEN del
+-- flete (donde el Contract Service liberó la custodia in situ en el ledger). El
+-- lado físico debe casar: el cargamento se marca released_in_situ y su stock vuelve
+-- a world.building_inventories del mismo almacén de origen. FOR UPDATE OF sh
+-- serializa con el motor de tránsito.
+-- name: ListFreightShipmentsToRelease :many
+SELECT sh.id, sh.owner_account_id, sh.product_id, sh.quantity,
+       fc.origin_node_id AS origin_node_id,
+       n.building_id      AS origin_building_id
+FROM world.shipments sh
+JOIN ledger.freight_contracts fc ON fc.id = sh.freight_contract_id
+JOIN world.network_nodes n ON n.id = fc.origin_node_id
+WHERE sh.freight_contract_id = sqlc.arg(freight_contract_id)
+  AND sh.status IN ('in_warehouse', 'in_transit', 'at_terminal')
+FOR UPDATE OF sh;

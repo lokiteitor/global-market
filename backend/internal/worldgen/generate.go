@@ -83,6 +83,7 @@ type Summary struct {
 	RailLinks        int
 	SeaLinks         int
 	TerminalsCreated int
+	SlotsCreated     int
 	Regions          []RegionSummary
 }
 
@@ -188,7 +189,8 @@ func Generate(ctx context.Context, pool *pgxpool.Pool, opts Options, logger *slo
 		slog.Int("yacimientos", st.summary.DepositsCreated),
 		slog.Int("enlaces_rail", st.summary.RailLinks),
 		slog.Int("enlaces_sea", st.summary.SeaLinks),
-		slog.Int("terminales", st.summary.TerminalsCreated))
+		slog.Int("terminales", st.summary.TerminalsCreated),
+		slog.Int("slots", st.summary.SlotsCreated))
 	return *st.summary, nil
 }
 

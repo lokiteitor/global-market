@@ -55,6 +55,9 @@ var (
 	// (→ 400 VALIDATION_ERROR).
 	ErrInvalidCursor = errors.New("world/fleet: cursor de paginación inválido")
 
+	// ErrSlotHeld: el slot de prioridad ya tiene titular vigente (→ 409).
+	ErrSlotHeld = errors.New("world/fleet: el slot de prioridad ya tiene titular vigente")
+
 	// ErrOverflow: una multiplicación de dominio (volumen/combustible) desborda
 	// int64.
 	ErrOverflow = fmt.Errorf("%w: la operación desborda la capacidad de int64", ErrValidation)

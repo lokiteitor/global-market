@@ -323,9 +323,117 @@ func (q *Queries) ListDueTransitVehicleIDs(ctx context.Context, arg ListDueTrans
 	return items, nil
 }
 
+const listTerminalTransshipQueue = `-- name: ListTerminalTransshipQueue :many
+SELECT s.id, s.owner_account_id, s.quantity, s.updated_at_sim AS arrival_sim,
+       (s.quantity * p.unit_volume)::bigint AS volume,
+       COALESCE((
+           SELECT MIN(ts.priority_tier) FROM world.terminal_slots ts
+           WHERE ts.terminal_id = $1
+             AND ts.holder_account_id = s.owner_account_id
+             AND (ts.valid_until_sim IS NULL OR ts.valid_until_sim >= $2::bigint)
+       ), 2147483647)::int AS slot_tier
+FROM world.shipments s
+JOIN world.products p ON p.id = s.product_id
+WHERE s.at_node_id = $3 AND s.status = 'at_terminal'
+  AND s.transship_ready_at_sim IS NULL
+ORDER BY slot_tier ASC, s.updated_at_sim ASC, s.id ASC
+`
+
+type ListTerminalTransshipQueueParams struct {
+	TerminalID uuid.UUID
+	SimNow     int64
+	NodeID     *uuid.UUID
+}
+
+type ListTerminalTransshipQueueRow struct {
+	ID             uuid.UUID
+	OwnerAccountID uuid.UUID
+	Quantity       int64
+	ArrivalSim     int64
+	Volume         int64
+	SlotTier       int32
+}
+
+// ListTerminalTransshipQueue lista la COLA de una terminal: cargamentos at_terminal
+// aún sin servir en su nodo, con el volumen del cargamento (quantity·unit_volume) y
+// el MEJOR (menor) priority_tier VIGENTE del dueño en esa terminal (centinela alto
+// si no posee slot). Ordena por prioridad (slot ascendente; sin slot al final) y,
+// dentro de cada clase, FIFO por llegada (updated_at_sim, id): el orden de servicio.
+func (q *Queries) ListTerminalTransshipQueue(ctx context.Context, arg ListTerminalTransshipQueueParams) ([]ListTerminalTransshipQueueRow, error) {
+	rows, err := q.db.Query(ctx, listTerminalTransshipQueue, arg.TerminalID, arg.SimNow, arg.NodeID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListTerminalTransshipQueueRow
+	for rows.Next() {
+		var i ListTerminalTransshipQueueRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.OwnerAccountID,
+			&i.Quantity,
+			&i.ArrivalSim,
+			&i.Volume,
+			&i.SlotTier,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listTerminalsWithPendingTransship = `-- name: ListTerminalsWithPendingTransship :many
+
+SELECT DISTINCT t.id, t.node_id, t.owner_account_id, t.transshipment_per_hour
+FROM world.terminals t
+JOIN world.shipments s ON s.at_node_id = t.node_id
+WHERE s.status = 'at_terminal' AND s.transship_ready_at_sim IS NULL
+LIMIT $1
+`
+
+type ListTerminalsWithPendingTransshipRow struct {
+	ID                   uuid.UUID
+	NodeID               uuid.UUID
+	OwnerAccountID       uuid.UUID
+	TransshipmentPerHour int32
+}
+
+// ─── Cola de transbordo con prioridad de slots (GDD 7.3) ──────────────────────
+// ListTerminalsWithPendingTransship lista las terminales con cargamentos ENCOLADOS
+// (at_terminal, aún sin servir) esperando transbordo: candidatas del barrido de
+// servicio de cola (sweepTransship). Acotado por page_limit.
+func (q *Queries) ListTerminalsWithPendingTransship(ctx context.Context, pageLimit int32) ([]ListTerminalsWithPendingTransshipRow, error) {
+	rows, err := q.db.Query(ctx, listTerminalsWithPendingTransship, pageLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListTerminalsWithPendingTransshipRow
+	for rows.Next() {
+		var i ListTerminalsWithPendingTransshipRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.NodeID,
+			&i.OwnerAccountID,
+			&i.TransshipmentPerHour,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listVehicleShipmentsForNode = `-- name: ListVehicleShipmentsForNode :many
 
-SELECT id, owner_account_id, product_id, quantity, contract_id, destination_node_id, deadline_sim
+SELECT id, owner_account_id, product_id, quantity, contract_id, freight_contract_id, destination_node_id, deadline_sim
 FROM world.shipments
 WHERE vehicle_id = $1 AND status = 'in_transit'
   AND destination_node_id = $2
@@ -343,6 +451,7 @@ type ListVehicleShipmentsForNodeRow struct {
 	ProductID         uuid.UUID
 	Quantity          int64
 	ContractID        *uuid.UUID
+	FreightContractID *uuid.UUID
 	DestinationNodeID *uuid.UUID
 	DeadlineSim       *int64
 }
@@ -366,6 +475,7 @@ func (q *Queries) ListVehicleShipmentsForNode(ctx context.Context, arg ListVehic
 			&i.ProductID,
 			&i.Quantity,
 			&i.ContractID,
+			&i.FreightContractID,
 			&i.DestinationNodeID,
 			&i.DeadlineSim,
 		); err != nil {
@@ -457,6 +567,36 @@ func (q *Queries) LockRecoveryVehicle(ctx context.Context, id uuid.UUID) (LockRe
 	row := q.db.QueryRow(ctx, lockRecoveryVehicle, id)
 	var i LockRecoveryVehicleRow
 	err := row.Scan(&i.ID, &i.Status, &i.RepairUntilSim)
+	return i, err
+}
+
+const lockTerminalForServe = `-- name: LockTerminalForServe :one
+SELECT id, node_id, owner_account_id, transshipment_per_hour, queue_length
+FROM world.terminals
+WHERE id = $1
+FOR UPDATE
+`
+
+type LockTerminalForServeRow struct {
+	ID                   uuid.UUID
+	NodeID               uuid.UUID
+	OwnerAccountID       uuid.UUID
+	TransshipmentPerHour int32
+	QueueLength          int32
+}
+
+// LockTerminalForServe bloquea una terminal (FOR UPDATE) para serializar el
+// servicio de su cola entre instancias del motor. pgx.ErrNoRows si no existe.
+func (q *Queries) LockTerminalForServe(ctx context.Context, id uuid.UUID) (LockTerminalForServeRow, error) {
+	row := q.db.QueryRow(ctx, lockTerminalForServe, id)
+	var i LockTerminalForServeRow
+	err := row.Scan(
+		&i.ID,
+		&i.NodeID,
+		&i.OwnerAccountID,
+		&i.TransshipmentPerHour,
+		&i.QueueLength,
+	)
 	return i, err
 }
 
@@ -579,6 +719,31 @@ func (q *Queries) RecomputeSegmentCongestion(ctx context.Context, arg RecomputeS
 	return items, nil
 }
 
+const recountTerminalQueue = `-- name: RecountTerminalQueue :exec
+UPDATE world.terminals t
+   SET queue_length = (
+           SELECT count(*) FROM world.shipments s
+           WHERE s.at_node_id = t.node_id AND s.status = 'at_terminal'
+             AND (s.transship_ready_at_sim IS NULL
+                  OR s.transship_ready_at_sim > $1::bigint)
+       ),
+       updated_at_sim = $1
+ WHERE t.id = $2
+`
+
+type RecountTerminalQueueParams struct {
+	SimNow int64
+	ID     uuid.UUID
+}
+
+// RecountTerminalQueue recalcula la longitud de cola de una terminal: cargamentos
+// at_terminal en su nodo aún sin servir (encolados) o con servicio en curso
+// (transship_ready_at_sim > sim_now). Publica también updated_at_sim.
+func (q *Queries) RecountTerminalQueue(ctx context.Context, arg RecountTerminalQueueParams) error {
+	_, err := q.db.Exec(ctx, recountTerminalQueue, arg.SimNow, arg.ID)
+	return err
+}
+
 const resumeBrokenVehicle = `-- name: ResumeBrokenVehicle :exec
 UPDATE world.vehicles
    SET status = 'in_transit', segment_entered_sim = $1,
@@ -595,6 +760,25 @@ type ResumeBrokenVehicleParams struct {
 // segmento con el reloj arrancado en simNow (advance_fn/on_segment intactos).
 func (q *Queries) ResumeBrokenVehicle(ctx context.Context, arg ResumeBrokenVehicleParams) error {
 	_, err := q.db.Exec(ctx, resumeBrokenVehicle, arg.SimNow, arg.ID)
+	return err
+}
+
+const setShipmentTransshipReady = `-- name: SetShipmentTransshipReady :exec
+UPDATE world.shipments
+   SET transship_ready_at_sim = $1
+ WHERE id = $2
+`
+
+type SetShipmentTransshipReadyParams struct {
+	ReadyAtSim *int64
+	ID         uuid.UUID
+}
+
+// SetShipmentTransshipReady marca un cargamento como SERVIDO por la cola: fija el
+// instante de fin de transbordo (listo para el siguiente tramo). No toca
+// updated_at_sim (conserva la llegada).
+func (q *Queries) SetShipmentTransshipReady(ctx context.Context, arg SetShipmentTransshipReadyParams) error {
+	_, err := q.db.Exec(ctx, setShipmentTransshipReady, arg.ReadyAtSim, arg.ID)
 	return err
 }
 
@@ -619,10 +803,34 @@ func (q *Queries) StrandVehicle(ctx context.Context, arg StrandVehicleParams) er
 	return err
 }
 
+const terminalServerBusyUntil = `-- name: TerminalServerBusyUntil :one
+SELECT COALESCE(MAX(transship_ready_at_sim), 0)::bigint AS busy_until
+FROM world.shipments
+WHERE at_node_id = $1 AND status = 'at_terminal'
+  AND transship_ready_at_sim IS NOT NULL
+  AND transship_ready_at_sim > $2::bigint
+`
+
+type TerminalServerBusyUntilParams struct {
+	NodeID *uuid.UUID
+	SimNow int64
+}
+
+// TerminalServerBusyUntil devuelve hasta cuándo está OCUPADO el servidor de la
+// terminal: el mayor transship_ready_at_sim de los cargamentos ya servidos que aún
+// no han partido y cuyo servicio NO ha terminado en sim_now (ready > sim_now). 0 si
+// el servidor está libre. Base del encolado secuencial entre barridos.
+func (q *Queries) TerminalServerBusyUntil(ctx context.Context, arg TerminalServerBusyUntilParams) (int64, error) {
+	row := q.db.QueryRow(ctx, terminalServerBusyUntil, arg.NodeID, arg.SimNow)
+	var busy_until int64
+	err := row.Scan(&busy_until)
+	return busy_until, err
+}
+
 const transshipShipment = `-- name: TransshipShipment :exec
 UPDATE world.shipments
    SET status = 'at_terminal', at_node_id = $1, vehicle_id = NULL,
-       updated_at_sim = $2
+       transship_ready_at_sim = NULL, updated_at_sim = $2
  WHERE id = $3
 `
 
@@ -632,11 +840,13 @@ type TransshipShipmentParams struct {
 	ID       uuid.UUID
 }
 
-// TransshipShipment deja un cargamento EN LA TERMINAL (at_terminal) a la espera del
-// siguiente tramo: reposa en el nodo de la terminal, ya no viaja a bordo. El tiempo
-// de transbordo lo cobra el siguiente despacho (puerta por transshipment_per_hour),
-// que solo puede ocurrir tras consumirlo. updated_at_sim marca el momento de
-// llegada a la terminal (base de esa puerta de tiempo).
+// TransshipShipment ENCOLA un cargamento EN LA TERMINAL (at_terminal) a la espera de
+// ser servido por la cola de transbordo: reposa en el nodo de la terminal, ya no
+// viaja a bordo. updated_at_sim marca el momento de llegada a la terminal (clave
+// FIFO de la cola). transship_ready_at_sim se pone a NULL: el cargamento entra en la
+// cola SIN servir; el barrido de transbordo (sweepTransship) le asigna el instante
+// de fin de servicio según su prioridad (slot) y su posición, y el siguiente
+// despacho usa ese valor como puerta de tiempo.
 func (q *Queries) TransshipShipment(ctx context.Context, arg TransshipShipmentParams) error {
 	_, err := q.db.Exec(ctx, transshipShipment, arg.AtNodeID, arg.SimNow, arg.ID)
 	return err

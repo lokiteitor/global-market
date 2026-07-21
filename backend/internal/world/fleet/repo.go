@@ -292,12 +292,17 @@ type shipmentHead struct {
 	ProductID         uuid.UUID
 	Quantity          int64
 	ContractID        *uuid.UUID
+	FreightContractID *uuid.UUID
 	VehicleID         *uuid.UUID
 	AtNodeID          *uuid.UUID
 	DestinationNodeID *uuid.UUID
 	DeadlineSim       *int64
 	Status            string
 	UpdatedAtSim      int64
+	// TransshipReadyAtSim es el instante en que la cola de la terminal terminó de
+	// transbordar el cargamento (listo para el siguiente tramo). nil si aún no lo
+	// sirvió la cola: la puerta de tiempo de transbordo recae en el cálculo aislado.
+	TransshipReadyAtSim *int64
 }
 
 // LockShipmentForDispatch bloquea un cargamento (FOR UPDATE); pgx.ErrNoRows si no
@@ -309,9 +314,9 @@ func (r *Repo) LockShipmentForDispatch(ctx context.Context, id uuid.UUID) (shipm
 	}
 	return shipmentHead{
 		ID: row.ID, OwnerAccountID: row.OwnerAccountID, ProductID: row.ProductID, Quantity: row.Quantity,
-		ContractID: row.ContractID, VehicleID: row.VehicleID, AtNodeID: row.AtNodeID,
+		ContractID: row.ContractID, FreightContractID: row.FreightContractID, VehicleID: row.VehicleID, AtNodeID: row.AtNodeID,
 		DestinationNodeID: row.DestinationNodeID, DeadlineSim: row.DeadlineSim, Status: string(row.Status),
-		UpdatedAtSim: row.UpdatedAtSim,
+		UpdatedAtSim: row.UpdatedAtSim, TransshipReadyAtSim: row.TransshipReadyAtSim,
 	}, nil
 }
 
@@ -381,6 +386,54 @@ func (r *Repo) ShipmentExistsForContract(ctx context.Context, contractID uuid.UU
 		return false, fmt.Errorf("world/fleet: comprobando cargamento del contrato %s: %w", contractID, err)
 	}
 	return present, nil
+}
+
+// insertFreightShipmentParams son los parámetros de InsertFreightShipmentInWarehouse.
+type insertFreightShipmentParams struct {
+	ID          uuid.UUID
+	Owner       uuid.UUID
+	Product     uuid.UUID
+	Quantity    int64
+	FreightID   uuid.UUID
+	AtNode      uuid.UUID
+	Destination uuid.UUID
+	Deadline    simtime.SimTime
+	SimNow      simtime.SimTime
+}
+
+// InsertFreightShipmentInWarehouse crea el cargamento del cargador (freight)
+// in_warehouse en el nodo de origen del flete.
+func (r *Repo) InsertFreightShipmentInWarehouse(ctx context.Context, p insertFreightShipmentParams) (uuid.UUID, error) {
+	freight, atNode, dest, deadline := p.FreightID, p.AtNode, p.Destination, int64(p.Deadline)
+	id, err := r.q.InsertFreightShipmentInWarehouse(ctx, sqlcgen.InsertFreightShipmentInWarehouseParams{
+		ID: p.ID, OwnerAccountID: p.Owner, ProductID: p.Product, Quantity: p.Quantity,
+		FreightContractID: &freight, AtNodeID: &atNode, DestinationNodeID: &dest, DeadlineSim: &deadline,
+		SimNow: int64(p.SimNow),
+	})
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("world/fleet: creando el cargamento del flete %s: %w", p.FreightID, err)
+	}
+	return id, nil
+}
+
+// ShipmentExistsForFreightContract indica si ya hay un cargamento para el flete.
+func (r *Repo) ShipmentExistsForFreightContract(ctx context.Context, freightID uuid.UUID) (bool, error) {
+	fid := freightID
+	present, err := r.q.ShipmentExistsForFreightContract(ctx, &fid)
+	if err != nil {
+		return false, fmt.Errorf("world/fleet: comprobando cargamento del flete %s: %w", freightID, err)
+	}
+	return present, nil
+}
+
+// GetFreightCarrier devuelve el transportista de un flete; pgx.ErrNoRows si el
+// flete no existe.
+func (r *Repo) GetFreightCarrier(ctx context.Context, freightID uuid.UUID) (uuid.UUID, error) {
+	carrier, err := r.q.GetFreightCarrier(ctx, freightID)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	return carrier, nil
 }
 
 // GetInventoryQty devuelve la cantidad física de un producto en un edificio.
@@ -592,11 +645,12 @@ func (r *Repo) FinishMaintenanceVehicle(ctx context.Context, id uuid.UUID, simNo
 
 // shipmentDelivery es un cargamento a bordo con destino el nodo de llegada.
 type shipmentDelivery struct {
-	ID         uuid.UUID
-	Owner      uuid.UUID
-	ProductID  uuid.UUID
-	Quantity   int64
-	ContractID *uuid.UUID
+	ID                uuid.UUID
+	Owner             uuid.UUID
+	ProductID         uuid.UUID
+	Quantity          int64
+	ContractID        *uuid.UUID
+	FreightContractID *uuid.UUID
 }
 
 // ListVehicleShipmentsForNode lista los cargamentos a bordo con destino nodeID.
@@ -608,7 +662,10 @@ func (r *Repo) ListVehicleShipmentsForNode(ctx context.Context, vehicleID, nodeI
 	}
 	out := make([]shipmentDelivery, len(rows))
 	for i, row := range rows {
-		out[i] = shipmentDelivery{ID: row.ID, Owner: row.OwnerAccountID, ProductID: row.ProductID, Quantity: row.Quantity, ContractID: row.ContractID}
+		out[i] = shipmentDelivery{
+			ID: row.ID, Owner: row.OwnerAccountID, ProductID: row.ProductID, Quantity: row.Quantity,
+			ContractID: row.ContractID, FreightContractID: row.FreightContractID,
+		}
 	}
 	return out, nil
 }
@@ -692,6 +749,105 @@ func (r *Repo) TransshipShipment(ctx context.Context, id, atNode uuid.UUID, simN
 	node := atNode
 	if err := r.q.TransshipShipment(ctx, sqlcgen.TransshipShipmentParams{AtNodeID: &node, SimNow: int64(simNow), ID: id}); err != nil {
 		return fmt.Errorf("world/fleet: transbordando el cargamento %s en %s: %w", id, atNode, err)
+	}
+	return nil
+}
+
+// ─── Cola de transbordo con prioridad de slots (GDD 7.3) ──────────────────────
+
+// pendingTerminal es una terminal con cola de transbordo por servir.
+type pendingTerminal struct {
+	ID                   uuid.UUID
+	NodeID               uuid.UUID
+	OwnerAccountID       uuid.UUID
+	TransshipmentPerHour int32
+}
+
+// ListTerminalsWithPendingTransship lista las terminales con cargamentos encolados
+// (at_terminal sin servir) esperando transbordo.
+func (r *Repo) ListTerminalsWithPendingTransship(ctx context.Context, limit int32) ([]pendingTerminal, error) {
+	rows, err := r.q.ListTerminalsWithPendingTransship(ctx, limit)
+	if err != nil {
+		return nil, fmt.Errorf("world/fleet: listando terminales con cola de transbordo: %w", err)
+	}
+	out := make([]pendingTerminal, len(rows))
+	for i, row := range rows {
+		out[i] = pendingTerminal{
+			ID: row.ID, NodeID: row.NodeID, OwnerAccountID: row.OwnerAccountID, TransshipmentPerHour: row.TransshipmentPerHour,
+		}
+	}
+	return out, nil
+}
+
+// LockTerminalForServe bloquea una terminal (FOR UPDATE) para serializar el servicio
+// de su cola entre instancias del motor. pgx.ErrNoRows si no existe.
+func (r *Repo) LockTerminalForServe(ctx context.Context, id uuid.UUID) (terminal, error) {
+	row, err := r.q.LockTerminalForServe(ctx, id)
+	if err != nil {
+		return terminal{}, err
+	}
+	return terminal{
+		ID: row.ID, NodeID: row.NodeID, OwnerAccountID: row.OwnerAccountID, TransshipmentPerHour: row.TransshipmentPerHour,
+	}, nil
+}
+
+// TerminalServerBusyUntil devuelve hasta cuándo está ocupado el servidor de la
+// terminal (mayor transship_ready_at_sim futuro), 0 si está libre.
+func (r *Repo) TerminalServerBusyUntil(ctx context.Context, node uuid.UUID, simNow simtime.SimTime) (int64, error) {
+	busy, err := r.q.TerminalServerBusyUntil(ctx, sqlcgen.TerminalServerBusyUntilParams{NodeID: &node, SimNow: int64(simNow)})
+	if err != nil {
+		return 0, fmt.Errorf("world/fleet: consultando la ocupación de la terminal en %s: %w", node, err)
+	}
+	return busy, nil
+}
+
+// queuedShipment es una entrada de la cola de transbordo: su volumen y el mejor
+// priority_tier vigente del dueño en la terminal (noSlotTier si no posee slot).
+type queuedShipment struct {
+	ID         uuid.UUID
+	Owner      uuid.UUID
+	Quantity   int64
+	ArrivalSim int64
+	Volume     int64
+	SlotTier   int32
+}
+
+// ListTerminalTransshipQueue lista la cola de una terminal en ORDEN DE SERVICIO
+// (prioridad por slot ascendente; sin slot al final; FIFO por llegada dentro de
+// cada clase).
+func (r *Repo) ListTerminalTransshipQueue(ctx context.Context, terminalID, node uuid.UUID, simNow simtime.SimTime) ([]queuedShipment, error) {
+	n := node
+	rows, err := r.q.ListTerminalTransshipQueue(ctx, sqlcgen.ListTerminalTransshipQueueParams{
+		TerminalID: terminalID, NodeID: &n, SimNow: int64(simNow),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("world/fleet: listando la cola de transbordo de la terminal %s: %w", terminalID, err)
+	}
+	out := make([]queuedShipment, len(rows))
+	for i, row := range rows {
+		out[i] = queuedShipment{
+			ID: row.ID, Owner: row.OwnerAccountID, Quantity: row.Quantity,
+			ArrivalSim: row.ArrivalSim, Volume: row.Volume, SlotTier: row.SlotTier,
+		}
+	}
+	return out, nil
+}
+
+// SetShipmentTransshipReady marca un cargamento como servido por la cola (fija el
+// instante de fin de transbordo).
+func (r *Repo) SetShipmentTransshipReady(ctx context.Context, id uuid.UUID, readyAt int64) error {
+	ra := readyAt
+	if err := r.q.SetShipmentTransshipReady(ctx, sqlcgen.SetShipmentTransshipReadyParams{ReadyAtSim: &ra, ID: id}); err != nil {
+		return fmt.Errorf("world/fleet: fijando el fin de transbordo del cargamento %s: %w", id, err)
+	}
+	return nil
+}
+
+// RecountTerminalQueue recalcula la longitud de cola de una terminal (encolados +
+// en servicio) y publica su updated_at_sim.
+func (r *Repo) RecountTerminalQueue(ctx context.Context, id uuid.UUID, simNow simtime.SimTime) error {
+	if err := r.q.RecountTerminalQueue(ctx, sqlcgen.RecountTerminalQueueParams{SimNow: int64(simNow), ID: id}); err != nil {
+		return fmt.Errorf("world/fleet: recalculando la cola de la terminal %s: %w", id, err)
 	}
 	return nil
 }

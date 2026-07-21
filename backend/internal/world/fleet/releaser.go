@@ -27,6 +27,12 @@ const ConsumerShipmentReleaser = "shipment_releaser"
 // SAD §7 / ADR-006).
 const eventContractExpiredUndelivered = "contract.expired_undelivered"
 
+// eventFreightExpiredUndelivered es el análogo para el CCRI-Flete: el Contract
+// Service lo emite al vencer un flete SIN entregar (custodia liberada in situ en
+// el ledger). El liberador detiene el cargamento de custodia aún vivo y reintegra
+// su stock físico al almacén de origen (coherencia físico↔contable).
+const eventFreightExpiredUndelivered = "freight.expired_undelivered"
+
 // ShipmentReleaser implementa el consumidor world "shipment_releaser" (GDD
 // 7.1/5.3 paso 6c): consume contract.expired_undelivered y, por CADA cargamento
 // aún vivo del contrato (in_warehouse/in_transit/at_terminal), lo DETIENE y libera
@@ -65,68 +71,97 @@ func NewShipmentReleaser(logger *slog.Logger, reg prometheus.Registerer) *Shipme
 }
 
 // NewConsumer construye el consumidor lógico del outbox para
-// contract.expired_undelivered. Lo arranca el engine con Handle como handler.
+// contract.expired_undelivered y freight.expired_undelivered. Lo arranca el engine
+// con Handle como handler.
 func (c *ShipmentReleaser) NewConsumer(pool *pgxpool.Pool, opts ...outbox.ConsumerOption) *outbox.Consumer {
 	c.baseRepo = NewRepo(pool)
-	return outbox.NewConsumer(pool, ConsumerShipmentReleaser, []string{eventContractExpiredUndelivered}, opts...)
+	return outbox.NewConsumer(pool, ConsumerShipmentReleaser,
+		[]string{eventContractExpiredUndelivered, eventFreightExpiredUndelivered}, opts...)
 }
 
-// contractExpiredUndeliveredEvent es el payload que consume el shipment_releaser.
-// Sólo necesita el contrato (el nodo/almacén de origen y los cargamentos vivos se
-// resuelven en la BD).
-type contractExpiredUndeliveredEvent struct {
-	ContractID string `json:"contract_id"`
+// expiredUndeliveredEvent es el payload que consume el shipment_releaser (bienes
+// o flete): sólo necesita la referencia (contract_id o freight_contract_id); el
+// nodo/almacén de origen y los cargamentos vivos se resuelven en la BD.
+type expiredUndeliveredEvent struct {
+	ContractID        string `json:"contract_id"`
+	FreightContractID string `json:"freight_contract_id"`
 }
 
-// Handle procesa un contract.expired_undelivered dentro de la transacción del
-// lote del consumidor (los efectos se confirman con el avance del cursor:
-// exactly-once).
+// Handle procesa un contract.expired_undelivered o freight.expired_undelivered
+// dentro de la transacción del lote (exactly-once por el cursor). En ambos casos
+// detiene los cargamentos aún vivos de la referencia y reintegra su stock físico
+// al almacén de ORIGEN, donde el Contract Service liberó el stock/custodia en el
+// ledger (coherencia físico↔contable; nada se teletransporta).
 func (c *ShipmentReleaser) Handle(ctx context.Context, tx pgx.Tx, ev outbox.Event) error {
-	if ev.EventType != eventContractExpiredUndelivered {
+	if ev.EventType != eventContractExpiredUndelivered && ev.EventType != eventFreightExpiredUndelivered {
 		return nil
 	}
-	var e contractExpiredUndeliveredEvent
+	var e expiredUndeliveredEvent
 	if err := json.Unmarshal(ev.Payload, &e); err != nil {
-		return fmt.Errorf("world/fleet: leyendo contract.expired_undelivered (seq %d): %w", ev.Seq, err)
-	}
-	contractID, err := uuid.Parse(e.ContractID)
-	if err != nil {
-		return fmt.Errorf("world/fleet: contract_id inválido en contract.expired_undelivered (seq %d): %w", ev.Seq, err)
+		return fmt.Errorf("world/fleet: leyendo %s (seq %d): %w", ev.EventType, ev.Seq, err)
 	}
 
 	r := c.baseRepo.WithTx(tx)
-	shipments, err := r.ListContractShipmentsToRelease(ctx, contractID)
-	if err != nil {
-		return err
+	var (
+		shipments []shipmentToRelease
+		refKind   string
+		refID     uuid.UUID
+		isFreight bool
+	)
+	switch ev.EventType {
+	case eventContractExpiredUndelivered:
+		id, err := uuid.Parse(e.ContractID)
+		if err != nil {
+			return fmt.Errorf("world/fleet: contract_id inválido en contract.expired_undelivered (seq %d): %w", ev.Seq, err)
+		}
+		refKind, refID = "contract_id", id
+		if shipments, err = r.ListContractShipmentsToRelease(ctx, id); err != nil {
+			return err
+		}
+	case eventFreightExpiredUndelivered:
+		id, err := uuid.Parse(e.FreightContractID)
+		if err != nil {
+			return fmt.Errorf("world/fleet: freight_contract_id inválido en freight.expired_undelivered (seq %d): %w", ev.Seq, err)
+		}
+		refKind, refID, isFreight = "freight_contract_id", id, true
+		if shipments, err = r.ListFreightShipmentsToRelease(ctx, id); err != nil {
+			return err
+		}
 	}
+
 	simNow := simtime.SimTime(ev.SimTimeAt)
 	for _, sh := range shipments {
 		if err := r.ReleaseShipmentInSitu(ctx, sh.ID, sh.OriginNodeID, simNow); err != nil {
 			return err
 		}
 		// Reintegra el stock físico al almacén de origen (donde el ledger liberó el
-		// reservado no entregado): así físico(building_inventories) y contable
-		// (stock_free) casan. El nodo de origen SIEMPRE tiene almacén (es el warehouse
-		// del contrato); la guarda es defensiva.
+		// reservado/custodia no entregado): así físico(building_inventories) y
+		// contable (stock_free) casan. El origen SIEMPRE tiene almacén; guarda defensiva.
 		if sh.OriginBuildingID != nil {
 			if err := r.AddInventory(ctx, *sh.OriginBuildingID, sh.ProductID, sh.Quantity, simNow); err != nil {
 				return err
 			}
 		} else {
 			c.logger.Warn("world/fleet: nodo de origen sin almacén; liberación in situ sin reintegrar inventario físico",
-				slog.String("contract_id", contractID.String()), slog.String("shipment_id", sh.ID.String()),
+				slog.String(refKind, refID.String()), slog.String("shipment_id", sh.ID.String()),
 				slog.String("origin_node_id", sh.OriginNodeID.String()))
 		}
-		if err := outbox.Emit(ctx, tx, ev.SimTimeAt, AggregateShipment, sh.ID, EventShipmentReleased, ShipmentReleasedPayload{
-			ShipmentID: sh.ID.String(), ContractID: contractID.String(), OwnerAccountID: sh.OwnerAccountID.String(),
+		payload := ShipmentReleasedPayload{
+			ShipmentID: sh.ID.String(), OwnerAccountID: sh.OwnerAccountID.String(),
 			ProductID: sh.ProductID.String(), Quantity: fixed(sh.Quantity), NodeID: sh.OriginNodeID.String(),
 			ReleasedAtSim: ev.SimTimeAt,
-		}); err != nil {
+		}
+		if isFreight {
+			payload.FreightContractID = refID.String()
+		} else {
+			payload.ContractID = refID.String()
+		}
+		if err := outbox.Emit(ctx, tx, ev.SimTimeAt, AggregateShipment, sh.ID, EventShipmentReleased, payload); err != nil {
 			return err
 		}
 		c.released.Inc()
-		c.logger.Info("cargamento liberado in situ por vencimiento del contrato",
-			slog.String("contract_id", contractID.String()), slog.String("shipment_id", sh.ID.String()),
+		c.logger.Info("cargamento liberado in situ por vencimiento",
+			slog.String(refKind, refID.String()), slog.String("shipment_id", sh.ID.String()),
 			slog.String("owner", sh.OwnerAccountID.String()), slog.String("product_id", sh.ProductID.String()),
 			slog.Int64("quantity", sh.Quantity), slog.String("node_id", sh.OriginNodeID.String()))
 	}
@@ -152,6 +187,23 @@ func (r *Repo) ListContractShipmentsToRelease(ctx context.Context, contractID uu
 	rows, err := r.q.ListContractShipmentsToRelease(ctx, &contractID)
 	if err != nil {
 		return nil, fmt.Errorf("world/fleet: listando cargamentos a liberar del contrato %s: %w", contractID, err)
+	}
+	out := make([]shipmentToRelease, len(rows))
+	for i, row := range rows {
+		out[i] = shipmentToRelease{
+			ID: row.ID, OwnerAccountID: row.OwnerAccountID, ProductID: row.ProductID,
+			Quantity: row.Quantity, OriginNodeID: row.OriginNodeID, OriginBuildingID: row.OriginBuildingID,
+		}
+	}
+	return out, nil
+}
+
+// ListFreightShipmentsToRelease lista los cargamentos aún vivos de un flete vencido
+// con su nodo/almacén de origen (FOR UPDATE dentro de la tx del consumidor).
+func (r *Repo) ListFreightShipmentsToRelease(ctx context.Context, freightID uuid.UUID) ([]shipmentToRelease, error) {
+	rows, err := r.q.ListFreightShipmentsToRelease(ctx, &freightID)
+	if err != nil {
+		return nil, fmt.Errorf("world/fleet: listando cargamentos a liberar del flete %s: %w", freightID, err)
 	}
 	out := make([]shipmentToRelease, len(rows))
 	for i, row := range rows {

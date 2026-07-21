@@ -68,6 +68,13 @@ var (
 	// ErrNotContractParty: un contrato solo es visible para sus partes
 	// (comprador y vendedor) (→ 403 NOT_RESOURCE_OWNER).
 	ErrNotContractParty = errors.New("contracts: el contrato pertenece a otras partes")
+
+	// ErrFreightContractNotFound: el contrato de flete no existe (→ 404 NOT_FOUND).
+	ErrFreightContractNotFound = errors.New("contracts: el contrato de flete no existe")
+
+	// ErrNotFreightParty: un flete solo es visible para sus partes (cargador y
+	// transportista) (→ 403 NOT_RESOURCE_OWNER).
+	ErrNotFreightParty = errors.New("contracts: el flete pertenece a otras partes")
 )
 
 // Errores de validación concretos: envuelven ErrValidation (mismo código 422

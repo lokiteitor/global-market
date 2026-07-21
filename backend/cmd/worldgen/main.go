@@ -64,8 +64,8 @@ func printSummary(s worldgen.Summary) {
 		s.Seed, s.Grid, s.Grid, s.RegionSizeM)
 	fmt.Printf("  regiones creadas: %d | ciudades: %d | yacimientos: %d\n",
 		s.RegionsCreated, s.CitiesCreated, s.DepositsCreated)
-	fmt.Printf("  enlaces inter-región: rail=%d sea=%d | terminales: %d\n",
-		s.RailLinks, s.SeaLinks, s.TerminalsCreated)
+	fmt.Printf("  enlaces inter-región: rail=%d sea=%d | terminales: %d | slots: %d\n",
+		s.RailLinks, s.SeaLinks, s.TerminalsCreated, s.SlotsCreated)
 	fmt.Println("  biomas por celda:")
 	for _, r := range s.Regions {
 		tag := "tierra"

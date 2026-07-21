@@ -388,6 +388,112 @@ func TestProductionIntegration(t *testing.T) {
 			t.Fatalf("ventana reservada halló %d divergencias, esperado 0 (falso positivo del bug)", n)
 		}
 	})
+
+	// ── (j) CUSTODIA de flete: cuenta EN EL LADO FÍSICO (Incremento 8) ─────────
+	// Un CCRI-Flete en vuelo saca la carga del almacén (building_inventories baja) y
+	// la sostiene en una cuenta 'custody' (ledger). El lado físico de la
+	// reconciliación DEBE volver a contarla vía el cargamento de flete atribuido al
+	// almacén de origen de la cuenta de custodia; así físico(shipment) == custody y
+	// no aparece divergencia. Antes del Incremento 8, custody quedaba fuera del lado
+	// físico y un flete en vuelo disparaba un falso positivo.
+	t.Run("custodia de flete cuenta en el lado fisico", func(t *testing.T) {
+		norte := accountID(t, ctx, pool, seed.DefaultTraderName) // transportista (carrier)
+		custProduct := createProduct(t, ctx, pool, "recon_custody_ore", false)
+		const qty = int64(40)
+		// building_inventories[mineBuilding][custProduct] = 0 (la carga dejó el almacén).
+		// Cuenta de custodia (kind custody) en el almacén de origen con balance qty.
+		custAcct := uuid.Must(uuid.NewV7())
+		exec(t, ctx, pool, `INSERT INTO ledger.accounts (id, kind, owner_account_id, product_id, warehouse_building_id)
+			VALUES ($1,'custody',$2,$3,$4)`, custAcct, demo, custProduct, fx.mineBuilding)
+		ws := ensureWorldSource(t, ctx, pool, custProduct)
+		postLedger(t, ctx, pool, "custody_load", []ledgerEntry{{custAcct, qty}, {ws, -qty}})
+
+		// Cuentas satélite mínimas y contrato de flete que referencia la custodia.
+		escrow := uuid.Must(uuid.NewV7())
+		exec(t, ctx, pool, `INSERT INTO ledger.accounts (id, kind, owner_account_id) VALUES ($1,'escrow',$2)`, escrow, demo)
+		guarantee := uuid.Must(uuid.NewV7())
+		exec(t, ctx, pool, `INSERT INTO ledger.accounts (id, kind, owner_account_id) VALUES ($1,'guarantee',$2)`, guarantee, norte)
+		node := anyNodeID(t, ctx, pool)
+		freightID := uuid.Must(uuid.NewV7())
+		exec(t, ctx, pool, `
+			INSERT INTO ledger.freight_contracts
+			  (id, channel, shipper_account_id, carrier_account_id, origin_node_id, destination_node_id,
+			   freight_price, declared_value, deadline_sim, status,
+			   escrow_account_id, carrier_guarantee_account_id, custody_account_id, confirmed_at_sim)
+			VALUES ($1,'board',$2,$3,$4,$4,100,1000,9000000,'active',$5,$6,$7,0)`,
+			freightID, demo, norte, node, escrow, guarantee, custAcct)
+		// Cargamento de flete en vuelo (freight_contract_id, sin contract_id).
+		exec(t, ctx, pool, `INSERT INTO world.shipments
+			(id, owner_account_id, product_id, quantity, freight_contract_id, at_node_id, status, updated_at_sim)
+			VALUES ($1,$2,$3,$4,$5,$6,'in_warehouse',0)`,
+			uuid.Must(uuid.NewV7()), demo, custProduct, qty, freightID, node)
+
+		// El físico (0 en el almacén + qty del cargamento de flete) cuadra con la
+		// custodia contable (qty): sin divergencia.
+		n, err := worker.Reconcile(ctx)
+		if err != nil {
+			t.Fatalf("Reconcile con custodia de flete en vuelo: %v", err)
+		}
+		if n != 0 {
+			t.Fatalf("custodia de flete halló %d divergencias, esperado 0 (custody debe contar en el lado físico)", n)
+		}
+	})
+
+	// ── (k) Divergencia TRANSITORIA (una sola pasada) NO escala ───────────────
+	// La ventana ~250 ms entre la entrega física y su asiento contable produce una
+	// divergencia que aparece en UNA pasada y desaparece en la siguiente. Con
+	// ReconcileGrace=2 no debe escalar (Reconcile devuelve 0) ni en la pasada en que
+	// existe ni tras resolverse.
+	t.Run("divergencia transitoria de una pasada no escala", func(t *testing.T) {
+		transientProduct := createProduct(t, ctx, pool, "recon_transient_ore", false)
+		// Físico 50 sin cuenta de stock: físico(50) <> contable(0) → divergencia.
+		exec(t, ctx, pool, `INSERT INTO world.building_inventories (building_id, product_id, quantity, updated_at_sim)
+			VALUES ($1,$2,50,0)`, fx.mineBuilding, transientProduct)
+		if n, err := worker.Reconcile(ctx); err != nil || n != 0 {
+			t.Fatalf("pasada 1 (transitoria): Reconcile=%d err=%v, esperado 0 (streak 1 < gracia 2)", n, err)
+		}
+		// La divergencia se resuelve antes de la siguiente pasada (el asiento llegó):
+		// añade la cuenta de stock que la cuadra.
+		sf := uuid.Must(uuid.NewV7())
+		exec(t, ctx, pool, `INSERT INTO ledger.accounts (id, kind, owner_account_id, product_id, warehouse_building_id)
+			VALUES ($1,'stock_free',$2,$3,$4)`, sf, demo, transientProduct, fx.mineBuilding)
+		ws := ensureWorldSource(t, ctx, pool, transientProduct)
+		postLedger(t, ctx, pool, "production_output", []ledgerEntry{{sf, 50}, {ws, -50}})
+		if n, err := worker.Reconcile(ctx); err != nil || n != 0 {
+			t.Fatalf("pasada 2 (resuelta): Reconcile=%d err=%v, esperado 0", n, err)
+		}
+	})
+
+	// ── (l) Divergencia PERSISTENTE (>= gracia pasadas consecutivas) SÍ escala ──
+	t.Run("divergencia persistente escala tras la gracia", func(t *testing.T) {
+		persistProduct := createProduct(t, ctx, pool, "recon_persist_ore", false)
+		// Físico 77 sin cuenta de stock: divergencia que NO se resuelve.
+		exec(t, ctx, pool, `INSERT INTO world.building_inventories (building_id, product_id, quantity, updated_at_sim)
+			VALUES ($1,$2,77,0)`, fx.mineBuilding, persistProduct)
+		// Pasada 1: dentro de la gracia (streak 1 < 2) → no escala.
+		if n, err := worker.Reconcile(ctx); err != nil || n != 0 {
+			t.Fatalf("pasada 1 (persistente): Reconcile=%d err=%v, esperado 0", n, err)
+		}
+		// Pasada 2: persiste (streak 2 >= gracia 2) → escala a ERROR + gauge.
+		n, err := worker.Reconcile(ctx)
+		if err != nil {
+			t.Fatalf("pasada 2 (persistente): %v", err)
+		}
+		if n != 1 {
+			t.Fatalf("pasada 2 (persistente): Reconcile=%d, esperado 1 (divergencia escalada)", n)
+		}
+	})
+}
+
+// anyNodeID devuelve el id de un network_node cualquiera (para FKs de fixtures que
+// no dependen de su geometría).
+func anyNodeID(t *testing.T, ctx context.Context, pool *pgxpool.Pool) uuid.UUID {
+	t.Helper()
+	var id uuid.UUID
+	if err := pool.QueryRow(ctx, `SELECT id FROM world.network_nodes LIMIT 1`).Scan(&id); err != nil {
+		t.Fatalf("anyNodeID: %v", err)
+	}
+	return id
 }
 
 // ─── Fixtures ─────────────────────────────────────────────────────────────────

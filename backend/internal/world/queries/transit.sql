@@ -137,7 +137,7 @@ UPDATE world.vehicles
 -- destino ESE nodo (los demás siguen a bordo). FOR UPDATE dentro de la tx del
 -- vehículo.
 -- name: ListVehicleShipmentsForNode :many
-SELECT id, owner_account_id, product_id, quantity, contract_id, destination_node_id, deadline_sim
+SELECT id, owner_account_id, product_id, quantity, contract_id, freight_contract_id, destination_node_id, deadline_sim
 FROM world.shipments
 WHERE vehicle_id = sqlc.arg(vehicle_id) AND status = 'in_transit'
   AND destination_node_id = sqlc.arg(node_id)
@@ -165,16 +165,91 @@ WHERE vehicle_id = sqlc.arg(vehicle_id) AND status = 'in_transit'
   AND (destination_node_id IS NULL OR destination_node_id <> sqlc.arg(node_id))
 FOR UPDATE;
 
--- TransshipShipment deja un cargamento EN LA TERMINAL (at_terminal) a la espera del
--- siguiente tramo: reposa en el nodo de la terminal, ya no viaja a bordo. El tiempo
--- de transbordo lo cobra el siguiente despacho (puerta por transshipment_per_hour),
--- que solo puede ocurrir tras consumirlo. updated_at_sim marca el momento de
--- llegada a la terminal (base de esa puerta de tiempo).
+-- TransshipShipment ENCOLA un cargamento EN LA TERMINAL (at_terminal) a la espera de
+-- ser servido por la cola de transbordo: reposa en el nodo de la terminal, ya no
+-- viaja a bordo. updated_at_sim marca el momento de llegada a la terminal (clave
+-- FIFO de la cola). transship_ready_at_sim se pone a NULL: el cargamento entra en la
+-- cola SIN servir; el barrido de transbordo (sweepTransship) le asigna el instante
+-- de fin de servicio según su prioridad (slot) y su posición, y el siguiente
+-- despacho usa ese valor como puerta de tiempo.
 -- name: TransshipShipment :exec
 UPDATE world.shipments
    SET status = 'at_terminal', at_node_id = sqlc.arg(at_node_id), vehicle_id = NULL,
-       updated_at_sim = sqlc.arg(sim_now)
+       transship_ready_at_sim = NULL, updated_at_sim = sqlc.arg(sim_now)
  WHERE id = sqlc.arg(id);
+
+-- ─── Cola de transbordo con prioridad de slots (GDD 7.3) ──────────────────────
+
+-- ListTerminalsWithPendingTransship lista las terminales con cargamentos ENCOLADOS
+-- (at_terminal, aún sin servir) esperando transbordo: candidatas del barrido de
+-- servicio de cola (sweepTransship). Acotado por page_limit.
+-- name: ListTerminalsWithPendingTransship :many
+SELECT DISTINCT t.id, t.node_id, t.owner_account_id, t.transshipment_per_hour
+FROM world.terminals t
+JOIN world.shipments s ON s.at_node_id = t.node_id
+WHERE s.status = 'at_terminal' AND s.transship_ready_at_sim IS NULL
+LIMIT sqlc.arg(page_limit);
+
+-- LockTerminalForServe bloquea una terminal (FOR UPDATE) para serializar el
+-- servicio de su cola entre instancias del motor. pgx.ErrNoRows si no existe.
+-- name: LockTerminalForServe :one
+SELECT id, node_id, owner_account_id, transshipment_per_hour, queue_length
+FROM world.terminals
+WHERE id = sqlc.arg(id)
+FOR UPDATE;
+
+-- TerminalServerBusyUntil devuelve hasta cuándo está OCUPADO el servidor de la
+-- terminal: el mayor transship_ready_at_sim de los cargamentos ya servidos que aún
+-- no han partido y cuyo servicio NO ha terminado en sim_now (ready > sim_now). 0 si
+-- el servidor está libre. Base del encolado secuencial entre barridos.
+-- name: TerminalServerBusyUntil :one
+SELECT COALESCE(MAX(transship_ready_at_sim), 0)::bigint AS busy_until
+FROM world.shipments
+WHERE at_node_id = sqlc.arg(node_id) AND status = 'at_terminal'
+  AND transship_ready_at_sim IS NOT NULL
+  AND transship_ready_at_sim > sqlc.arg(sim_now)::bigint;
+
+-- ListTerminalTransshipQueue lista la COLA de una terminal: cargamentos at_terminal
+-- aún sin servir en su nodo, con el volumen del cargamento (quantity·unit_volume) y
+-- el MEJOR (menor) priority_tier VIGENTE del dueño en esa terminal (centinela alto
+-- si no posee slot). Ordena por prioridad (slot ascendente; sin slot al final) y,
+-- dentro de cada clase, FIFO por llegada (updated_at_sim, id): el orden de servicio.
+-- name: ListTerminalTransshipQueue :many
+SELECT s.id, s.owner_account_id, s.quantity, s.updated_at_sim AS arrival_sim,
+       (s.quantity * p.unit_volume)::bigint AS volume,
+       COALESCE((
+           SELECT MIN(ts.priority_tier) FROM world.terminal_slots ts
+           WHERE ts.terminal_id = sqlc.arg(terminal_id)
+             AND ts.holder_account_id = s.owner_account_id
+             AND (ts.valid_until_sim IS NULL OR ts.valid_until_sim >= sqlc.arg(sim_now)::bigint)
+       ), 2147483647)::int AS slot_tier
+FROM world.shipments s
+JOIN world.products p ON p.id = s.product_id
+WHERE s.at_node_id = sqlc.arg(node_id) AND s.status = 'at_terminal'
+  AND s.transship_ready_at_sim IS NULL
+ORDER BY slot_tier ASC, s.updated_at_sim ASC, s.id ASC;
+
+-- SetShipmentTransshipReady marca un cargamento como SERVIDO por la cola: fija el
+-- instante de fin de transbordo (listo para el siguiente tramo). No toca
+-- updated_at_sim (conserva la llegada).
+-- name: SetShipmentTransshipReady :exec
+UPDATE world.shipments
+   SET transship_ready_at_sim = sqlc.arg(ready_at_sim)
+ WHERE id = sqlc.arg(id);
+
+-- RecountTerminalQueue recalcula la longitud de cola de una terminal: cargamentos
+-- at_terminal en su nodo aún sin servir (encolados) o con servicio en curso
+-- (transship_ready_at_sim > sim_now). Publica también updated_at_sim.
+-- name: RecountTerminalQueue :exec
+UPDATE world.terminals t
+   SET queue_length = (
+           SELECT count(*) FROM world.shipments s
+           WHERE s.at_node_id = t.node_id AND s.status = 'at_terminal'
+             AND (s.transship_ready_at_sim IS NULL
+                  OR s.transship_ready_at_sim > sqlc.arg(sim_now)::bigint)
+       ),
+       updated_at_sim = sqlc.arg(sim_now)
+ WHERE t.id = sqlc.arg(id);
 
 -- ─── Congestión (job periódico) y métricas ────────────────────────────────────
 

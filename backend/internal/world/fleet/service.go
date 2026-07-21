@@ -43,8 +43,9 @@ type Service struct {
 	opts   Options
 	logger *slog.Logger
 
-	purchased  prometheus.Counter
-	dispatched prometheus.Counter
+	purchased     prometheus.Counter
+	dispatched    prometheus.Counter
+	slotPurchases prometheus.Counter
 }
 
 // NewService construye el servicio sobre el pool compartido de la plataforma.
@@ -75,9 +76,13 @@ func NewService(pool *pgxpool.Pool, sim SimSource, opts Options, logger *slog.Lo
 			Name: "ii_shipments_dispatched_total",
 			Help: "Total de cargamentos despachados (puestos en tránsito).",
 		}),
+		slotPurchases: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "ii_slot_purchases_total",
+			Help: "Total de slots de prioridad de terminal comprados (GDD 7.3).",
+		}),
 	}
 	if reg != nil {
-		reg.MustRegister(s.purchased, s.dispatched)
+		reg.MustRegister(s.purchased, s.dispatched, s.slotPurchases)
 	}
 	return s, nil
 }
@@ -376,7 +381,23 @@ func (s *Service) DispatchShipment(ctx context.Context, owner, shipmentID uuid.U
 		case err != nil:
 			return fmt.Errorf("world/fleet: bloqueando el cargamento %s: %w", shipmentID, err)
 		}
-		if sh.OwnerAccountID != owner {
+		// Autorización del despacho: un cargamento de CCRI de bienes lo despacha su
+		// dueño (el vendedor); un cargamento de CCRI-Flete lo despacha el
+		// TRANSPORTISTA (dueño=cargador, pero la carga viaja en el vehículo del
+		// transportista). world resuelve el transportista leyendo el freight_contract
+		// (cross-schema), sin importar internal/contracts.
+		authorized := sh.OwnerAccountID
+		if sh.FreightContractID != nil {
+			carrier, cerr := r.GetFreightCarrier(ctx, *sh.FreightContractID)
+			switch {
+			case errors.Is(cerr, pgx.ErrNoRows):
+				return fmt.Errorf("%w: el flete %s del cargamento no existe", ErrValidation, *sh.FreightContractID)
+			case cerr != nil:
+				return fmt.Errorf("world/fleet: consultando el transportista del flete %s: %w", *sh.FreightContractID, cerr)
+			}
+			authorized = carrier
+		}
+		if authorized != owner {
 			return fmt.Errorf("%w (cargamento %s)", ErrForbidden, shipmentID)
 		}
 		// Despachable en el primer tramo (in_warehouse) o en un tramo posterior de
@@ -482,19 +503,28 @@ func (s *Service) DispatchShipment(ctx context.Context, owner, shipmentID uuid.U
 
 		// Puerta de tiempo de transbordo: un cargamento at_terminal no puede
 		// re-despacharse hasta consumir el tiempo de transbordo de la terminal
-		// (transshipment_per_hour · volumen; GDD 7.3). updated_at_sim registra su
-		// llegada a la terminal.
+		// (transshipment_per_hour · volumen; GDD 7.3). Si la COLA de transbordo ya lo
+		// sirvió (transship_ready_at_sim fijado por sweepTransship), esa es la puerta
+		// real —refleja su posición en la cola con la prioridad de slots—; si aún no
+		// (la cola no corrió, o un fixture directo), se recae en el cálculo aislado
+		// desde la llegada (updated_at_sim), retrocompatible.
 		if sh.Status == string(sqlcgen.WorldShipmentStatusAtTerminal) {
-			term, terr := r.GetTerminalByNode(ctx, originNode)
-			switch {
-			case errors.Is(terr, pgx.ErrNoRows):
-				// Defensivo: at_terminal en un nodo sin terminal — sin tasa, sin espera.
-			case terr != nil:
-				return fmt.Errorf("world/fleet: consultando la terminal del nodo %s: %w", originNode, terr)
-			default:
-				readyAt := sh.UpdatedAtSim + transshipmentSeconds(needVol, term.TransshipmentPerHour)
-				if int64(simNow) < readyAt {
-					return &TransshipmentPendingError{ReadyAtSim: readyAt, NowSim: int64(simNow)}
+			if sh.TransshipReadyAtSim != nil {
+				if int64(simNow) < *sh.TransshipReadyAtSim {
+					return &TransshipmentPendingError{ReadyAtSim: *sh.TransshipReadyAtSim, NowSim: int64(simNow)}
+				}
+			} else {
+				term, terr := r.GetTerminalByNode(ctx, originNode)
+				switch {
+				case errors.Is(terr, pgx.ErrNoRows):
+					// Defensivo: at_terminal en un nodo sin terminal — sin tasa, sin espera.
+				case terr != nil:
+					return fmt.Errorf("world/fleet: consultando la terminal del nodo %s: %w", originNode, terr)
+				default:
+					readyAt := sh.UpdatedAtSim + transshipmentSeconds(needVol, term.TransshipmentPerHour)
+					if int64(simNow) < readyAt {
+						return &TransshipmentPendingError{ReadyAtSim: readyAt, NowSim: int64(simNow)}
+					}
 				}
 			}
 		}

@@ -163,13 +163,17 @@ func insertSegment(ctx context.Context, st *genState, linkID, regionID uuid.UUID
 }
 
 // ensureTerminals crea una terminal intermodal (owner = banco central) en cada
-// junction donde coinciden road y rail/sea, habilitando el transbordo. Recorre los
-// junctions de todas las regiones del estado (incluido el de Askadia).
+// junction donde coinciden road y rail/sea, habilitando el transbordo, y le asegura
+// sus slots de prioridad vendibles (GDD 7.3). Recorre los junctions de todas las
+// regiones del estado (incluido el de Askadia). Idempotente.
 func ensureTerminals(ctx context.Context, st *genState) error {
 	for _, reg := range st.regions {
-		created, err := ensureTerminalIfIntermodal(ctx, st, reg.JunctionID)
+		terminalID, created, err := ensureTerminalIfIntermodal(ctx, st, reg.JunctionID)
 		if err != nil {
 			return err
+		}
+		if terminalID == uuid.Nil {
+			continue // el nodo no es intermodal
 		}
 		if created {
 			st.summary.TerminalsCreated++
@@ -177,43 +181,84 @@ func ensureTerminals(ctx context.Context, st *genState) error {
 				slog.String("node_id", reg.JunctionID.String()),
 				slog.String("region", fmt.Sprintf("%d,%d", reg.GridX, reg.GridY)))
 		}
+		// Slots de prioridad a la venta (idempotente: solo si la terminal no tiene).
+		// Cubre también terminales de un worldgen previo sin slots.
+		n, err := ensureTerminalSlots(ctx, st, terminalID)
+		if err != nil {
+			return err
+		}
+		st.summary.SlotsCreated += n
 	}
 	return nil
 }
 
 // ensureTerminalIfIntermodal crea la terminal en el nodo si tiene incidentes a la
 // vez enlaces road y enlaces rail/sea (cambio de modo posible) y aún no la tiene
-// (clave natural: node_id UNIQUE). Devuelve si se creó.
-func ensureTerminalIfIntermodal(ctx context.Context, st *genState, nodeID uuid.UUID) (bool, error) {
+// (clave natural: node_id UNIQUE). Devuelve el id de la terminal (uuid.Nil si el
+// nodo no es intermodal) y si se creó en esta pasada.
+func ensureTerminalIfIntermodal(ctx context.Context, st *genState, nodeID uuid.UUID) (uuid.UUID, bool, error) {
 	var hasRoad, hasRailSea bool
 	if err := st.pool.QueryRow(ctx, `
 		SELECT
 		  EXISTS(SELECT 1 FROM world.network_links WHERE (from_node_id = $1 OR to_node_id = $1) AND mode = 'road'),
 		  EXISTS(SELECT 1 FROM world.network_links WHERE (from_node_id = $1 OR to_node_id = $1) AND mode IN ('rail','sea'))`,
 		nodeID).Scan(&hasRoad, &hasRailSea); err != nil {
-		return false, fmt.Errorf("worldgen: comprobando modos del nodo %s: %w", nodeID, err)
+		return uuid.Nil, false, fmt.Errorf("worldgen: comprobando modos del nodo %s: %w", nodeID, err)
 	}
 	if !hasRoad || !hasRailSea {
-		return false, nil
+		return uuid.Nil, false, nil
 	}
 
 	var existing uuid.UUID
 	err := st.pool.QueryRow(ctx, `SELECT id FROM world.terminals WHERE node_id = $1`, nodeID).Scan(&existing)
 	switch {
 	case err == nil:
-		return false, nil
+		return existing, false, nil
 	case !errors.Is(err, pgx.ErrNoRows):
-		return false, fmt.Errorf("worldgen: consultando terminal del nodo %s: %w", nodeID, err)
+		return uuid.Nil, false, fmt.Errorf("worldgen: consultando terminal del nodo %s: %w", nodeID, err)
 	}
 	id, err := newID()
 	if err != nil {
-		return false, err
+		return uuid.Nil, false, err
 	}
 	if _, err := st.pool.Exec(ctx, `
 		INSERT INTO world.terminals (id, node_id, owner_account_id, transshipment_per_hour)
 		VALUES ($1, $2, $3, $4)`,
 		id, nodeID, st.bank.ID, terminalTransshipmentPerHour); err != nil {
-		return false, fmt.Errorf("worldgen: creando terminal del nodo %s: %w", nodeID, err)
+		return uuid.Nil, false, fmt.Errorf("worldgen: creando terminal del nodo %s: %w", nodeID, err)
 	}
-	return true, nil
+	return id, true, nil
+}
+
+// ensureTerminalSlots crea los slots de prioridad de una terminal si aún no tiene
+// ninguno (idempotente por conteo). Ofrece terminalSlotTiers slots de priority_tier
+// 1..N a la venta (holder_account_id NULL), con precio creciente con la prioridad
+// (tier 1 = más caro). Devuelve cuántos slots creó.
+func ensureTerminalSlots(ctx context.Context, st *genState, terminalID uuid.UUID) (int, error) {
+	var have int
+	if err := st.pool.QueryRow(ctx,
+		`SELECT count(*) FROM world.terminal_slots WHERE terminal_id = $1`, terminalID).Scan(&have); err != nil {
+		return 0, fmt.Errorf("worldgen: contando slots de la terminal %s: %w", terminalID, err)
+	}
+	if have > 0 {
+		return 0, nil // ya tiene slots
+	}
+	created := 0
+	for tier := 1; tier <= terminalSlotTiers; tier++ {
+		id, err := newID()
+		if err != nil {
+			return created, err
+		}
+		price := terminalSlotBasePrice * int64(terminalSlotTiers-tier+1)
+		if _, err := st.pool.Exec(ctx, `
+			INSERT INTO world.terminal_slots (id, terminal_id, priority_tier, price)
+			VALUES ($1, $2, $3, $4)`,
+			id, terminalID, tier, price); err != nil {
+			return created, fmt.Errorf("worldgen: creando slot tier %d de la terminal %s: %w", tier, terminalID, err)
+		}
+		created++
+	}
+	st.logger.Info("slots de prioridad de terminal creados",
+		slog.String("terminal_id", terminalID.String()), slog.Int("slots", created))
+	return created, nil
 }

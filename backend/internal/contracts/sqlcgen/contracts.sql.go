@@ -279,6 +279,73 @@ func (q *Queries) GetEmissionAccount(ctx context.Context) (LedgerAccount, error)
 	return i, err
 }
 
+const getFreightContract = `-- name: GetFreightContract :one
+SELECT id, publication_id, channel, shipper_account_id, carrier_account_id, origin_node_id, destination_node_id, freight_price, declared_value, deadline_sim, status, fill_bp, escrow_account_id, carrier_guarantee_account_id, custody_account_id, confirmed_at_sim, settled_at_sim, created_at, updated_at FROM ledger.freight_contracts WHERE id = $1
+`
+
+// GetFreightContract devuelve un contrato de flete por id (autorización por partes
+// —cargador/transportista— en la capa de servicio).
+func (q *Queries) GetFreightContract(ctx context.Context, id uuid.UUID) (LedgerFreightContract, error) {
+	row := q.db.QueryRow(ctx, getFreightContract, id)
+	var i LedgerFreightContract
+	err := row.Scan(
+		&i.ID,
+		&i.PublicationID,
+		&i.Channel,
+		&i.ShipperAccountID,
+		&i.CarrierAccountID,
+		&i.OriginNodeID,
+		&i.DestinationNodeID,
+		&i.FreightPrice,
+		&i.DeclaredValue,
+		&i.DeadlineSim,
+		&i.Status,
+		&i.FillBp,
+		&i.EscrowAccountID,
+		&i.CarrierGuaranteeAccountID,
+		&i.CustodyAccountID,
+		&i.ConfirmedAtSim,
+		&i.SettledAtSim,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getFreightContractForUpdate = `-- name: GetFreightContractForUpdate :one
+SELECT id, publication_id, channel, shipper_account_id, carrier_account_id, origin_node_id, destination_node_id, freight_price, declared_value, deadline_sim, status, fill_bp, escrow_account_id, carrier_guarantee_account_id, custody_account_id, confirmed_at_sim, settled_at_sim, created_at, updated_at FROM ledger.freight_contracts WHERE id = $1 FOR UPDATE
+`
+
+// GetFreightContractForUpdate bloquea el contrato de flete (SELECT FOR UPDATE):
+// el freight_settler fija estado/liquidación bajo el lock, serializándose con el
+// barrido de vencimiento (que lo bloquea con SKIP LOCKED).
+func (q *Queries) GetFreightContractForUpdate(ctx context.Context, id uuid.UUID) (LedgerFreightContract, error) {
+	row := q.db.QueryRow(ctx, getFreightContractForUpdate, id)
+	var i LedgerFreightContract
+	err := row.Scan(
+		&i.ID,
+		&i.PublicationID,
+		&i.Channel,
+		&i.ShipperAccountID,
+		&i.CarrierAccountID,
+		&i.OriginNodeID,
+		&i.DestinationNodeID,
+		&i.FreightPrice,
+		&i.DeclaredValue,
+		&i.DeadlineSim,
+		&i.Status,
+		&i.FillBp,
+		&i.EscrowAccountID,
+		&i.CarrierGuaranteeAccountID,
+		&i.CustodyAccountID,
+		&i.ConfirmedAtSim,
+		&i.SettledAtSim,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const getLedgerAccount = `-- name: GetLedgerAccount :one
 SELECT id, kind, owner_account_id, product_id, warehouse_building_id, reference_id, balance, created_at, updated_at FROM ledger.accounts WHERE id = $1
 `
@@ -369,7 +436,7 @@ func (q *Queries) GetProductBasePrice(ctx context.Context, id uuid.UUID) (int64,
 }
 
 const getPublication = `-- name: GetPublication :one
-SELECT id, kind, publisher_account_id, channel, counterparty_account_id, product_id, quantity_total, quantity_remaining, unit_price, min_lot, origin_node_id, destination_node_id, delivery_sim_seconds, status, window_closes_at, cancel_cooldown_until, stock_reserve_account_id, guarantee_account_id, escrow_account_id, published_at_sim, created_at, updated_at FROM ledger.publications WHERE id = $1
+SELECT id, kind, publisher_account_id, channel, counterparty_account_id, product_id, quantity_total, quantity_remaining, unit_price, min_lot, origin_node_id, destination_node_id, delivery_sim_seconds, status, window_closes_at, cancel_cooldown_until, stock_reserve_account_id, guarantee_account_id, escrow_account_id, published_at_sim, created_at, updated_at, declared_value FROM ledger.publications WHERE id = $1
 `
 
 // GetPublication devuelve una publicación por id (la autorización de canal
@@ -400,12 +467,13 @@ func (q *Queries) GetPublication(ctx context.Context, id uuid.UUID) (LedgerPubli
 		&i.PublishedAtSim,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.DeclaredValue,
 	)
 	return i, err
 }
 
 const getPublicationForUpdate = `-- name: GetPublicationForUpdate :one
-SELECT id, kind, publisher_account_id, channel, counterparty_account_id, product_id, quantity_total, quantity_remaining, unit_price, min_lot, origin_node_id, destination_node_id, delivery_sim_seconds, status, window_closes_at, cancel_cooldown_until, stock_reserve_account_id, guarantee_account_id, escrow_account_id, published_at_sim, created_at, updated_at FROM ledger.publications WHERE id = $1 FOR UPDATE
+SELECT id, kind, publisher_account_id, channel, counterparty_account_id, product_id, quantity_total, quantity_remaining, unit_price, min_lot, origin_node_id, destination_node_id, delivery_sim_seconds, status, window_closes_at, cancel_cooldown_until, stock_reserve_account_id, guarantee_account_id, escrow_account_id, published_at_sim, created_at, updated_at, declared_value FROM ledger.publications WHERE id = $1 FOR UPDATE
 `
 
 // GetPublicationForUpdate bloquea la fila de la publicación para las
@@ -437,6 +505,7 @@ func (q *Queries) GetPublicationForUpdate(ctx context.Context, id uuid.UUID) (Le
 		&i.PublishedAtSim,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.DeclaredValue,
 	)
 	return i, err
 }
@@ -727,6 +796,129 @@ func (q *Queries) InsertContractDeliveryIfNew(ctx context.Context, arg InsertCon
 	return i, err
 }
 
+const insertFreightContract = `-- name: InsertFreightContract :one
+
+INSERT INTO ledger.freight_contracts (
+    id, publication_id, channel, shipper_account_id, carrier_account_id,
+    origin_node_id, destination_node_id, freight_price, declared_value,
+    deadline_sim, escrow_account_id, carrier_guarantee_account_id,
+    custody_account_id, confirmed_at_sim)
+VALUES (
+    $1, $2, $3,
+    $4, $5,
+    $6, $7,
+    $8, $9,
+    $10, $11,
+    $12, $13,
+    $14)
+RETURNING id, publication_id, channel, shipper_account_id, carrier_account_id, origin_node_id, destination_node_id, freight_price, declared_value, deadline_sim, status, fill_bp, escrow_account_id, carrier_guarantee_account_id, custody_account_id, confirmed_at_sim, settled_at_sim, created_at, updated_at
+`
+
+type InsertFreightContractParams struct {
+	ID                        uuid.UUID
+	PublicationID             *uuid.UUID
+	Channel                   LedgerContractChannel
+	ShipperAccountID          uuid.UUID
+	CarrierAccountID          uuid.UUID
+	OriginNodeID              uuid.UUID
+	DestinationNodeID         uuid.UUID
+	FreightPrice              int64
+	DeclaredValue             int64
+	DeadlineSim               int64
+	EscrowAccountID           uuid.UUID
+	CarrierGuaranteeAccountID uuid.UUID
+	CustodyAccountID          uuid.UUID
+	ConfirmedAtSim            int64
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// CCRI-Flete (GDD 5.3.2, Incremento 8). El flete REUTILIZA el tablón, la ventana
+// de sorteo y la aceptación de las publicaciones de bienes (kind='freight'); estas
+// queries añaden la creación/lectura del ledger.freight_contracts, el barrido de
+// vencimiento y la idempotencia de entrega. Las funciones todo-o-nada
+// ledger.confirm_freight / settle_freight_prorata se invocan por Exec directo
+// (repo.go) para pasar el array de UUID pre-generados, como confirm_contract.
+// ═════════════════════════════════════════════════════════════════════════════
+// InsertFreightContract crea el contrato de flete en estado active con sus cuentas
+// espejo (escrow del cargador, garantía del transportista y custodia), creadas
+// antes en la misma transacción. confirm_freight asienta a continuación el
+// movimiento de escrow/garantía/custodia.
+func (q *Queries) InsertFreightContract(ctx context.Context, arg InsertFreightContractParams) (LedgerFreightContract, error) {
+	row := q.db.QueryRow(ctx, insertFreightContract,
+		arg.ID,
+		arg.PublicationID,
+		arg.Channel,
+		arg.ShipperAccountID,
+		arg.CarrierAccountID,
+		arg.OriginNodeID,
+		arg.DestinationNodeID,
+		arg.FreightPrice,
+		arg.DeclaredValue,
+		arg.DeadlineSim,
+		arg.EscrowAccountID,
+		arg.CarrierGuaranteeAccountID,
+		arg.CustodyAccountID,
+		arg.ConfirmedAtSim,
+	)
+	var i LedgerFreightContract
+	err := row.Scan(
+		&i.ID,
+		&i.PublicationID,
+		&i.Channel,
+		&i.ShipperAccountID,
+		&i.CarrierAccountID,
+		&i.OriginNodeID,
+		&i.DestinationNodeID,
+		&i.FreightPrice,
+		&i.DeclaredValue,
+		&i.DeadlineSim,
+		&i.Status,
+		&i.FillBp,
+		&i.EscrowAccountID,
+		&i.CarrierGuaranteeAccountID,
+		&i.CustodyAccountID,
+		&i.ConfirmedAtSim,
+		&i.SettledAtSim,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const insertFreightDeliveryIfNew = `-- name: InsertFreightDeliveryIfNew :one
+INSERT INTO ledger.freight_deliveries (
+    freight_contract_id, shipment_id, quantity, delivered_at_sim, on_time)
+VALUES (
+    $1, $2,
+    $3, $4, $5)
+ON CONFLICT (freight_contract_id, shipment_id) DO NOTHING
+RETURNING freight_contract_id
+`
+
+type InsertFreightDeliveryIfNewParams struct {
+	FreightContractID uuid.UUID
+	ShipmentID        uuid.UUID
+	Quantity          int64
+	DeliveredAtSim    int64
+	OnTime            bool
+}
+
+// InsertFreightDeliveryIfNew registra la entrega de un cargamento de flete de forma
+// IDEMPOTENTE por (freight_contract_id, shipment_id): un cargamento llega una vez.
+// Si ya existe (clave primaria), no inserta y no devuelve fila (pgx.ErrNoRows).
+func (q *Queries) InsertFreightDeliveryIfNew(ctx context.Context, arg InsertFreightDeliveryIfNewParams) (uuid.UUID, error) {
+	row := q.db.QueryRow(ctx, insertFreightDeliveryIfNew,
+		arg.FreightContractID,
+		arg.ShipmentID,
+		arg.Quantity,
+		arg.DeliveredAtSim,
+		arg.OnTime,
+	)
+	var freight_contract_id uuid.UUID
+	err := row.Scan(&freight_contract_id)
+	return freight_contract_id, err
+}
+
 const insertLedgerEntry = `-- name: InsertLedgerEntry :exec
 INSERT INTO ledger.entries (id, transaction_id, account_id, amount)
 VALUES ($1, $2, $3, $4)
@@ -786,7 +978,7 @@ INSERT INTO ledger.publications (
     origin_node_id, destination_node_id, delivery_sim_seconds, status,
     window_closes_at, cancel_cooldown_until,
     stock_reserve_account_id, guarantee_account_id, escrow_account_id,
-    published_at_sim)
+    declared_value, published_at_sim)
 VALUES (
     $1, $2, $3,
     $4, $5,
@@ -797,8 +989,8 @@ VALUES (
     now() + $13::bigint * interval '1 second',
     now() + $14::bigint * interval '1 second',
     $15, $16,
-    $17, $18)
-RETURNING id, kind, publisher_account_id, channel, counterparty_account_id, product_id, quantity_total, quantity_remaining, unit_price, min_lot, origin_node_id, destination_node_id, delivery_sim_seconds, status, window_closes_at, cancel_cooldown_until, stock_reserve_account_id, guarantee_account_id, escrow_account_id, published_at_sim, created_at, updated_at
+    $17, $18, $19)
+RETURNING id, kind, publisher_account_id, channel, counterparty_account_id, product_id, quantity_total, quantity_remaining, unit_price, min_lot, origin_node_id, destination_node_id, delivery_sim_seconds, status, window_closes_at, cancel_cooldown_until, stock_reserve_account_id, guarantee_account_id, escrow_account_id, published_at_sim, created_at, updated_at, declared_value
 `
 
 type InsertPublicationParams struct {
@@ -819,6 +1011,7 @@ type InsertPublicationParams struct {
 	StockReserveAccountID *uuid.UUID
 	GuaranteeAccountID    *uuid.UUID
 	EscrowAccountID       *uuid.UUID
+	DeclaredValue         *int64
 	PublishedAtSim        int64
 }
 
@@ -859,6 +1052,7 @@ func (q *Queries) InsertPublication(ctx context.Context, arg InsertPublicationPa
 		arg.StockReserveAccountID,
 		arg.GuaranteeAccountID,
 		arg.EscrowAccountID,
+		arg.DeclaredValue,
 		arg.PublishedAtSim,
 	)
 	var i LedgerPublication
@@ -885,6 +1079,7 @@ func (q *Queries) InsertPublication(ctx context.Context, arg InsertPublicationPa
 		&i.PublishedAtSim,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.DeclaredValue,
 	)
 	return i, err
 }
@@ -965,7 +1160,7 @@ func (q *Queries) InsertSystemLiquidationIfNew(ctx context.Context, arg InsertSy
 }
 
 const listBoardPublications = `-- name: ListBoardPublications :many
-SELECT p.id, p.kind, p.publisher_account_id, p.channel, p.counterparty_account_id, p.product_id, p.quantity_total, p.quantity_remaining, p.unit_price, p.min_lot, p.origin_node_id, p.destination_node_id, p.delivery_sim_seconds, p.status, p.window_closes_at, p.cancel_cooldown_until, p.stock_reserve_account_id, p.guarantee_account_id, p.escrow_account_id, p.published_at_sim, p.created_at, p.updated_at
+SELECT p.id, p.kind, p.publisher_account_id, p.channel, p.counterparty_account_id, p.product_id, p.quantity_total, p.quantity_remaining, p.unit_price, p.min_lot, p.origin_node_id, p.destination_node_id, p.delivery_sim_seconds, p.status, p.window_closes_at, p.cancel_cooldown_until, p.stock_reserve_account_id, p.guarantee_account_id, p.escrow_account_id, p.published_at_sim, p.created_at, p.updated_at, p.declared_value
 FROM ledger.publications p
 WHERE p.channel = 'board'
   AND p.status IN ('draw_window', 'open', 'micro_window')
@@ -1063,6 +1258,7 @@ func (q *Queries) ListBoardPublications(ctx context.Context, arg ListBoardPublic
 			&i.PublishedAtSim,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.DeclaredValue,
 		); err != nil {
 			return nil, err
 		}
@@ -1261,6 +1457,45 @@ func (q *Queries) ListDueDrawPublicationIDs(ctx context.Context, pageLimit int32
 	return items, nil
 }
 
+const listDueFreightIDs = `-- name: ListDueFreightIDs :many
+SELECT fc.id FROM ledger.freight_contracts fc
+WHERE fc.status = 'active' AND fc.deadline_sim <= $1::bigint
+  AND NOT EXISTS (
+        SELECT 1 FROM world.shipments sh
+        WHERE sh.freight_contract_id = fc.id AND sh.status = 'delivered')
+ORDER BY fc.deadline_sim
+LIMIT $2
+`
+
+type ListDueFreightIDsParams struct {
+	SimNow    int64
+	PageLimit int32
+}
+
+// ListDueFreightIDs lista los contratos de flete ACTIVOS vencidos (deadline pasado)
+// cuya carga NO llegó a entregarse (ningún cargamento de flete delivered): son los
+// que el barrido debe fallar (custodia liberada in situ, garantía repartida). Si la
+// carga se entregó (aún tarde), la liquida el freight_settler, no el barrido.
+func (q *Queries) ListDueFreightIDs(ctx context.Context, arg ListDueFreightIDsParams) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, listDueFreightIDs, arg.SimNow, arg.PageLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listExpiredPublicationIDs = `-- name: ListExpiredPublicationIDs :many
 
 SELECT id FROM ledger.publications
@@ -1292,6 +1527,75 @@ func (q *Queries) ListExpiredPublicationIDs(ctx context.Context, arg ListExpired
 			return nil, err
 		}
 		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listFreightContracts = `-- name: ListFreightContracts :many
+SELECT id, publication_id, channel, shipper_account_id, carrier_account_id, origin_node_id, destination_node_id, freight_price, declared_value, deadline_sim, status, fill_bp, escrow_account_id, carrier_guarantee_account_id, custody_account_id, confirmed_at_sim, settled_at_sim, created_at, updated_at FROM ledger.freight_contracts
+WHERE (shipper_account_id = $1 OR carrier_account_id = $1)
+  AND ($2::text IS NULL
+       OR ($2::text = 'shipper' AND shipper_account_id = $1)
+       OR ($2::text = 'carrier' AND carrier_account_id = $1))
+  AND ($3::text IS NULL OR status::text = $3::text)
+  AND ($4::uuid IS NULL OR id < $4::uuid)
+ORDER BY id DESC
+LIMIT $5
+`
+
+type ListFreightContractsParams struct {
+	AccountID uuid.UUID
+	Role      *string
+	Status    *string
+	AfterID   *uuid.UUID
+	PageLimit int32
+}
+
+// ListFreightContracts lista los contratos de flete en los que account_id es
+// cargador (role 'shipper') o transportista (role 'carrier'), con filtro de estado
+// y paginación keyset (id DESC).
+func (q *Queries) ListFreightContracts(ctx context.Context, arg ListFreightContractsParams) ([]LedgerFreightContract, error) {
+	rows, err := q.db.Query(ctx, listFreightContracts,
+		arg.AccountID,
+		arg.Role,
+		arg.Status,
+		arg.AfterID,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []LedgerFreightContract
+	for rows.Next() {
+		var i LedgerFreightContract
+		if err := rows.Scan(
+			&i.ID,
+			&i.PublicationID,
+			&i.Channel,
+			&i.ShipperAccountID,
+			&i.CarrierAccountID,
+			&i.OriginNodeID,
+			&i.DestinationNodeID,
+			&i.FreightPrice,
+			&i.DeclaredValue,
+			&i.DeadlineSim,
+			&i.Status,
+			&i.FillBp,
+			&i.EscrowAccountID,
+			&i.CarrierGuaranteeAccountID,
+			&i.CustodyAccountID,
+			&i.ConfirmedAtSim,
+			&i.SettledAtSim,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -1386,7 +1690,7 @@ func (q *Queries) LockDueContract(ctx context.Context, arg LockDueContractParams
 }
 
 const lockDueDrawPublication = `-- name: LockDueDrawPublication :one
-SELECT id, kind, publisher_account_id, channel, counterparty_account_id, product_id, quantity_total, quantity_remaining, unit_price, min_lot, origin_node_id, destination_node_id, delivery_sim_seconds, status, window_closes_at, cancel_cooldown_until, stock_reserve_account_id, guarantee_account_id, escrow_account_id, published_at_sim, created_at, updated_at FROM ledger.publications
+SELECT id, kind, publisher_account_id, channel, counterparty_account_id, product_id, quantity_total, quantity_remaining, unit_price, min_lot, origin_node_id, destination_node_id, delivery_sim_seconds, status, window_closes_at, cancel_cooldown_until, stock_reserve_account_id, guarantee_account_id, escrow_account_id, published_at_sim, created_at, updated_at, declared_value FROM ledger.publications
 WHERE id = $1
   AND status IN ('draw_window', 'micro_window')
   AND window_closes_at <= now()
@@ -1422,12 +1726,53 @@ func (q *Queries) LockDueDrawPublication(ctx context.Context, id uuid.UUID) (Led
 		&i.PublishedAtSim,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.DeclaredValue,
+	)
+	return i, err
+}
+
+const lockDueFreight = `-- name: LockDueFreight :one
+SELECT id, publication_id, channel, shipper_account_id, carrier_account_id, origin_node_id, destination_node_id, freight_price, declared_value, deadline_sim, status, fill_bp, escrow_account_id, carrier_guarantee_account_id, custody_account_id, confirmed_at_sim, settled_at_sim, created_at, updated_at FROM ledger.freight_contracts
+WHERE id = $1 AND status = 'active' AND deadline_sim <= $2::bigint
+FOR UPDATE SKIP LOCKED
+`
+
+type LockDueFreightParams struct {
+	ID     uuid.UUID
+	SimNow int64
+}
+
+// LockDueFreight bloquea un flete activo vencido y sin entrega (re-verifica bajo el
+// lock; SKIP LOCKED salta los tomados por otra instancia).
+func (q *Queries) LockDueFreight(ctx context.Context, arg LockDueFreightParams) (LedgerFreightContract, error) {
+	row := q.db.QueryRow(ctx, lockDueFreight, arg.ID, arg.SimNow)
+	var i LedgerFreightContract
+	err := row.Scan(
+		&i.ID,
+		&i.PublicationID,
+		&i.Channel,
+		&i.ShipperAccountID,
+		&i.CarrierAccountID,
+		&i.OriginNodeID,
+		&i.DestinationNodeID,
+		&i.FreightPrice,
+		&i.DeclaredValue,
+		&i.DeadlineSim,
+		&i.Status,
+		&i.FillBp,
+		&i.EscrowAccountID,
+		&i.CarrierGuaranteeAccountID,
+		&i.CustodyAccountID,
+		&i.ConfirmedAtSim,
+		&i.SettledAtSim,
+		&i.CreatedAt,
+		&i.UpdatedAt,
 	)
 	return i, err
 }
 
 const lockExpiredPublication = `-- name: LockExpiredPublication :one
-SELECT id, kind, publisher_account_id, channel, counterparty_account_id, product_id, quantity_total, quantity_remaining, unit_price, min_lot, origin_node_id, destination_node_id, delivery_sim_seconds, status, window_closes_at, cancel_cooldown_until, stock_reserve_account_id, guarantee_account_id, escrow_account_id, published_at_sim, created_at, updated_at FROM ledger.publications
+SELECT id, kind, publisher_account_id, channel, counterparty_account_id, product_id, quantity_total, quantity_remaining, unit_price, min_lot, origin_node_id, destination_node_id, delivery_sim_seconds, status, window_closes_at, cancel_cooldown_until, stock_reserve_account_id, guarantee_account_id, escrow_account_id, published_at_sim, created_at, updated_at, declared_value FROM ledger.publications
 WHERE id = $1
   AND status = 'open'
   AND published_at_sim + $2::bigint <= $3::bigint
@@ -1468,6 +1813,7 @@ func (q *Queries) LockExpiredPublication(ctx context.Context, arg LockExpiredPub
 		&i.PublishedAtSim,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.DeclaredValue,
 	)
 	return i, err
 }
@@ -1604,7 +1950,7 @@ const setPublicationCancelled = `-- name: SetPublicationCancelled :one
 UPDATE ledger.publications
    SET status = 'cancelled', updated_at = now()
  WHERE id = $1
-RETURNING id, kind, publisher_account_id, channel, counterparty_account_id, product_id, quantity_total, quantity_remaining, unit_price, min_lot, origin_node_id, destination_node_id, delivery_sim_seconds, status, window_closes_at, cancel_cooldown_until, stock_reserve_account_id, guarantee_account_id, escrow_account_id, published_at_sim, created_at, updated_at
+RETURNING id, kind, publisher_account_id, channel, counterparty_account_id, product_id, quantity_total, quantity_remaining, unit_price, min_lot, origin_node_id, destination_node_id, delivery_sim_seconds, status, window_closes_at, cancel_cooldown_until, stock_reserve_account_id, guarantee_account_id, escrow_account_id, published_at_sim, created_at, updated_at, declared_value
 `
 
 // SetPublicationCancelled marca la publicación como cancelada (la liberación
@@ -1635,6 +1981,7 @@ func (q *Queries) SetPublicationCancelled(ctx context.Context, id uuid.UUID) (Le
 		&i.PublishedAtSim,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.DeclaredValue,
 	)
 	return i, err
 }
@@ -1646,7 +1993,7 @@ UPDATE ledger.publications
        window_closes_at = NULL,
        updated_at = now()
  WHERE id = $3
-RETURNING id, kind, publisher_account_id, channel, counterparty_account_id, product_id, quantity_total, quantity_remaining, unit_price, min_lot, origin_node_id, destination_node_id, delivery_sim_seconds, status, window_closes_at, cancel_cooldown_until, stock_reserve_account_id, guarantee_account_id, escrow_account_id, published_at_sim, created_at, updated_at
+RETURNING id, kind, publisher_account_id, channel, counterparty_account_id, product_id, quantity_total, quantity_remaining, unit_price, min_lot, origin_node_id, destination_node_id, delivery_sim_seconds, status, window_closes_at, cancel_cooldown_until, stock_reserve_account_id, guarantee_account_id, escrow_account_id, published_at_sim, created_at, updated_at, declared_value
 `
 
 type SetPublicationDrawResultParams struct {
@@ -1684,6 +2031,7 @@ func (q *Queries) SetPublicationDrawResult(ctx context.Context, arg SetPublicati
 		&i.PublishedAtSim,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.DeclaredValue,
 	)
 	return i, err
 }
@@ -1692,7 +2040,7 @@ const setPublicationExpired = `-- name: SetPublicationExpired :one
 UPDATE ledger.publications
    SET status = 'expired', updated_at = now()
  WHERE id = $1
-RETURNING id, kind, publisher_account_id, channel, counterparty_account_id, product_id, quantity_total, quantity_remaining, unit_price, min_lot, origin_node_id, destination_node_id, delivery_sim_seconds, status, window_closes_at, cancel_cooldown_until, stock_reserve_account_id, guarantee_account_id, escrow_account_id, published_at_sim, created_at, updated_at
+RETURNING id, kind, publisher_account_id, channel, counterparty_account_id, product_id, quantity_total, quantity_remaining, unit_price, min_lot, origin_node_id, destination_node_id, delivery_sim_seconds, status, window_closes_at, cancel_cooldown_until, stock_reserve_account_id, guarantee_account_id, escrow_account_id, published_at_sim, created_at, updated_at, declared_value
 `
 
 // SetPublicationExpired marca la publicación como expirada (la liberación de la
@@ -1723,6 +2071,7 @@ func (q *Queries) SetPublicationExpired(ctx context.Context, id uuid.UUID) (Ledg
 		&i.PublishedAtSim,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.DeclaredValue,
 	)
 	return i, err
 }
@@ -1733,7 +2082,7 @@ UPDATE ledger.publications
        window_closes_at = now() + $1::bigint * interval '1 second',
        updated_at = now()
  WHERE id = $2
-RETURNING id, kind, publisher_account_id, channel, counterparty_account_id, product_id, quantity_total, quantity_remaining, unit_price, min_lot, origin_node_id, destination_node_id, delivery_sim_seconds, status, window_closes_at, cancel_cooldown_until, stock_reserve_account_id, guarantee_account_id, escrow_account_id, published_at_sim, created_at, updated_at
+RETURNING id, kind, publisher_account_id, channel, counterparty_account_id, product_id, quantity_total, quantity_remaining, unit_price, min_lot, origin_node_id, destination_node_id, delivery_sim_seconds, status, window_closes_at, cancel_cooldown_until, stock_reserve_account_id, guarantee_account_id, escrow_account_id, published_at_sim, created_at, updated_at, declared_value
 `
 
 type SetPublicationMicroWindowParams struct {
@@ -1769,6 +2118,20 @@ func (q *Queries) SetPublicationMicroWindow(ctx context.Context, arg SetPublicat
 		&i.PublishedAtSim,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.DeclaredValue,
 	)
 	return i, err
+}
+
+const shipmentDestinationNode = `-- name: ShipmentDestinationNode :one
+SELECT destination_node_id FROM world.shipments WHERE id = $1
+`
+
+// ShipmentDestinationNode devuelve el nodo destino de un cargamento (el
+// freight_settler ubica ahí el stock_free del cargador al entregar).
+func (q *Queries) ShipmentDestinationNode(ctx context.Context, id uuid.UUID) (*uuid.UUID, error) {
+	row := q.db.QueryRow(ctx, shipmentDestinationNode, id)
+	var destination_node_id *uuid.UUID
+	err := row.Scan(&destination_node_id)
+	return destination_node_id, err
 }

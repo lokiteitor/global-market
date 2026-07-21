@@ -17,6 +17,10 @@ const (
 	// programado (in_maintenance → idle). Default 600 sim.
 	EnvMaintenanceSimSeconds = "II_MAINTENANCE_SIM_SECONDS"
 
+	// EnvSlotValiditySim es la vigencia en sim-time de un slot de prioridad de
+	// terminal comprado (GDD 7.3). Default 2592000 (30 días de sim-time).
+	EnvSlotValiditySim = "II_SLOT_VALIDITY_SIM"
+
 	// EnvSweepInterval es el periodo del barrido del motor de tránsito, en
 	// formato time.ParseDuration. Default 1s wall-clock.
 	EnvSweepInterval = "II_TRANSIT_SWEEP_INTERVAL"
@@ -46,6 +50,7 @@ const (
 const (
 	DefaultQueryTimeout                = 10 * time.Second
 	DefaultMaintenanceSimSeconds int64 = 600
+	DefaultSlotValiditySim       int64 = 2_592_000
 	DefaultSweepInterval               = time.Second
 	DefaultSweepBatchSize              = 100
 	DefaultRepairSimSeconds      int64 = 1800
@@ -69,11 +74,17 @@ type Options struct {
 	QueryTimeout time.Duration
 	// MaintenanceSimSeconds es la duración de un mantenimiento programado (>= 0).
 	MaintenanceSimSeconds int64
+	// SlotValiditySim es la vigencia en sim-time de un slot de prioridad comprado (> 0).
+	SlotValiditySim int64
 }
 
 // DefaultOptions devuelve la configuración por defecto del servicio.
 func DefaultOptions() Options {
-	return Options{QueryTimeout: DefaultQueryTimeout, MaintenanceSimSeconds: DefaultMaintenanceSimSeconds}
+	return Options{
+		QueryTimeout:          DefaultQueryTimeout,
+		MaintenanceSimSeconds: DefaultMaintenanceSimSeconds,
+		SlotValiditySim:       DefaultSlotValiditySim,
+	}
 }
 
 // OptionsFromEnv construye las Options del servicio desde las variables II_*.
@@ -93,6 +104,13 @@ func OptionsFromEnv() (Options, error) {
 		}
 		opts.MaintenanceSimSeconds = n
 	}
+	if v := strings.TrimSpace(os.Getenv(EnvSlotValiditySim)); v != "" {
+		n, err := parseInt64(v)
+		if err != nil {
+			return Options{}, fmt.Errorf("world/fleet: %s inválido %q (entero): %w", EnvSlotValiditySim, v, err)
+		}
+		opts.SlotValiditySim = n
+	}
 	if err := opts.Validate(); err != nil {
 		return Options{}, err
 	}
@@ -106,6 +124,9 @@ func (o Options) Validate() error {
 	}
 	if o.MaintenanceSimSeconds < 0 {
 		return fmt.Errorf("world/fleet: %s debe ser >= 0 (actual %d)", EnvMaintenanceSimSeconds, o.MaintenanceSimSeconds)
+	}
+	if o.SlotValiditySim <= 0 {
+		return fmt.Errorf("world/fleet: %s debe ser > 0 (actual %d)", EnvSlotValiditySim, o.SlotValiditySim)
 	}
 	return nil
 }

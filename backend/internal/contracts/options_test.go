@@ -18,6 +18,8 @@ func TestOptionsFromEnvDefaults(t *testing.T) {
 		PublicationTTLSimSeconds: 604_800,
 		CompensationBP:           5000,
 		LiquidationPriceBP:       6000,
+		FreightGuaranteeBP:       1000,
+		FreightCompensationBP:    5000,
 	}
 	if opts != want {
 		t.Fatalf("defaults: %+v, esperado %+v", opts, want)
@@ -32,6 +34,8 @@ func TestOptionsFromEnvCustom(t *testing.T) {
 	t.Setenv(EnvPublicationTTLSimSeconds, "86400")
 	t.Setenv(EnvCompensationBP, "2500")
 	t.Setenv(EnvLiquidationPriceBP, "7500")
+	t.Setenv(EnvFreightGuaranteeBP, "1500")
+	t.Setenv(EnvFreightCompensationBP, "3000")
 
 	opts, err := OptionsFromEnv()
 	if err != nil {
@@ -44,6 +48,8 @@ func TestOptionsFromEnvCustom(t *testing.T) {
 		PublicationTTLSimSeconds: 86_400,
 		CompensationBP:           2500,
 		LiquidationPriceBP:       7500,
+		FreightGuaranteeBP:       1500,
+		FreightCompensationBP:    3000,
 	}
 	if opts != want {
 		t.Fatalf("opciones: %+v, esperado %+v", opts, want)
@@ -67,6 +73,12 @@ func TestOptionsFromEnvInvalid(t *testing.T) {
 		{EnvLiquidationPriceBP, "10001"},
 		{EnvLiquidationPriceBP, "-1"},
 		{EnvLiquidationPriceBP, "x"},
+		{EnvFreightGuaranteeBP, "0"},
+		{EnvFreightGuaranteeBP, "10001"},
+		{EnvFreightGuaranteeBP, "x"},
+		{EnvFreightCompensationBP, "-1"},
+		{EnvFreightCompensationBP, "10001"},
+		{EnvFreightCompensationBP, "x"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.key+"="+tc.value, func(t *testing.T) {

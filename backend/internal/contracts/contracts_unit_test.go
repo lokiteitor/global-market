@@ -107,7 +107,7 @@ func TestNormalizePublicationInput(t *testing.T) {
 		mutate func(*PublicationInput)
 		want   error
 	}{
-		{"freight es Fase 2", func(i *PublicationInput) { i.Kind = KindFreight }, ErrFreightPhase2},
+		{"freight sin destino/valor declarado", func(i *PublicationInput) { i.Kind = KindFreight }, ErrValidation},
 		{"kind inválido", func(i *PublicationInput) { i.Kind = "swap" }, ErrValidation},
 		{"channel inválido", func(i *PublicationInput) { i.Channel = "dark" }, ErrValidation},
 		{"private sin counterparty", func(i *PublicationInput) { i.Channel = ChannelPrivate }, ErrValidation},

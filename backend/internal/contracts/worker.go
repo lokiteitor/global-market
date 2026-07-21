@@ -37,9 +37,10 @@ const (
 
 // Etiquetas de la métrica de duración por sweep.
 const (
-	sweepDraw   = "draw"
-	sweepExpire = "expire"
-	sweepSettle = "settle"
+	sweepDraw          = "draw"
+	sweepExpire        = "expire"
+	sweepSettle        = "settle"
+	sweepSettleFreight = "settle_freight"
 )
 
 // maxSettleEntries es el máximo de partidas que asienta
@@ -115,6 +116,8 @@ type Worker struct {
 	drawsResolved       prometheus.Counter
 	contractsConfirmed  prometheus.Counter
 	contractsSettled    *prometheus.CounterVec
+	freightsConfirmed   prometheus.Counter
+	freightsSettled     *prometheus.CounterVec
 	publicationsExpired prometheus.Counter
 	sweepDuration       *prometheus.HistogramVec
 }
@@ -148,6 +151,14 @@ func NewWorker(svc *Service, opts WorkerOptions, logger *slog.Logger, reg promet
 			Name: "ii_contracts_settled_total",
 			Help: "Total de contratos CCRI liquidados, por estado final (settled|failed).",
 		}, []string{"status"}),
+		freightsConfirmed: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "ii_freight_contracts_confirmed_total",
+			Help: "Total de contratos de flete confirmados (escrow + garantía + custodia asentados).",
+		}),
+		freightsSettled: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "ii_freight_contracts_settled_total",
+			Help: "Total de contratos de flete liquidados, por estado final (settled|failed).",
+		}, []string{"status"}),
 		publicationsExpired: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "ii_publications_expired_total",
 			Help: "Total de publicaciones abiertas expiradas por TTL de sim-time.",
@@ -160,7 +171,7 @@ func NewWorker(svc *Service, opts WorkerOptions, logger *slog.Logger, reg promet
 	}
 	if reg != nil {
 		reg.MustRegister(w.drawsResolved, w.contractsConfirmed, w.contractsSettled,
-			w.publicationsExpired, w.sweepDuration)
+			w.freightsConfirmed, w.freightsSettled, w.publicationsExpired, w.sweepDuration)
 	}
 	return w, nil
 }
@@ -188,6 +199,7 @@ func (w *Worker) RunOnce(ctx context.Context) {
 	w.runSweep(ctx, sweepDraw, w.resolveDraws)
 	w.runSweep(ctx, sweepExpire, w.expirePublications)
 	w.runSweep(ctx, sweepSettle, w.settleDueContracts)
+	w.runSweep(ctx, sweepSettleFreight, w.settleDueFreights)
 }
 
 // runSweep cronometra un sweep y registra su duración y un error global (el que
@@ -212,11 +224,15 @@ func (w *Worker) runSweep(ctx context.Context, name string, fn func(context.Cont
 // COMMIT: un reintento de serialización re-ejecuta el cuerpo, pero solo el
 // commit definitivo cuenta (evita el doble conteo de los reintentos).
 type sweepCounts struct {
-	confirmed int
-	settled   map[string]int
+	confirmed        int
+	settled          map[string]int
+	freightConfirmed int
+	freightSettled   map[string]int
 }
 
-func newSweepCounts() *sweepCounts { return &sweepCounts{settled: map[string]int{}} }
+func newSweepCounts() *sweepCounts {
+	return &sweepCounts{settled: map[string]int{}, freightSettled: map[string]int{}}
+}
 
 // flush vuelca los recuentos acumulados a las métricas del worker.
 func (w *Worker) flush(c *sweepCounts) {
@@ -225,6 +241,12 @@ func (w *Worker) flush(c *sweepCounts) {
 	}
 	for status, n := range c.settled {
 		w.contractsSettled.WithLabelValues(status).Add(float64(n))
+	}
+	if c.freightConfirmed > 0 {
+		w.freightsConfirmed.Add(float64(c.freightConfirmed))
+	}
+	for status, n := range c.freightSettled {
+		w.freightsSettled.WithLabelValues(status).Add(float64(n))
 	}
 }
 
@@ -291,6 +313,18 @@ func (w *Worker) resolveOneDraw(ctx context.Context, id uuid.UUID) (bool, error)
 				if err := w.releaseUnserved(ctx, r, tx, p, acc, drawOrder, simNow); err != nil {
 					return err
 				}
+				continue
+			}
+			// El flete usa la MISMA maquinaria de sorteo, pero al servir crea un
+			// freight_contract (no un contrato de bienes) y carga la custodia. Si el
+			// cargador ya no tiene el stock, serveFreightAcceptance libera la
+			// aceptación como no servida y devuelve 0 (no consume remaining).
+			if p.Kind == KindFreight {
+				actual, err := w.serveFreightAcceptance(ctx, r, tx, p, acc, served, drawOrder, simNow, counts)
+				if err != nil {
+					return err
+				}
+				remaining -= actual
 				continue
 			}
 			if err := w.serveAcceptance(ctx, r, tx, p, acc, served, drawOrder, simNow, counts); err != nil {

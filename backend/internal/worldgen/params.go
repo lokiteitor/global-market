@@ -183,4 +183,10 @@ const (
 	genRoadBaseSpeedKmh    int32 = 80
 	// Terminales intermodales: capacidad de transbordo por hora (GDD 7.3).
 	terminalTransshipmentPerHour int32 = 120
+	// Slots de prioridad vendibles por terminal (GDD 7.3): cada terminal ofrece
+	// terminalSlotTiers slots de priority_tier 1..N a la venta. El PRECIO crece con
+	// la prioridad (tier 1 = mejor prioridad = más caro): precio(tier k) =
+	// terminalSlotBasePrice · (N − k + 1). El tier N (menor prioridad) cuesta la base.
+	terminalSlotTiers     int   = 3
+	terminalSlotBasePrice int64 = 10_000
 )

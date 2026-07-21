@@ -114,6 +114,15 @@ func run() error {
 	}
 	deliveryConsumer := deliveryConfirmer.NewConsumer(app.Pool(), outbox.WithLogger(app.Logger()))
 
+	// Liquidador de fletes: confirma shipment.arrived de cargamentos de flete y
+	// liquida el CCRI-Flete pro-rata (custodia al cargador en destino, transportista
+	// cobra y recupera garantía por lo entregado a tiempo; GDD 5.3.2).
+	freightSettler, err := contracts.NewFreightSettler(contractsSvc, app.Logger(), app.Metrics().Registry())
+	if err != nil {
+		return err
+	}
+	freightSettlerConsumer := freightSettler.NewConsumer(app.Pool(), outbox.WithLogger(app.Logger()))
+
 	// Liquidador del sistema: consume building.seized (emitido por
 	// world/enforcement al embargar) y subasta PÚBLICAMENTE el stock embargado —
 	// lo transfiere al banco central y lo publica como oferta sell del sistema al
@@ -166,6 +175,13 @@ func run() error {
 	}
 	shipmentCreator := fleet.NewShipmentCreator(app.Logger(), app.Metrics().Registry())
 	shipmentConsumer := shipmentCreator.NewConsumer(app.Pool(), outbox.WithLogger(app.Logger()))
+
+	// Creador de cargamentos de flete: consume freight.confirmed (emitido por el
+	// Contract Service al confirmar un flete) y materializa el cargamento del
+	// cargador en el origen, descontando el inventario físico del almacén (la carga
+	// ya está en custodia contable; el transportista la despacha, GDD 5.3.2).
+	freightShipmentCreator := fleet.NewFreightShipmentCreator(app.Logger(), app.Metrics().Registry())
+	freightShipmentConsumer := freightShipmentCreator.NewConsumer(app.Pool(), outbox.WithLogger(app.Logger()))
 
 	// ── Motor de insolvencia (Incremento 6a): cascada de mantenimiento →
 	//    degradación → abandono → embargo → reversión del suelo, y canon →
@@ -226,11 +242,23 @@ func run() error {
 	// Comparten el ctx de la señal: al apagar, los bucles observan ctx.Done() y
 	// retornan nil (parada limpia). wg los sincroniza antes de cerrar el pool.
 	var wg sync.WaitGroup
-	wg.Add(12)
+	wg.Add(14)
 	go func() {
 		defer wg.Done()
 		if err := worker.Run(ctx); err != nil {
 			app.Logger().Error("contracts: el worker de barridos terminó con error", slog.Any("error", err))
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		if err := freightSettlerConsumer.Run(ctx, consumerInterval, freightSettler.Handle); err != nil {
+			app.Logger().Error("contracts: el consumidor freight_settler terminó con error", slog.Any("error", err))
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		if err := freightShipmentConsumer.Run(ctx, consumerInterval, freightShipmentCreator.Handle); err != nil {
+			app.Logger().Error("world/fleet: el consumidor freight_shipment_creator terminó con error", slog.Any("error", err))
 		}
 	}()
 	go func() {
@@ -319,8 +347,10 @@ func run() error {
 		slog.Int64("repair_sim_seconds", fleetWorkerOpts.RepairSimSeconds),
 		slog.Duration("congestion_interval", fleetWorkerOpts.CongestionInterval),
 		slog.String("shipment_creator", fleet.ConsumerShipmentCreator),
+		slog.String("freight_shipment_creator", fleet.ConsumerFreightShipmentCreator),
 		slog.String("shipment_releaser", fleet.ConsumerShipmentReleaser),
 		slog.String("delivery_confirmer", contracts.ConsumerDeliveryConfirmer),
+		slog.String("freight_settler", contracts.ConsumerFreightSettler),
 		slog.String("system_liquidator", contracts.ConsumerSystemLiquidator),
 		slog.Int("liquidation_price_bp", contractsOpts.LiquidationPriceBP),
 		slog.Duration("maintenance_interval", enforcementWorkerOpts.MaintenanceInterval),

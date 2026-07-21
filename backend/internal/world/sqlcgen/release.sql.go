@@ -87,6 +87,60 @@ func (q *Queries) ListContractShipmentsToRelease(ctx context.Context, contractID
 	return items, nil
 }
 
+const listFreightShipmentsToRelease = `-- name: ListFreightShipmentsToRelease :many
+SELECT sh.id, sh.owner_account_id, sh.product_id, sh.quantity,
+       fc.origin_node_id AS origin_node_id,
+       n.building_id      AS origin_building_id
+FROM world.shipments sh
+JOIN ledger.freight_contracts fc ON fc.id = sh.freight_contract_id
+JOIN world.network_nodes n ON n.id = fc.origin_node_id
+WHERE sh.freight_contract_id = $1
+  AND sh.status IN ('in_warehouse', 'in_transit', 'at_terminal')
+FOR UPDATE OF sh
+`
+
+type ListFreightShipmentsToReleaseRow struct {
+	ID               uuid.UUID
+	OwnerAccountID   uuid.UUID
+	ProductID        uuid.UUID
+	Quantity         int64
+	OriginNodeID     uuid.UUID
+	OriginBuildingID *uuid.UUID
+}
+
+// ListFreightShipmentsToRelease lista los cargamentos AÚN VIVOS de un flete vencido
+// (in_warehouse/in_transit/at_terminal) con el nodo y el almacén de ORIGEN del
+// flete (donde el Contract Service liberó la custodia in situ en el ledger). El
+// lado físico debe casar: el cargamento se marca released_in_situ y su stock vuelve
+// a world.building_inventories del mismo almacén de origen. FOR UPDATE OF sh
+// serializa con el motor de tránsito.
+func (q *Queries) ListFreightShipmentsToRelease(ctx context.Context, freightContractID *uuid.UUID) ([]ListFreightShipmentsToReleaseRow, error) {
+	rows, err := q.db.Query(ctx, listFreightShipmentsToRelease, freightContractID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListFreightShipmentsToReleaseRow
+	for rows.Next() {
+		var i ListFreightShipmentsToReleaseRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.OwnerAccountID,
+			&i.ProductID,
+			&i.Quantity,
+			&i.OriginNodeID,
+			&i.OriginBuildingID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const releaseShipmentInSitu = `-- name: ReleaseShipmentInSitu :exec
 UPDATE world.shipments
    SET status = 'released_in_situ', at_node_id = $1, vehicle_id = NULL,

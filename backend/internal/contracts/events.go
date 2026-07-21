@@ -12,9 +12,10 @@ import (
 // esta misma base; las constantes fijan aquí el contrato completo de eventos
 // del módulo.
 const (
-	AggregatePublication = "publication"
-	AggregateAcceptance  = "acceptance"
-	AggregateContract    = "contract"
+	AggregatePublication     = "publication"
+	AggregateAcceptance      = "acceptance"
+	AggregateContract        = "contract"
+	AggregateFreightContract = "freight_contract"
 
 	EventPublicationCreated   = "publication.created"
 	EventPublicationCancelled = "publication.cancelled"
@@ -31,6 +32,20 @@ const (
 	// teletransporta). La contabilidad la cierra contracts (settle pro-rata); el
 	// movimiento físico lo hace world — integración SOLO por el outbox (SAD §7).
 	EventContractExpiredUndelivered = "contract.expired_undelivered"
+
+	// EventFreightConfirmed lo emite el sorteo al servir una aceptación de flete:
+	// el freight_contract nace activo con escrow/garantía/custodia ya asentados.
+	// Lo consume world (freight_shipment_creator) para materializar el cargamento
+	// del cargador (in_warehouse en origen, ya representando mercancía en custodia)
+	// que el transportista despachará en su vehículo. Integración SOLO por outbox.
+	EventFreightConfirmed = "freight.confirmed"
+	// EventFreightSettled lo emiten el freight_settler (entrega) y el barrido de
+	// vencimiento (fallo) al liquidar un flete pro-rata.
+	EventFreightSettled = "freight.settled"
+	// EventFreightExpiredUndelivered lo emite el barrido de vencimiento cuando un
+	// flete vence SIN entregar: world (shipment_releaser) detiene el cargamento de
+	// custodia aún vivo y lo libera in situ (donde el ledger liberó la custodia).
+	EventFreightExpiredUndelivered = "freight.expired_undelivered"
 )
 
 // Payloads JSON de los eventos. Por el contrato de la API, dinero y stock
@@ -50,6 +65,7 @@ type PublicationCreatedPayload struct {
 	OriginNodeID       string `json:"origin_node_id,omitempty"`
 	DestinationNodeID  string `json:"destination_node_id,omitempty"`
 	DeliverySimSeconds int64  `json:"delivery_sim_seconds"`
+	DeclaredValue      string `json:"declared_value,omitempty"`
 	PublishedAtSim     int64  `json:"published_at_sim"`
 }
 
@@ -157,8 +173,58 @@ type ContractExpiredUndeliveredPayload struct {
 	ExpiredAtSim        int64  `json:"expired_at_sim"`
 }
 
+// FreightConfirmedPayload es el payload de freight.confirmed: el contrato de
+// integración FIJO CCRI-Flete↔Logística. world (freight_shipment_creator)
+// materializa el cargamento del cargador (owner=shipper, freight_contract_id) en
+// el origen a partir de estos campos y descuenta el inventario físico del almacén.
+type FreightConfirmedPayload struct {
+	FreightContractID string `json:"freight_contract_id"`
+	PublicationID     string `json:"publication_id,omitempty"`
+	Channel           string `json:"channel"`
+	ShipperAccountID  string `json:"shipper_account_id"`
+	CarrierAccountID  string `json:"carrier_account_id"`
+	ProductID         string `json:"product_id"`
+	Quantity          string `json:"quantity"`
+	OriginNodeID      string `json:"origin_node_id"`
+	DestinationNodeID string `json:"destination_node_id"`
+	FreightPrice      string `json:"freight_price"`
+	DeclaredValue     string `json:"declared_value"`
+	DeadlineSim       int64  `json:"deadline_sim"`
+	ConfirmedAtSim    int64  `json:"confirmed_at_sim"`
+}
+
+// FreightSettledPayload es el payload de freight.settled (liquidación pro-rata
+// del flete, por entrega o por vencimiento).
+type FreightSettledPayload struct {
+	FreightContractID string `json:"freight_contract_id"`
+	ShipperAccountID  string `json:"shipper_account_id"`
+	CarrierAccountID  string `json:"carrier_account_id"`
+	QuantityTotal     string `json:"quantity_total"`
+	QuantityDelivered string `json:"quantity_delivered"`
+	FreightPrice      string `json:"freight_price"`
+	FillBP            int    `json:"fill_bp"`
+	SettledAtSim      int64  `json:"settled_at_sim"`
+	Status            string `json:"status"` // settled | failed
+}
+
+// FreightExpiredUndeliveredPayload es el payload de freight.expired_undelivered:
+// el flete venció con la carga SIN entregar. Lo consume world para detener y
+// liberar in situ el cargamento de custodia (su ubicación física actual).
+type FreightExpiredUndeliveredPayload struct {
+	FreightContractID string `json:"freight_contract_id"`
+	ExpiredAtSim      int64  `json:"expired_at_sim"`
+}
+
 // fixed serializa un importe/cantidad de punto fijo como string del contrato.
 func fixed(v int64) string { return strconv.FormatInt(v, 10) }
+
+// fixedOrEmpty serializa un importe opcional ("" si es nil, para omitempty).
+func fixedOrEmpty(v *int64) string {
+	if v == nil {
+		return ""
+	}
+	return strconv.FormatInt(*v, 10)
+}
 
 // uuidOrEmpty serializa un uuid opcional ("" si es nil, para omitempty).
 func uuidOrEmpty(id *uuid.UUID) string {

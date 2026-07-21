@@ -25,6 +25,7 @@ const (
 	codeInsufficientFunds       = "INSUFFICIENT_FUNDS"
 	codeVehicleNotIdle          = "VEHICLE_NOT_IDLE"
 	codeShipmentNotDispatchable = "SHIPMENT_NOT_DISPATCHABLE"
+	codeSlotHeld                = "SLOT_HELD"
 )
 
 // Identity resuelve la cuenta autenticada de una petición (la implementa el
@@ -49,6 +50,9 @@ type API interface {
 	ListShipments(ctx context.Context, owner uuid.UUID, f ShipmentFilter) ([]Shipment, string, error)
 	GetShipment(ctx context.Context, owner, id uuid.UUID) (Shipment, error)
 	DispatchShipment(ctx context.Context, owner, shipmentID uuid.UUID, in ShipmentDispatch) (Shipment, error)
+	GetTerminal(ctx context.Context, id uuid.UUID) (Terminal, error)
+	ListTerminalSlots(ctx context.Context, terminalID uuid.UUID, onlyAvailable bool) ([]TerminalSlot, error)
+	PurchaseSlot(ctx context.Context, buyer, slotID uuid.UUID) (TerminalSlot, error)
 }
 
 var _ API = (*Service)(nil)
@@ -80,6 +84,9 @@ func (h *Handlers) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /world/shipments", h.listShipments)
 	mux.HandleFunc("GET /world/shipments/{shipmentId}", h.getShipment)
 	mux.HandleFunc("POST /world/shipments/{shipmentId}/dispatch", h.dispatchShipment)
+	mux.HandleFunc("GET /world/terminals/{terminalId}", h.getTerminal)
+	mux.HandleFunc("GET /world/terminals/{terminalId}/slots", h.listTerminalSlots)
+	mux.HandleFunc("POST /world/terminal-slots/{slotId}/purchase", h.purchaseSlot)
 }
 
 // ─── GET /world/vehicle-types ─────────────────────────────────────────────────
@@ -314,6 +321,72 @@ func (h *Handlers) dispatchShipment(w http.ResponseWriter, r *http.Request) {
 
 // ─── Escritura de respuestas y mapeo de errores ──────────────────────────────
 
+// ─── GET /world/terminals/{terminalId} ────────────────────────────────────────
+
+func (h *Handlers) getTerminal(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.identity.AccountID(r.Context()); !ok {
+		unauthorized(w)
+		return
+	}
+	id, err := uuid.Parse(r.PathValue("terminalId"))
+	if err != nil {
+		notFound(w, "la terminal no existe")
+		return
+	}
+	t, err := h.svc.GetTerminal(r.Context(), id)
+	if err != nil {
+		h.writeError(w, r, err, "consultando la terminal")
+		return
+	}
+	h.writeData(w, r, http.StatusOK, toTerminalJSON(t), "")
+}
+
+// ─── GET /world/terminals/{terminalId}/slots ──────────────────────────────────
+
+func (h *Handlers) listTerminalSlots(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.identity.AccountID(r.Context()); !ok {
+		unauthorized(w)
+		return
+	}
+	id, err := uuid.Parse(r.PathValue("terminalId"))
+	if err != nil {
+		notFound(w, "la terminal no existe")
+		return
+	}
+	onlyAvailable := r.URL.Query().Get("only_available") == "true"
+	slots, err := h.svc.ListTerminalSlots(r.Context(), id, onlyAvailable)
+	if err != nil {
+		h.writeError(w, r, err, "listando slots de la terminal")
+		return
+	}
+	data := make([]terminalSlotJSON, len(slots))
+	for i, s := range slots {
+		data[i] = toTerminalSlotJSON(s)
+	}
+	h.writeData(w, r, http.StatusOK, data, "")
+}
+
+// ─── POST /world/terminal-slots/{slotId}/purchase ─────────────────────────────
+
+func (h *Handlers) purchaseSlot(w http.ResponseWriter, r *http.Request) {
+	buyer, ok := h.identity.AccountID(r.Context())
+	if !ok {
+		unauthorized(w)
+		return
+	}
+	id, err := uuid.Parse(r.PathValue("slotId"))
+	if err != nil {
+		notFound(w, "el slot no existe")
+		return
+	}
+	slot, err := h.svc.PurchaseSlot(r.Context(), buyer, id)
+	if err != nil {
+		h.writeError(w, r, err, "comprando el slot de prioridad")
+		return
+	}
+	h.writeData(w, r, http.StatusOK, toTerminalSlotJSON(slot), "")
+}
+
 func (h *Handlers) writeData(w http.ResponseWriter, r *http.Request, status int, data any, next string) {
 	meta := h.meta.Meta(r.Context())
 	meta.NextCursor = next
@@ -344,6 +417,8 @@ func (h *Handlers) writeError(w http.ResponseWriter, r *http.Request, err error,
 		httpx.WriteError(w, http.StatusConflict, codeVehicleNotIdle, err.Error(), nil)
 	case errors.Is(err, ErrShipmentNotDispatchable):
 		httpx.WriteError(w, http.StatusConflict, codeShipmentNotDispatchable, err.Error(), nil)
+	case errors.Is(err, ErrSlotHeld):
+		httpx.WriteError(w, http.StatusConflict, codeSlotHeld, err.Error(), nil)
 	default:
 		logging.WithRequestID(h.logger, httpx.RequestIDFromContext(r.Context())).LogAttrs(
 			r.Context(), slog.LevelError, "error "+doing, slog.String("error", err.Error()))
@@ -539,4 +614,42 @@ func (b shipmentDispatchJSON) toInput() (ShipmentDispatch, *fieldError) {
 		return ShipmentDispatch{}, &fieldError{"route_id", "no es un UUID válido"}
 	}
 	return ShipmentDispatch{VehicleID: vehicle, RouteID: route}, nil
+}
+
+// ─── DTOs de terminales y slots (schemas Terminal / TerminalSlot) ─────────────
+
+type terminalJSON struct {
+	ID                   string `json:"id"`
+	NodeID               string `json:"node_id"`
+	OwnerAccountID       string `json:"owner_account_id"`
+	TransshipmentPerHour int32  `json:"transshipment_per_hour"`
+	QueueLength          int32  `json:"queue_length"`
+	UpdatedAtSim         int64  `json:"updated_at_sim"`
+}
+
+func toTerminalJSON(t Terminal) terminalJSON {
+	return terminalJSON{
+		ID: t.ID.String(), NodeID: t.NodeID.String(), OwnerAccountID: t.OwnerAccountID.String(),
+		TransshipmentPerHour: t.TransshipmentPerHour, QueueLength: t.QueueLength, UpdatedAtSim: t.UpdatedAtSim,
+	}
+}
+
+type terminalSlotJSON struct {
+	ID              string `json:"id"`
+	TerminalID      string `json:"terminal_id"`
+	PriorityTier    int32  `json:"priority_tier"`
+	Price           string `json:"price"`
+	HolderAccountID string `json:"holder_account_id,omitempty"`
+	ValidUntilSim   *int64 `json:"valid_until_sim,omitempty"`
+}
+
+func toTerminalSlotJSON(s TerminalSlot) terminalSlotJSON {
+	out := terminalSlotJSON{
+		ID: s.ID.String(), TerminalID: s.TerminalID.String(), PriorityTier: s.PriorityTier,
+		Price: strconv.FormatInt(s.Price, 10), ValidUntilSim: s.ValidUntilSim,
+	}
+	if s.HolderAccountID != nil {
+		out.HolderAccountID = s.HolderAccountID.String()
+	}
+	return out
 }

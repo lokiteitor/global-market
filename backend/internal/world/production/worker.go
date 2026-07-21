@@ -53,6 +53,11 @@ type Worker struct {
 	extracted         *prometheus.CounterVec
 	sweepDuration     *prometheus.HistogramVec
 	reconciliationGap prometheus.Gauge
+
+	// reconcileStreak rastrea, por (almacén, producto), cuántas pasadas
+	// CONSECUTIVAS lleva divergiendo la reconciliación: solo el motor lo lee y
+	// escribe (Reconcile no es concurrente consigo mismo), sin lock.
+	reconcileStreak map[discKey]int
 }
 
 // NewWorker construye el motor sobre el pool compartido. reg registra sus
@@ -64,6 +69,11 @@ func NewWorker(pool *pgxpool.Pool, sim SimSource, opts WorkerOptions, logger *sl
 	if sim == nil {
 		return nil, errors.New("world/production: el worker requiere un SimSource")
 	}
+	// Un ReconcileGrace sin fijar (construcción por struct literal) toma el default;
+	// un valor explícito inválido lo rechaza WorkerOptionsFromEnv antes de llegar aquí.
+	if opts.ReconcileGrace < 1 {
+		opts.ReconcileGrace = DefaultReconcileGrace
+	}
 	if err := opts.Validate(); err != nil {
 		return nil, err
 	}
@@ -71,11 +81,12 @@ func NewWorker(pool *pgxpool.Pool, sim SimSource, opts WorkerOptions, logger *sl
 		logger = slog.Default()
 	}
 	w := &Worker{
-		pool:   pool,
-		repo:   NewRepo(pool),
-		sim:    sim,
-		opts:   opts,
-		logger: logger,
+		pool:            pool,
+		repo:            NewRepo(pool),
+		sim:             sim,
+		opts:            opts,
+		logger:          logger,
+		reconcileStreak: map[discKey]int{},
 		constructed: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "ii_buildings_constructed_total",
 			Help: "Total de edificios que completaron su construcción diferida.",
@@ -691,23 +702,62 @@ func (w *Worker) computeWage(ctx context.Context, r *Repo, pb procBatch) (int64,
 
 // ─── (3) Reconciliación física↔contable (ADR-004) ─────────────────────────────
 
-// Reconcile compara el inventario físico contra la suma de stock_free por
-// (almacén, producto) y publica el número de divergencias (gauge, esperado 0).
-// Endpoint interno: no forma parte del contrato.
+// discKey identifica una divergencia por (almacén, producto): la clave con la que
+// el motor rastrea su PERSISTENCIA entre pasadas de reconciliación.
+type discKey struct {
+	building uuid.UUID
+	product  uuid.UUID
+}
+
+// Reconcile compara el inventario físico (building_inventories + cargamentos en
+// vuelo de bienes y de flete, atribuidos al almacén de origen) contra el
+// comprometible contable (stock_free + stock_reserved + custody) por (almacén,
+// producto). Publica el número de divergencias PERSISTENTES (gauge, esperado 0 en
+// reposo). Una divergencia TRANSITORIA —la ventana ~250 ms entre la entrega física
+// y su asiento contable— aparece a lo sumo en una pasada y se registra como DEBUG
+// (esperada); solo una que persiste II_RECONCILE_GRACE pasadas CONSECUTIVAS escala
+// a ERROR. No cambia la semántica de la reconciliación: solo el nivel del log y el
+// conteo de cargamentos en vuelo (que ya incluye la custodia del flete). Endpoint
+// interno: no forma parte del contrato.
 func (w *Worker) Reconcile(ctx context.Context) (int, error) {
 	disc, err := w.repo.ListStockDiscrepancies(ctx, reconcileScanLimit)
 	if err != nil {
 		return 0, err
 	}
-	w.reconciliationGap.Set(float64(len(disc)))
-	for _, d := range disc {
-		w.logger.Error("world/production: divergencia de reconciliación física↔contable",
-			slog.String("building_id", d.BuildingID.String()),
-			slog.String("product_id", d.ProductID.String()),
-			slog.Int64("physical", d.Physical),
-			slog.Int64("ledger", d.Ledger))
+	grace := w.opts.ReconcileGrace
+	if grace < 1 {
+		grace = 1
 	}
-	return len(disc), nil
+	next := make(map[discKey]int, len(disc))
+	persistent := 0
+	for _, d := range disc {
+		k := discKey{building: d.BuildingID, product: d.ProductID}
+		streak := w.reconcileStreak[k] + 1 // pasadas consecutivas divergiendo
+		next[k] = streak
+		if streak >= grace {
+			persistent++
+			w.logger.Error("world/production: divergencia de reconciliación física↔contable PERSISTENTE",
+				slog.String("building_id", d.BuildingID.String()),
+				slog.String("product_id", d.ProductID.String()),
+				slog.Int64("physical", d.Physical),
+				slog.Int64("ledger", d.Ledger),
+				slog.Int("pasadas_consecutivas", streak))
+		} else {
+			w.logger.Debug("world/production: divergencia de reconciliación TRANSITORIA (esperada; aún dentro de la gracia)",
+				slog.String("building_id", d.BuildingID.String()),
+				slog.String("product_id", d.ProductID.String()),
+				slog.Int64("physical", d.Physical),
+				slog.Int64("ledger", d.Ledger),
+				slog.Int("pasadas_consecutivas", streak),
+				slog.Int("gracia", grace))
+		}
+	}
+	// Las claves que ya NO divergen reinician su racha (no persisten en next).
+	w.reconcileStreak = next
+	// El gauge cuenta solo las divergencias ESCALADAS (persistentes): en reposo y
+	// ante transitorias da 0; una divergencia real lo eleva.
+	w.reconciliationGap.Set(float64(persistent))
+	return persistent, nil
 }
 
 // ─── Utilidades ───────────────────────────────────────────────────────────────

@@ -36,10 +36,38 @@ func (q *Queries) CountRouteLegsWrongMode(ctx context.Context, arg CountRouteLeg
 	return wrong, err
 }
 
+const createCashAccount = `-- name: CreateCashAccount :one
+
+INSERT INTO ledger.accounts (id, kind, owner_account_id)
+VALUES ($1, 'cash', $2)
+RETURNING id, balance
+`
+
+type CreateCashAccountParams struct {
+	ID             uuid.UUID
+	OwnerAccountID *uuid.UUID
+}
+
+type CreateCashAccountRow struct {
+	ID      uuid.UUID
+	Balance int64
+}
+
+// La prioridad de un dueño en una terminal (mejor priority_tier vigente) la resuelve
+// ListTerminalTransshipQueue (transit.sql) por subconsulta, al servir la cola.
+// CreateCashAccount crea la caja de una corporación (on-demand): el dueño de una
+// terminal —p. ej. el banco central— puede no tener caja aún al cobrar un slot.
+func (q *Queries) CreateCashAccount(ctx context.Context, arg CreateCashAccountParams) (CreateCashAccountRow, error) {
+	row := q.db.QueryRow(ctx, createCashAccount, arg.ID, arg.OwnerAccountID)
+	var i CreateCashAccountRow
+	err := row.Scan(&i.ID, &i.Balance)
+	return i, err
+}
+
 const dispatchShipment = `-- name: DispatchShipment :exec
 UPDATE world.shipments
    SET vehicle_id = $1, at_node_id = NULL,
-       status = 'in_transit', updated_at_sim = $2
+       status = 'in_transit', transship_ready_at_sim = NULL, updated_at_sim = $2
  WHERE id = $3
 `
 
@@ -50,7 +78,9 @@ type DispatchShipmentParams struct {
 }
 
 // DispatchShipment pone un cargamento a bordo del vehículo y en tránsito (deja el
-// almacén: at_node_id = NULL).
+// almacén: at_node_id = NULL). Limpia transship_ready_at_sim: si el cargamento
+// venía at_terminal (tramo posterior de una ruta multimodal), abandona la cola de
+// esa terminal; un transbordo futuro se sirve de cero.
 func (q *Queries) DispatchShipment(ctx context.Context, arg DispatchShipmentParams) error {
 	_, err := q.db.Exec(ctx, dispatchShipment, arg.VehicleID, arg.SimNow, arg.ID)
 	return err
@@ -85,6 +115,20 @@ func (q *Queries) DispatchVehicle(ctx context.Context, arg DispatchVehicleParams
 		arg.ID,
 	)
 	return err
+}
+
+const getFreightCarrier = `-- name: GetFreightCarrier :one
+SELECT carrier_account_id FROM ledger.freight_contracts WHERE id = $1
+`
+
+// GetFreightCarrier devuelve el transportista de un flete: el despacho de un
+// cargamento de flete lo autoriza el TRANSPORTISTA (no el dueño=cargador). world
+// lee ledger.freight_contracts (cross-schema) sin importar internal/contracts.
+func (q *Queries) GetFreightCarrier(ctx context.Context, id uuid.UUID) (uuid.UUID, error) {
+	row := q.db.QueryRow(ctx, getFreightCarrier, id)
+	var carrier_account_id uuid.UUID
+	err := row.Scan(&carrier_account_id)
+	return carrier_account_id, err
 }
 
 const getNode = `-- name: GetNode :one
@@ -253,6 +297,78 @@ func (q *Queries) GetShipment(ctx context.Context, id uuid.UUID) (GetShipmentRow
 	return i, err
 }
 
+const getSlotForPurchase = `-- name: GetSlotForPurchase :one
+SELECT s.id, s.terminal_id, s.priority_tier, s.price, s.holder_account_id, s.valid_until_sim,
+       t.owner_account_id AS terminal_owner_account_id
+FROM world.terminal_slots s
+JOIN world.terminals t ON t.id = s.terminal_id
+WHERE s.id = $1
+FOR UPDATE OF s
+`
+
+type GetSlotForPurchaseRow struct {
+	ID                     uuid.UUID
+	TerminalID             uuid.UUID
+	PriorityTier           int32
+	Price                  int64
+	HolderAccountID        *uuid.UUID
+	ValidUntilSim          *int64
+	TerminalOwnerAccountID uuid.UUID
+}
+
+// GetSlotForPurchase bloquea un slot (FOR UPDATE) con el dueño de su terminal:
+// la compra valida vigencia y asienta el pago bajo el lock. pgx.ErrNoRows si no existe.
+func (q *Queries) GetSlotForPurchase(ctx context.Context, id uuid.UUID) (GetSlotForPurchaseRow, error) {
+	row := q.db.QueryRow(ctx, getSlotForPurchase, id)
+	var i GetSlotForPurchaseRow
+	err := row.Scan(
+		&i.ID,
+		&i.TerminalID,
+		&i.PriorityTier,
+		&i.Price,
+		&i.HolderAccountID,
+		&i.ValidUntilSim,
+		&i.TerminalOwnerAccountID,
+	)
+	return i, err
+}
+
+const getTerminal = `-- name: GetTerminal :one
+
+SELECT id, node_id, owner_account_id, transshipment_per_hour, queue_length, updated_at_sim
+FROM world.terminals WHERE id = $1
+`
+
+type GetTerminalRow struct {
+	ID                   uuid.UUID
+	NodeID               uuid.UUID
+	OwnerAccountID       uuid.UUID
+	TransshipmentPerHour int32
+	QueueLength          int32
+	UpdatedAtSim         int64
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Terminales y slots de prioridad (GDD 7.3, Incremento 8). Las terminales tienen
+// dueño y venden slots de prioridad de atraque/transbordo (priority_tier menor =
+// más prioritario). El transbordo del motor de tránsito sirve ANTES a los
+// cargamentos de un dueño/transportista con slot vigente.
+// ═════════════════════════════════════════════════════════════════════════════
+// GetTerminal devuelve una terminal por id; pgx.ErrNoRows si no existe.
+func (q *Queries) GetTerminal(ctx context.Context, id uuid.UUID) (GetTerminalRow, error) {
+	row := q.db.QueryRow(ctx, getTerminal, id)
+	var i GetTerminalRow
+	err := row.Scan(
+		&i.ID,
+		&i.NodeID,
+		&i.OwnerAccountID,
+		&i.TransshipmentPerHour,
+		&i.QueueLength,
+		&i.UpdatedAtSim,
+	)
+	return i, err
+}
+
 const getTerminalByNode = `-- name: GetTerminalByNode :one
 SELECT id, node_id, owner_account_id, transshipment_per_hour, queue_length
 FROM world.terminals
@@ -401,6 +517,51 @@ func (q *Queries) GetVehicleType(ctx context.Context, id uuid.UUID) (GetVehicleT
 	return i, err
 }
 
+const insertFreightShipmentInWarehouse = `-- name: InsertFreightShipmentInWarehouse :one
+
+INSERT INTO world.shipments
+    (id, owner_account_id, product_id, quantity, freight_contract_id, at_node_id, destination_node_id, deadline_sim, status, updated_at_sim)
+VALUES
+    ($1, $2, $3, $4,
+     $5, $6, $7, $8,
+     'in_warehouse', $9)
+RETURNING id
+`
+
+type InsertFreightShipmentInWarehouseParams struct {
+	ID                uuid.UUID
+	OwnerAccountID    uuid.UUID
+	ProductID         uuid.UUID
+	Quantity          int64
+	FreightContractID *uuid.UUID
+	AtNodeID          *uuid.UUID
+	DestinationNodeID *uuid.UUID
+	DeadlineSim       *int64
+	SimNow            int64
+}
+
+// ─── Consumidor freight_shipment_creator (freight.confirmed → cargamento) ─────
+// InsertFreightShipmentInWarehouse crea el cargamento del CARGADOR (owner=shipper)
+// in_warehouse en el nodo de origen del flete, etiquetado por freight_contract_id
+// (contract_id NULL: flete puro). El transportista lo despacha en su vehículo; la
+// mercancía ya está en custodia contable (la asentó el Contract Service al confirmar).
+func (q *Queries) InsertFreightShipmentInWarehouse(ctx context.Context, arg InsertFreightShipmentInWarehouseParams) (uuid.UUID, error) {
+	row := q.db.QueryRow(ctx, insertFreightShipmentInWarehouse,
+		arg.ID,
+		arg.OwnerAccountID,
+		arg.ProductID,
+		arg.Quantity,
+		arg.FreightContractID,
+		arg.AtNodeID,
+		arg.DestinationNodeID,
+		arg.DeadlineSim,
+		arg.SimNow,
+	)
+	var id uuid.UUID
+	err := row.Scan(&id)
+	return id, err
+}
+
 const insertShipmentInWarehouse = `-- name: InsertShipmentInWarehouse :one
 
 INSERT INTO world.shipments
@@ -545,6 +706,60 @@ func (q *Queries) ListShipments(ctx context.Context, arg ListShipmentsParams) ([
 			&i.AtNodeID,
 			&i.Status,
 			&i.UpdatedAtSim,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listTerminalSlots = `-- name: ListTerminalSlots :many
+SELECT id, terminal_id, priority_tier, price, holder_account_id, valid_until_sim
+FROM world.terminal_slots
+WHERE terminal_id = $1
+  AND (NOT $2::boolean
+       OR holder_account_id IS NULL
+       OR (valid_until_sim IS NOT NULL AND valid_until_sim < $3::bigint))
+ORDER BY priority_tier, id
+`
+
+type ListTerminalSlotsParams struct {
+	TerminalID    uuid.UUID
+	OnlyAvailable bool
+	SimNow        int64
+}
+
+type ListTerminalSlotsRow struct {
+	ID              uuid.UUID
+	TerminalID      uuid.UUID
+	PriorityTier    int32
+	Price           int64
+	HolderAccountID *uuid.UUID
+	ValidUntilSim   *int64
+}
+
+// ListTerminalSlots lista los slots de una terminal; only_available filtra los
+// que están en venta (sin titular vigente en sim_now).
+func (q *Queries) ListTerminalSlots(ctx context.Context, arg ListTerminalSlotsParams) ([]ListTerminalSlotsRow, error) {
+	rows, err := q.db.Query(ctx, listTerminalSlots, arg.TerminalID, arg.OnlyAvailable, arg.SimNow)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListTerminalSlotsRow
+	for rows.Next() {
+		var i ListTerminalSlotsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.TerminalID,
+			&i.PriorityTier,
+			&i.Price,
+			&i.HolderAccountID,
+			&i.ValidUntilSim,
 		); err != nil {
 			return nil, err
 		}
@@ -748,25 +963,27 @@ func (q *Queries) ListVehicles(ctx context.Context, arg ListVehiclesParams) ([]L
 
 const lockShipmentForDispatch = `-- name: LockShipmentForDispatch :one
 SELECT id, owner_account_id, product_id, quantity, contract_id, freight_contract_id,
-       vehicle_id, at_node_id, destination_node_id, deadline_sim, status, updated_at_sim
+       vehicle_id, at_node_id, destination_node_id, deadline_sim, status, updated_at_sim,
+       transship_ready_at_sim
 FROM world.shipments
 WHERE id = $1
 FOR UPDATE
 `
 
 type LockShipmentForDispatchRow struct {
-	ID                uuid.UUID
-	OwnerAccountID    uuid.UUID
-	ProductID         uuid.UUID
-	Quantity          int64
-	ContractID        *uuid.UUID
-	FreightContractID *uuid.UUID
-	VehicleID         *uuid.UUID
-	AtNodeID          *uuid.UUID
-	DestinationNodeID *uuid.UUID
-	DeadlineSim       *int64
-	Status            WorldShipmentStatus
-	UpdatedAtSim      int64
+	ID                  uuid.UUID
+	OwnerAccountID      uuid.UUID
+	ProductID           uuid.UUID
+	Quantity            int64
+	ContractID          *uuid.UUID
+	FreightContractID   *uuid.UUID
+	VehicleID           *uuid.UUID
+	AtNodeID            *uuid.UUID
+	DestinationNodeID   *uuid.UUID
+	DeadlineSim         *int64
+	Status              WorldShipmentStatus
+	UpdatedAtSim        int64
+	TransshipReadyAtSim *int64
 }
 
 // LockShipmentForDispatch bloquea un cargamento (FOR UPDATE) para despacharlo:
@@ -789,6 +1006,7 @@ func (q *Queries) LockShipmentForDispatch(ctx context.Context, id uuid.UUID) (Lo
 		&i.DeadlineSim,
 		&i.Status,
 		&i.UpdatedAtSim,
+		&i.TransshipReadyAtSim,
 	)
 	return i, err
 }
@@ -861,6 +1079,43 @@ func (q *Queries) NodeHasModeLink(ctx context.Context, arg NodeHasModeLinkParams
 	return accessible, err
 }
 
+const setSlotHolder = `-- name: SetSlotHolder :one
+UPDATE world.terminal_slots
+   SET holder_account_id = $1, valid_until_sim = $2
+ WHERE id = $3
+RETURNING id, terminal_id, priority_tier, price, holder_account_id, valid_until_sim
+`
+
+type SetSlotHolderParams struct {
+	HolderAccountID *uuid.UUID
+	ValidUntilSim   *int64
+	ID              uuid.UUID
+}
+
+type SetSlotHolderRow struct {
+	ID              uuid.UUID
+	TerminalID      uuid.UUID
+	PriorityTier    int32
+	Price           int64
+	HolderAccountID *uuid.UUID
+	ValidUntilSim   *int64
+}
+
+// SetSlotHolder asigna el titular y la vigencia de un slot (compra).
+func (q *Queries) SetSlotHolder(ctx context.Context, arg SetSlotHolderParams) (SetSlotHolderRow, error) {
+	row := q.db.QueryRow(ctx, setSlotHolder, arg.HolderAccountID, arg.ValidUntilSim, arg.ID)
+	var i SetSlotHolderRow
+	err := row.Scan(
+		&i.ID,
+		&i.TerminalID,
+		&i.PriorityTier,
+		&i.Price,
+		&i.HolderAccountID,
+		&i.ValidUntilSim,
+	)
+	return i, err
+}
+
 const setVehicleMaintenance = `-- name: SetVehicleMaintenance :exec
 UPDATE world.vehicles
    SET status = 'in_maintenance', wear_pct = 0,
@@ -907,6 +1162,19 @@ SELECT EXISTS (SELECT 1 FROM world.shipments WHERE contract_id = $1)::boolean AS
 // (guarda de idempotencia del consumidor ante reprocesos, defensiva).
 func (q *Queries) ShipmentExistsForContract(ctx context.Context, contractID *uuid.UUID) (bool, error) {
 	row := q.db.QueryRow(ctx, shipmentExistsForContract, contractID)
+	var present bool
+	err := row.Scan(&present)
+	return present, err
+}
+
+const shipmentExistsForFreightContract = `-- name: ShipmentExistsForFreightContract :one
+SELECT EXISTS (SELECT 1 FROM world.shipments WHERE freight_contract_id = $1)::boolean AS present
+`
+
+// ShipmentExistsForFreightContract indica si ya hay un cargamento para un flete
+// (idempotencia del freight_shipment_creator ante reprocesos).
+func (q *Queries) ShipmentExistsForFreightContract(ctx context.Context, freightContractID *uuid.UUID) (bool, error) {
+	row := q.db.QueryRow(ctx, shipmentExistsForFreightContract, freightContractID)
 	var present bool
 	err := row.Scan(&present)
 	return present, err

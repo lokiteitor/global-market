@@ -3,7 +3,7 @@ $self: https://play.imperio-industrial.example/api/v1/openapi.yaml
 
 info:
   title: Imperio Industrial — API pública
-  version: 1.3.0
+  version: 1.4.0
   summary: API REST del MMO de simulación económica, industrial y logística "Imperio Industrial".
   description: |
     API pública del servidor autoritativo de **Imperio Industrial** (GDD/SAD v1.2).
@@ -47,6 +47,16 @@ info:
 
     ## Changelog
 
+    - **v1.4.0** (2026-07-21): **CCRI-Flete activado** (GDD 5.3.2, antes diferido a Fase 2).
+      Las publicaciones `kind: freight` son **solicitudes del cargador**: bloquean en escrow
+      `quantity_total × unit_price` (la tarifa del flete por unidad) al publicar, declaran el
+      **producto de la carga** en `product_id` (la custodia del ledger es por producto —
+      corrige la documentación previa, que lo daba por ausente en fletes) y su
+      `declared_value` es la base de la **garantía del transportista**, bloqueada al aceptar.
+      La mercancía cargada pasa a una cuenta `custody`: el transportista la lleva físicamente
+      pero **no puede venderla**. `GET /contracts/freight-contracts` devuelve los contratos
+      reales. Los **slots de prioridad de terminal** quedan operativos
+      (`POST /world/terminal-slots/{slotId}/purchase`): dan prioridad de transbordo.
     - **v1.3.0** (2026-07-17): nuevo endpoint `POST /world/shipments/{shipmentId}/dispatch`
       — **ejecución logística del CCRI**: el vendedor carga un cargamento propio en un
       vehículo propio `idle` situado en el nodo del cargamento y lo pone en ruta hasta el
@@ -3051,7 +3061,9 @@ components:
           description: Contraparte fija en negociación privada.
         product_id:
           $ref: '#/components/schemas/ProductId'
-          description: Requerido en `sell` y `buy`; ausente en `freight`.
+          description: |
+            Requerido en los tres tipos. En `freight` identifica el **producto de la carga**:
+            la custodia del ledger es por producto (una cuenta `custody` nombra siempre su activo).
         quantity_total:
           $ref: '#/components/schemas/StockQty'
         quantity_remaining:
@@ -3102,11 +3114,18 @@ components:
           description: Requerido si `channel = private`.
         product_id:
           $ref: '#/components/schemas/ProductId'
-          description: Requerido en `sell` y `buy`.
+          description: |
+            Requerido en los tres tipos. En `freight` es el **producto de la carga**
+            (la custodia del ledger es por producto).
         quantity_total:
           $ref: '#/components/schemas/StockQty'
+          description: En `freight`, la cantidad de carga a transportar.
         unit_price:
           $ref: '#/components/schemas/MoneyAmount'
+          description: |
+            En `sell`/`buy`, precio unitario de la mercancía. En `freight`, **tarifa del flete
+            por unidad de carga**: el cargador bloquea en escrow `quantity_total × unit_price`
+            al publicar.
         min_lot:
           $ref: '#/components/schemas/StockQty'
           default: "1"
@@ -3120,7 +3139,9 @@ components:
           $ref: '#/components/schemas/SimTime'
         declared_value:
           $ref: '#/components/schemas/MoneyAmount'
-          description: Solo `freight`.
+          description: |
+            Solo `freight` (obligatorio): valor declarado de la carga. Es la base de la
+            **garantía del transportista**, que se bloquea al aceptar.
       examples:
         - kind: sell
           product_id: 01981c5e-84b6-7c2a-8d3f-5b7a9c1e3f04

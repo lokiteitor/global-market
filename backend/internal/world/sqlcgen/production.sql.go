@@ -671,11 +671,24 @@ WITH physical AS (
         SELECT building_id, product_id, quantity AS qty
         FROM world.building_inventories
         UNION ALL
+        -- Cargamentos de un CCRI de bienes (contract_id): atribuidos al almacén de
+        -- origen vía la cuenta reservada del contrato.
         SELECT a.warehouse_building_id AS building_id, a.product_id, sh.quantity AS qty
         FROM world.shipments sh
         JOIN ledger.contracts c ON c.id = sh.contract_id
         JOIN ledger.accounts  a ON a.id = c.stock_reserve_account_id
         WHERE sh.status IN ('in_warehouse', 'in_transit', 'at_terminal')
+          AND a.warehouse_building_id IS NOT NULL
+        UNION ALL
+        -- Cargamentos de un CCRI-Flete PURO (freight_contract_id sin contract_id):
+        -- atribuidos al almacén de la cuenta de custodia (su origen). Los que
+        -- componen con una venta ya se cuentan por la rama anterior (contract_id).
+        SELECT a.warehouse_building_id AS building_id, a.product_id, sh.quantity AS qty
+        FROM world.shipments sh
+        JOIN ledger.freight_contracts fc ON fc.id = sh.freight_contract_id
+        JOIN ledger.accounts a ON a.id = fc.custody_account_id
+        WHERE sh.status IN ('in_warehouse', 'in_transit', 'at_terminal')
+          AND sh.contract_id IS NULL
           AND a.warehouse_building_id IS NOT NULL
     ) parts
     GROUP BY building_id, product_id
@@ -683,7 +696,7 @@ WITH physical AS (
 ledger_stock AS (
     SELECT warehouse_building_id, product_id, SUM(balance) AS total
     FROM ledger.accounts
-    WHERE kind IN ('stock_free', 'stock_reserved') AND warehouse_building_id IS NOT NULL
+    WHERE kind IN ('stock_free', 'stock_reserved', 'custody') AND warehouse_building_id IS NOT NULL
     GROUP BY warehouse_building_id, product_id
 )
 SELECT COALESCE(p.building_id, l.warehouse_building_id) AS building_id,
@@ -727,7 +740,12 @@ type ListStockDiscrepanciesRow struct {
 // ListStockDiscrepancies lista las divergencias físico↔contable en ambos
 // sentidos (FULL OUTER JOIN): el físico agrega inventario de edificio + stock de
 // cargamentos en vuelo por (almacén de origen, producto); el contable, el
-// comprometible (stock_free + stock_reserved).
+// comprometible (stock_free + stock_reserved + custody). Desde el Incremento 8
+// (CCRI-Flete) el stock en CUSTODIA cuenta EN AMBOS lados: en el contable como
+// 'custody' (kind incluido abajo) y en el físico como el cargamento de flete
+// (freight_contract_id) atribuido al almacén de la cuenta de custodia (que
+// conserva su warehouse_building_id de origen). Así un flete en vuelo no rompe la
+// reconciliación (queda cuadrado en el almacén de origen hasta la liquidación).
 func (q *Queries) ListStockDiscrepancies(ctx context.Context, pageLimit int32) ([]ListStockDiscrepanciesRow, error) {
 	rows, err := q.db.Query(ctx, listStockDiscrepancies, pageLimit)
 	if err != nil {
