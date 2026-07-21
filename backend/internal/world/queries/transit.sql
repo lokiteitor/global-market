@@ -151,6 +151,31 @@ UPDATE world.shipments
        updated_at_sim = sqlc.arg(sim_now)
  WHERE id = sqlc.arg(id);
 
+-- ─── Transbordo en terminal intermodal (ruta multimodal por tramos) ───────────
+
+-- ListVehicleShipmentsToTransship devuelve los cargamentos a bordo de un vehículo
+-- cuyo destino NO es el nodo de llegada: candidatos a TRANSBORDO cuando el vehículo
+-- termina su tramo en una terminal intermodal (el cargamento cambia de modo, GDD
+-- 7.3). Complementa a ListVehicleShipmentsForNode (que entrega los de destino ese
+-- nodo). FOR UPDATE dentro de la tx del vehículo.
+-- name: ListVehicleShipmentsToTransship :many
+SELECT id, owner_account_id, product_id, quantity, contract_id, freight_contract_id, destination_node_id, deadline_sim
+FROM world.shipments
+WHERE vehicle_id = sqlc.arg(vehicle_id) AND status = 'in_transit'
+  AND (destination_node_id IS NULL OR destination_node_id <> sqlc.arg(node_id))
+FOR UPDATE;
+
+-- TransshipShipment deja un cargamento EN LA TERMINAL (at_terminal) a la espera del
+-- siguiente tramo: reposa en el nodo de la terminal, ya no viaja a bordo. El tiempo
+-- de transbordo lo cobra el siguiente despacho (puerta por transshipment_per_hour),
+-- que solo puede ocurrir tras consumirlo. updated_at_sim marca el momento de
+-- llegada a la terminal (base de esa puerta de tiempo).
+-- name: TransshipShipment :exec
+UPDATE world.shipments
+   SET status = 'at_terminal', at_node_id = sqlc.arg(at_node_id), vehicle_id = NULL,
+       updated_at_sim = sqlc.arg(sim_now)
+ WHERE id = sqlc.arg(id);
+
 -- ─── Congestión (job periódico) y métricas ────────────────────────────────────
 
 -- RecomputeSegmentCongestion recalcula la EMA de TODOS los segmentos en una sola

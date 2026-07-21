@@ -36,7 +36,7 @@ var RoutedEventTypes = []string{
 	"contract.confirmed", "contract.delivered", "contract.settled",
 	"contract.expired_undelivered",
 	// shipment.* → corp del dueño (+ comprador en shipment.arrived)
-	"shipment.created", "shipment.dispatched", "shipment.arrived", "shipment.released",
+	"shipment.created", "shipment.dispatched", "shipment.at_terminal", "shipment.arrived", "shipment.released",
 	// vehicle.* / building.* / batch.* → corp del dueño
 	"vehicle.purchased", "vehicle.updated", "vehicle.arrived", "vehicle.broken", "vehicle.stranded",
 	"building.created", "building.updated", "building.upgraded", "building.constructed",

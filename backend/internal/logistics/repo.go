@@ -154,6 +154,21 @@ func (r *Repo) TerminalsAtNodes(ctx context.Context, nodeIDs []uuid.UUID) (map[u
 	return byNode, nil
 }
 
+// LoadTerminalNodes devuelve todas las terminales del mundo indexadas por su nodo
+// (node → {id, transbordo/hora}). El pathfinding las usa para permitir un cambio de
+// modo solo en un nodo con terminal y para el tiempo de transbordo.
+func (r *Repo) LoadTerminalNodes(ctx context.Context) (map[uuid.UUID]terminalInfo, error) {
+	rows, err := r.q.LoadTerminalNodes(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("logistics: cargando terminales: %w", err)
+	}
+	byNode := make(map[uuid.UUID]terminalInfo, len(rows))
+	for _, row := range rows {
+		byNode[row.NodeID] = terminalInfo{id: row.ID, perHour: int64(row.TransshipmentPerHour)}
+	}
+	return byNode, nil
+}
+
 // LinksByIDs devuelve la topología (modo, extremos) de un conjunto de enlaces,
 // indexada por id (no preserva orden: lo reordena la capa de servicio).
 func (r *Repo) LinksByIDs(ctx context.Context, linkIDs []uuid.UUID) (map[uuid.UUID]linkTopo, error) {

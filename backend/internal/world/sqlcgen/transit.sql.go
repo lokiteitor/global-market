@@ -379,6 +379,66 @@ func (q *Queries) ListVehicleShipmentsForNode(ctx context.Context, arg ListVehic
 	return items, nil
 }
 
+const listVehicleShipmentsToTransship = `-- name: ListVehicleShipmentsToTransship :many
+
+SELECT id, owner_account_id, product_id, quantity, contract_id, freight_contract_id, destination_node_id, deadline_sim
+FROM world.shipments
+WHERE vehicle_id = $1 AND status = 'in_transit'
+  AND (destination_node_id IS NULL OR destination_node_id <> $2)
+FOR UPDATE
+`
+
+type ListVehicleShipmentsToTransshipParams struct {
+	VehicleID *uuid.UUID
+	NodeID    *uuid.UUID
+}
+
+type ListVehicleShipmentsToTransshipRow struct {
+	ID                uuid.UUID
+	OwnerAccountID    uuid.UUID
+	ProductID         uuid.UUID
+	Quantity          int64
+	ContractID        *uuid.UUID
+	FreightContractID *uuid.UUID
+	DestinationNodeID *uuid.UUID
+	DeadlineSim       *int64
+}
+
+// ─── Transbordo en terminal intermodal (ruta multimodal por tramos) ───────────
+// ListVehicleShipmentsToTransship devuelve los cargamentos a bordo de un vehículo
+// cuyo destino NO es el nodo de llegada: candidatos a TRANSBORDO cuando el vehículo
+// termina su tramo en una terminal intermodal (el cargamento cambia de modo, GDD
+// 7.3). Complementa a ListVehicleShipmentsForNode (que entrega los de destino ese
+// nodo). FOR UPDATE dentro de la tx del vehículo.
+func (q *Queries) ListVehicleShipmentsToTransship(ctx context.Context, arg ListVehicleShipmentsToTransshipParams) ([]ListVehicleShipmentsToTransshipRow, error) {
+	rows, err := q.db.Query(ctx, listVehicleShipmentsToTransship, arg.VehicleID, arg.NodeID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListVehicleShipmentsToTransshipRow
+	for rows.Next() {
+		var i ListVehicleShipmentsToTransshipRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.OwnerAccountID,
+			&i.ProductID,
+			&i.Quantity,
+			&i.ContractID,
+			&i.FreightContractID,
+			&i.DestinationNodeID,
+			&i.DeadlineSim,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const lockRecoveryVehicle = `-- name: LockRecoveryVehicle :one
 SELECT id, status, repair_until_sim FROM world.vehicles
 WHERE id = $1 AND status IN ('broken', 'in_maintenance')
@@ -556,5 +616,28 @@ type StrandVehicleParams struct {
 // ruta al despachar (GDD 7.3/CONTEXT). El combustible no cambia (era insuficiente).
 func (q *Queries) StrandVehicle(ctx context.Context, arg StrandVehicleParams) error {
 	_, err := q.db.Exec(ctx, strandVehicle, arg.AtNodeID, arg.SimNow, arg.ID)
+	return err
+}
+
+const transshipShipment = `-- name: TransshipShipment :exec
+UPDATE world.shipments
+   SET status = 'at_terminal', at_node_id = $1, vehicle_id = NULL,
+       updated_at_sim = $2
+ WHERE id = $3
+`
+
+type TransshipShipmentParams struct {
+	AtNodeID *uuid.UUID
+	SimNow   int64
+	ID       uuid.UUID
+}
+
+// TransshipShipment deja un cargamento EN LA TERMINAL (at_terminal) a la espera del
+// siguiente tramo: reposa en el nodo de la terminal, ya no viaja a bordo. El tiempo
+// de transbordo lo cobra el siguiente despacho (puerta por transshipment_per_hour),
+// que solo puede ocurrir tras consumirlo. updated_at_sim marca el momento de
+// llegada a la terminal (base de esa puerta de tiempo).
+func (q *Queries) TransshipShipment(ctx context.Context, arg TransshipShipmentParams) error {
+	_, err := q.db.Exec(ctx, transshipShipment, arg.AtNodeID, arg.SimNow, arg.ID)
 	return err
 }

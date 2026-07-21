@@ -16,6 +16,11 @@ const (
 
 	EventShipmentCreated    = "shipment.created"
 	EventShipmentDispatched = "shipment.dispatched"
+	// EventShipmentAtTerminal es el hito de TRANSBORDO: un cargamento de una ruta
+	// multimodal llegó a una terminal intermodal al final de su tramo de un modo y
+	// espera (at_terminal) el despacho del siguiente tramo en un vehículo del
+	// siguiente modo (GDD 7.3). Hito físico de auditoría (sin consumidor obligado).
+	EventShipmentAtTerminal = "shipment.at_terminal"
 	// EventShipmentArrived es el hito que consume el Contract Service para
 	// confirmar la entrega del CCRI (payload FIJO, ver ShipmentArrivedPayload).
 	EventShipmentArrived = "shipment.arrived"
@@ -114,6 +119,21 @@ type ShipmentArrivedPayload struct {
 	Quantity          string `json:"quantity"`
 	DestinationNodeID string `json:"destination_node_id"`
 	ArrivedAtSim      int64  `json:"arrived_at_sim"`
+}
+
+// ShipmentAtTerminalPayload es el payload de shipment.at_terminal (transbordo de
+// una ruta multimodal: el cargamento espera en la terminal el siguiente tramo).
+// transshipment_seconds es el tiempo de transbordo que debe consumir antes de que
+// el siguiente despacho sea admisible (GDD 7.3).
+type ShipmentAtTerminalPayload struct {
+	ShipmentID           string `json:"shipment_id"`
+	ContractID           string `json:"contract_id,omitempty"`
+	Quantity             string `json:"quantity"`
+	TerminalID           string `json:"terminal_id"`
+	TerminalNodeID       string `json:"terminal_node_id"`
+	DestinationNodeID    string `json:"destination_node_id,omitempty"`
+	TransshipmentSeconds int64  `json:"transshipment_seconds"`
+	AtTerminalAtSim      int64  `json:"at_terminal_at_sim"`
 }
 
 // ShipmentReleasedPayload es el payload de shipment.released (liberación in situ

@@ -160,6 +160,27 @@ SELECT
      WHERE rl.route_id = sqlc.arg(route_id)) AS total_length_m,
   (SELECT COUNT(*)::bigint FROM world.route_legs rl WHERE rl.route_id = sqlc.arg(route_id)) AS leg_count;
 
+-- CountRouteLegsWrongMode cuenta los tramos de una ruta cuyo enlace NO es del modo
+-- dado. El despacho de la Fase 2 es POR TRAMO DE UN SOLO MODO (transbordo explícito
+-- en terminal, GDD 7.3): un vehículo solo puede recorrer enlaces de SU modo, así
+-- que una ruta con algún tramo de otro modo (0 = todos coinciden) no es despachable
+-- por ese vehículo. Un tren no circula por road, ni un camión por rail/sea.
+-- name: CountRouteLegsWrongMode :one
+SELECT COUNT(*)::bigint AS wrong
+FROM world.route_legs rl
+JOIN world.network_links l ON l.id = rl.link_id
+WHERE rl.route_id = sqlc.arg(route_id)
+  AND l.mode <> sqlc.arg(mode)::world.link_mode;
+
+-- GetTerminalByNode devuelve la terminal intermodal de un nodo (si existe): su id,
+-- dueño y capacidad de transbordo por hora. La usan el despacho (puerta de tiempo
+-- de transbordo de un cargamento at_terminal) y el motor de tránsito (decidir si
+-- una llegada intermedia es un transbordo). pgx.ErrNoRows si el nodo no la tiene.
+-- name: GetTerminalByNode :one
+SELECT id, node_id, owner_account_id, transshipment_per_hour, queue_length
+FROM world.terminals
+WHERE node_id = sqlc.arg(node_id);
+
 -- GetRouteFirstSegment devuelve el PRIMER segmento del PRIMER leg de una ruta
 -- (menor leg_index, menor seq) con los parámetros para poblar advance_fn al
 -- despachar (longitud, congestión EMA snapshot, velocidad base del enlace).
@@ -219,8 +240,9 @@ FROM world.shipments
 WHERE id = sqlc.arg(id);
 
 -- LockShipmentForDispatch bloquea un cargamento (FOR UPDATE) para despacharlo:
--- añade el destino del contrato y el plazo (columnas de 0009). pgx.ErrNoRows si
--- no existe.
+-- añade el destino del contrato y el plazo (columnas de 0009). Sirve tanto al
+-- despacho del primer tramo (in_warehouse) como al de un tramo posterior de una
+-- ruta multimodal (at_terminal tras un transbordo). pgx.ErrNoRows si no existe.
 -- name: LockShipmentForDispatch :one
 SELECT id, owner_account_id, product_id, quantity, contract_id, freight_contract_id,
        vehicle_id, at_node_id, destination_node_id, deadline_sim, status, updated_at_sim

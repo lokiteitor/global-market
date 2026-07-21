@@ -4,11 +4,22 @@
 
 ```bash
 make dev        # postgres18+postgis (healthy) + prometheus + grafana + migraciones + seed
+make worldgen   # (opcional) mundo multi-región procedural Fase 2 — aditivo sobre el seed
 make backend    # terminal 2: gateway :8080 + engine :8081
 make frontend   # terminal 3: Nuxt dev en :3000 (proxy /api → :8080)
 ```
 
 Login de desarrollo: corporación `Demo` / secret `demo-secret-dev` (configurable con `II_SEED_DEMO_NAME` / `II_SEED_DEMO_SECRET`; el seed es idempotente y no re-emite capital).
+
+### Mundo multi-región (`make worldgen`, opcional — Incremento 7)
+
+`make worldgen` genera proceduralmente el **mundo Fase 2** (multi-región + ferroviario/marítimo) **encima** del seed: es **aditivo** (conserva intacta la región raíz Askadia (0,0)), **determinista** (misma `II_WORLD_SEED` ⇒ mismo mundo) e **idempotente** (re-ejecutarlo no duplica). **Requiere el seed corrido antes** (banco central, reloj, catálogo mínimo `iron_ore`/`coal`); si falta, aborta con un mensaje claro. Sin él, el entorno arranca con el mundo mínimo de una región (Fase 1) — `make worldgen` es opcional para desarrollo. Vuelca a stdout un resumen (grilla, biomas por celda, ciudades/yacimientos/enlaces/terminales creados). Configuración (defaults del mundo canónico):
+
+| Variable | Default | Efecto |
+|---|---|---|
+| `II_WORLD_SEED` | `42` | Semilla del mundo (misma semilla ⇒ mismo mundo). |
+| `II_WORLD_GRID` | `3` | Lado de la grilla de macro-regiones, **impar**, centrada en (0,0) (3 = las 8 regiones que rodean a Askadia). |
+| `II_WORLD_REGION_SIZE_M` | `50000` | Lado en metros de cada región cuadrada (SRID 0 planar). |
 
 ## Endpoints y puertos
 

@@ -173,6 +173,22 @@ func requiredVolume(quantity int64, unitVolume int32) (int64, error) {
 	return n.Int64(), nil
 }
 
+// transshipmentSeconds calcula el tiempo de transbordo (sim-segundos) de un volumen
+// en una terminal de tasa perHour (unidades de volumen por hora). Se redondea a
+// HORAS enteras —misma granularidad que world.segment_travel_seconds del motor—
+// con suelo de una hora para todo transbordo real. perHour<=0 o volumen<=0
+// (defensivo) → una hora.
+func transshipmentSeconds(volume int64, perHour int32) int64 {
+	if volume <= 0 || perHour <= 0 {
+		return 3600
+	}
+	hours := (volume + int64(perHour) - 1) / int64(perHour) // ceil
+	if hours < 1 {
+		hours = 1
+	}
+	return hours * 3600
+}
+
 // ─── Cursores keyset (id ASC, UUIDv7 ≈ orden de creación) ─────────────────────
 
 type idCursor struct {

@@ -297,6 +297,7 @@ type shipmentHead struct {
 	DestinationNodeID *uuid.UUID
 	DeadlineSim       *int64
 	Status            string
+	UpdatedAtSim      int64
 }
 
 // LockShipmentForDispatch bloquea un cargamento (FOR UPDATE); pgx.ErrNoRows si no
@@ -310,6 +311,7 @@ func (r *Repo) LockShipmentForDispatch(ctx context.Context, id uuid.UUID) (shipm
 		ID: row.ID, OwnerAccountID: row.OwnerAccountID, ProductID: row.ProductID, Quantity: row.Quantity,
 		ContractID: row.ContractID, VehicleID: row.VehicleID, AtNodeID: row.AtNodeID,
 		DestinationNodeID: row.DestinationNodeID, DeadlineSim: row.DeadlineSim, Status: string(row.Status),
+		UpdatedAtSim: row.UpdatedAtSim,
 	}, nil
 }
 
@@ -616,6 +618,80 @@ func (r *Repo) DeliverShipment(ctx context.Context, id, atNode uuid.UUID, simNow
 	node := atNode
 	if err := r.q.DeliverShipment(ctx, sqlcgen.DeliverShipmentParams{AtNodeID: &node, SimNow: int64(simNow), ID: id}); err != nil {
 		return fmt.Errorf("world/fleet: entregando el cargamento %s: %w", id, err)
+	}
+	return nil
+}
+
+// ─── Transbordo en terminal (ruta multimodal por tramos) ──────────────────────
+
+// terminal es la vista mínima de una terminal intermodal (transbordo).
+type terminal struct {
+	ID                   uuid.UUID
+	NodeID               uuid.UUID
+	OwnerAccountID       uuid.UUID
+	TransshipmentPerHour int32
+}
+
+// GetTerminalByNode devuelve la terminal intermodal de un nodo; pgx.ErrNoRows si el
+// nodo no tiene terminal (no es punto de transbordo).
+func (r *Repo) GetTerminalByNode(ctx context.Context, node uuid.UUID) (terminal, error) {
+	row, err := r.q.GetTerminalByNode(ctx, node)
+	if err != nil {
+		return terminal{}, err
+	}
+	return terminal{
+		ID: row.ID, NodeID: row.NodeID, OwnerAccountID: row.OwnerAccountID,
+		TransshipmentPerHour: row.TransshipmentPerHour,
+	}, nil
+}
+
+// CountRouteLegsWrongMode cuenta los tramos de una ruta cuyo enlace no es del modo
+// dado (0 = ruta de un solo modo compatible con el vehículo).
+func (r *Repo) CountRouteLegsWrongMode(ctx context.Context, routeID uuid.UUID, mode string) (int64, error) {
+	n, err := r.q.CountRouteLegsWrongMode(ctx, sqlcgen.CountRouteLegsWrongModeParams{
+		RouteID: routeID, Mode: sqlcgen.WorldLinkMode(mode),
+	})
+	if err != nil {
+		return 0, fmt.Errorf("world/fleet: contando tramos de modo ajeno en la ruta %s: %w", routeID, err)
+	}
+	return n, nil
+}
+
+// transshipCandidate es un cargamento a bordo cuyo destino NO es el nodo de llegada
+// (candidato a transbordo si el nodo tiene terminal).
+type transshipCandidate struct {
+	ID          uuid.UUID
+	Owner       uuid.UUID
+	ProductID   uuid.UUID
+	Quantity    int64
+	ContractID  *uuid.UUID
+	Destination *uuid.UUID
+}
+
+// ListVehicleShipmentsToTransship lista los cargamentos a bordo con destino distinto
+// del nodo de llegada (candidatos a transbordo).
+func (r *Repo) ListVehicleShipmentsToTransship(ctx context.Context, vehicleID, nodeID uuid.UUID) ([]transshipCandidate, error) {
+	vid, nid := vehicleID, nodeID
+	rows, err := r.q.ListVehicleShipmentsToTransship(ctx, sqlcgen.ListVehicleShipmentsToTransshipParams{VehicleID: &vid, NodeID: &nid})
+	if err != nil {
+		return nil, fmt.Errorf("world/fleet: listando cargamentos a transbordar del vehículo %s en %s: %w", vehicleID, nodeID, err)
+	}
+	out := make([]transshipCandidate, len(rows))
+	for i, row := range rows {
+		out[i] = transshipCandidate{
+			ID: row.ID, Owner: row.OwnerAccountID, ProductID: row.ProductID,
+			Quantity: row.Quantity, ContractID: row.ContractID, Destination: row.DestinationNodeID,
+		}
+	}
+	return out, nil
+}
+
+// TransshipShipment deja un cargamento at_terminal en el nodo de la terminal (fuera
+// del vehículo) a la espera del siguiente tramo.
+func (r *Repo) TransshipShipment(ctx context.Context, id, atNode uuid.UUID, simNow simtime.SimTime) error {
+	node := atNode
+	if err := r.q.TransshipShipment(ctx, sqlcgen.TransshipShipmentParams{AtNodeID: &node, SimNow: int64(simNow), ID: id}); err != nil {
+		return fmt.Errorf("world/fleet: transbordando el cargamento %s en %s: %w", id, atNode, err)
 	}
 	return nil
 }

@@ -129,6 +129,43 @@ func (q *Queries) LoadGraphEdges(ctx context.Context, modes []string) ([]LoadGra
 	return items, nil
 }
 
+const loadTerminalNodes = `-- name: LoadTerminalNodes :many
+SELECT id, node_id, transshipment_per_hour
+FROM world.terminals
+`
+
+type LoadTerminalNodesRow struct {
+	ID                   uuid.UUID
+	NodeID               uuid.UUID
+	TransshipmentPerHour int32
+}
+
+// LoadTerminalNodes devuelve TODAS las terminales intermodales del mundo (node_id
+// → id, capacidad de transbordo por hora). El pathfinding las carga una vez por
+// consulta para (a) permitir un cambio de modo SOLO en un nodo con terminal (GDD
+// 7.3: sin terminal, el transbordo no es transitable) y (b) sumar el tiempo de
+// transbordo a la ETA del tramo donde cambia el modo. Las terminales son escasas
+// (una por junction intermodal), así que cargarlas enteras es barato.
+func (q *Queries) LoadTerminalNodes(ctx context.Context) ([]LoadTerminalNodesRow, error) {
+	rows, err := q.db.Query(ctx, loadTerminalNodes)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []LoadTerminalNodesRow
+	for rows.Next() {
+		var i LoadTerminalNodesRow
+		if err := rows.Scan(&i.ID, &i.NodeID, &i.TransshipmentPerHour); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const terminalsAtNodes = `-- name: TerminalsAtNodes :many
 SELECT id, node_id
 FROM world.terminals

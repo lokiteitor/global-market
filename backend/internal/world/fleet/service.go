@@ -379,7 +379,10 @@ func (s *Service) DispatchShipment(ctx context.Context, owner, shipmentID uuid.U
 		if sh.OwnerAccountID != owner {
 			return fmt.Errorf("%w (cargamento %s)", ErrForbidden, shipmentID)
 		}
-		if sh.Status != string(sqlcgen.WorldShipmentStatusInWarehouse) {
+		// Despachable en el primer tramo (in_warehouse) o en un tramo posterior de
+		// una ruta multimodal (at_terminal, tras un transbordo). GDD 7.3.
+		if sh.Status != string(sqlcgen.WorldShipmentStatusInWarehouse) &&
+			sh.Status != string(sqlcgen.WorldShipmentStatusAtTerminal) {
 			return fmt.Errorf("%w (estado %s)", ErrShipmentNotDispatchable, sh.Status)
 		}
 		if sh.AtNodeID == nil {
@@ -416,8 +419,20 @@ func (s *Service) DispatchShipment(ctx context.Context, owner, shipmentID uuid.U
 			return fmt.Errorf("world/fleet: consultando el tipo del vehículo %s: %w", in.VehicleID, err)
 		}
 
+		// Modo: un vehículo SOLO circula por enlaces de SU modo (un tren no va por
+		// road). El despacho es POR TRAMO DE UN SOLO MODO (GDD 7.3): la ruta no puede
+		// contener tramos de otro modo. Una ruta multimodal se recorre en varios
+		// despachos, uno por modo, con transbordo en terminal entre ellos.
+		wrong, err := r.CountRouteLegsWrongMode(ctx, in.RouteID, vt.Mode)
+		if err != nil {
+			return err
+		}
+		if wrong > 0 {
+			return fmt.Errorf("%w (vehículo %s modo %s)", ErrWrongVehicleMode, in.VehicleID, vt.Mode)
+		}
+
 		// Ruta: propiedad y extremos (empieza en el nodo del cargamento, termina en
-		// el destino del contrato).
+		// el destino del contrato O en una terminal de transbordo intermedia).
 		routeOwner, _, err := r.GetRouteOwnerActive(ctx, in.RouteID)
 		switch {
 		case errors.Is(err, pgx.ErrNoRows):
@@ -441,8 +456,15 @@ func (s *Service) DispatchShipment(ctx context.Context, owner, shipmentID uuid.U
 		if ep.FirstFromNode != originNode {
 			return fmt.Errorf("%w: la ruta no empieza en el nodo del cargamento", ErrValidation)
 		}
+		// El tramo termina en el destino final (entrega) O en una terminal de
+		// transbordo intermodal (el cargamento seguirá en otro modo, GDD 7.3). Una
+		// ruta que acaba en un nodo cualquiera dejaría el cargamento varado.
 		if ep.LastToNode != destNode {
-			return fmt.Errorf("%w: la ruta no termina en el nodo destino del contrato", ErrValidation)
+			if _, terr := r.GetTerminalByNode(ctx, ep.LastToNode); errors.Is(terr, pgx.ErrNoRows) {
+				return fmt.Errorf("%w: la ruta no termina en el destino del contrato ni en una terminal de transbordo", ErrValidation)
+			} else if terr != nil {
+				return fmt.Errorf("world/fleet: consultando la terminal del nodo final %s: %w", ep.LastToNode, terr)
+			}
 		}
 
 		// Capacidad de carga: cargo_capacity >= quantity * unit_volume.
@@ -456,6 +478,25 @@ func (s *Service) DispatchShipment(ctx context.Context, owner, shipmentID uuid.U
 		}
 		if vt.CargoCapacity < needVol {
 			return fmt.Errorf("%w: la capacidad del vehículo (%d) no cubre el volumen del cargamento (%d)", ErrValidation, vt.CargoCapacity, needVol)
+		}
+
+		// Puerta de tiempo de transbordo: un cargamento at_terminal no puede
+		// re-despacharse hasta consumir el tiempo de transbordo de la terminal
+		// (transshipment_per_hour · volumen; GDD 7.3). updated_at_sim registra su
+		// llegada a la terminal.
+		if sh.Status == string(sqlcgen.WorldShipmentStatusAtTerminal) {
+			term, terr := r.GetTerminalByNode(ctx, originNode)
+			switch {
+			case errors.Is(terr, pgx.ErrNoRows):
+				// Defensivo: at_terminal en un nodo sin terminal — sin tasa, sin espera.
+			case terr != nil:
+				return fmt.Errorf("world/fleet: consultando la terminal del nodo %s: %w", originNode, terr)
+			default:
+				readyAt := sh.UpdatedAtSim + transshipmentSeconds(needVol, term.TransshipmentPerHour)
+				if int64(simNow) < readyAt {
+					return &TransshipmentPendingError{ReadyAtSim: readyAt, NowSim: int64(simNow)}
+				}
+			}
 		}
 
 		// Combustible: alcanza la distancia total de la ruta.

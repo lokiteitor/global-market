@@ -28,11 +28,14 @@ clean: ## Elimina artefactos de build
 
 # ─── Ejecución ───────────────────────────────────────────────────────────
 .PHONY: dev run backend bots frontend
-dev: infra-core migrate-up seed ## Prepara el entorno local: BD+observabilidad, esquema y seed
+dev: infra-core migrate-up seed ## Prepara el entorno local: BD+observabilidad, esquema y seed (NO encadena worldgen: los tests asumen solo Askadia)
 	@echo ""
 	@echo "Entorno listo. En terminales separados:"
 	@echo "  make backend    # gateway + engine (go run)"
 	@echo "  make frontend   # cliente Nuxt en modo dev"
+	@echo ""
+	@echo "Paso OPCIONAL (mundo multi-región procedural, aditivo sobre Askadia):"
+	@echo "  make worldgen   # genera regiones vecinas + rail/sea (idempotente; II_WORLD_SEED/GRID/REGION_SIZE_M)"
 run: ## Levanta el stack completo en Docker (perfil full)
 	$(COMPOSE) --profile full up -d --build
 backend: ## Ejecuta gateway + engine en local
@@ -88,7 +91,7 @@ infra-logs:
 	$(COMPOSE) logs -f
 
 # ─── Base de datos (ADR-020: migraciones manuales, runner propio) ────────
-.PHONY: migrate-up migrate-down migrate-status migrate-create reset-db seed
+.PHONY: migrate-up migrate-down migrate-status migrate-create reset-db seed worldgen
 migrate-up: ## Aplica las migraciones pendientes
 	cd backend && $(GO) run ./cmd/migrate up
 migrate-down: ## Revierte la última migración (o n=N para varias)
@@ -101,3 +104,5 @@ reset-db: ## Destruye los esquemas de dominio y reaplica todo (solo dev)
 	cd backend && $(GO) run ./cmd/migrate reset
 seed: ## Datos mínimos de desarrollo (cuentas de sistema, demo, reloj del mundo)
 	cd backend && $(GO) run ./cmd/seed
+worldgen: ## Genera el mundo multi-región procedural (aditivo sobre el seed; II_WORLD_SEED/GRID/REGION_SIZE_M)
+	cd backend && $(GO) run ./cmd/worldgen

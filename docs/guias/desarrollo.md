@@ -26,6 +26,10 @@ Audiencia: cualquier desarrollador que se incorpora al proyecto. Complementa (no
 - `make reset-db` ejecuta TODOS los down y re-aplica todo: los down se ejercitan continuamente. Rehúsa ejecutarse con `II_ENV=prod`.
 - En producción, las migraciones se aplican solo en la ventana de mantenimiento diaria (ADR-003).
 
+### Mundo procedural (Incremento 7)
+
+- **`make worldgen`** genera proceduralmente el **mundo multi-región Fase 2** (biomas, ciudades, yacimientos, red ferroviaria/marítima y terminales intermodales) sobre `internal/worldgen`. Es **aditivo** (conserva Askadia (0,0) y su seed), **determinista** (misma `II_WORLD_SEED` ⇒ mismo mundo; value-noise propio + RNG sembrado por celda, **nunca** wall-clock) e **idempotente por clave natural** (re-ejecutarlo no duplica). **Requiere el seed corrido antes.** Paso **opcional** para levantar un mundo multi-región en local; sin él, el entorno usa el mundo mínimo de una región. No añade migraciones (opera tablas de `0003_world`). Variables `II_WORLD_SEED`/`II_WORLD_GRID`/`II_WORLD_REGION_SIZE_M` (defaults en `internal/worldgen/options.go`). Detalle operativo en `docs/runbooks/local.md`.
+
 ### Tests
 
 - `make backend-test` ejecuta unit tests siempre; con `II_TEST_DATABASE_URL` apuntando a un servidor PG18 (el de dev vale: el usuario necesita `CREATEDB`) se habilitan integración y E2E, que crean **bases efímeras propias** y no ensucian la de desarrollo.

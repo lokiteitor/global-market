@@ -37,8 +37,19 @@ var (
 	// ErrVehicleNotIdle: el vehículo no está idle para el despacho (→ 409).
 	ErrVehicleNotIdle = errors.New("world/fleet: el vehículo no está idle")
 
-	// ErrShipmentNotDispatchable: el cargamento ya no está in_warehouse (→ 409).
-	ErrShipmentNotDispatchable = errors.New("world/fleet: el cargamento no está in_warehouse")
+	// ErrShipmentNotDispatchable: el cargamento no es despachable (ni in_warehouse
+	// ni at_terminal) (→ 409).
+	ErrShipmentNotDispatchable = errors.New("world/fleet: el cargamento no es despachable (in_warehouse o at_terminal)")
+
+	// ErrWrongVehicleMode: la ruta contiene tramos de un modo distinto al del
+	// vehículo (un vehículo solo circula por enlaces de SU modo; una ruta multimodal
+	// se despacha por tramos de un solo modo) (→ 422 VALIDATION_ERROR).
+	ErrWrongVehicleMode = fmt.Errorf("%w: la ruta contiene tramos de un modo distinto al del vehículo", ErrValidation)
+
+	// ErrTransshipmentPending: el cargamento at_terminal aún no consumió su tiempo
+	// de transbordo en la terminal y no puede despacharse todavía (→ 409). Con
+	// errors.As se recupera el TransshipmentPendingError con {ready_at_sim}.
+	ErrTransshipmentPending = errors.New("world/fleet: el transbordo en la terminal aún no ha terminado")
 
 	// ErrInvalidCursor: el cursor de paginación no fue emitido por este listado
 	// (→ 400 VALIDATION_ERROR).
@@ -63,3 +74,18 @@ func (e *FundsError) Error() string {
 
 // Unwrap hace que errors.Is(err, ErrInsufficientFunds) sea verdadero.
 func (e *FundsError) Unwrap() error { return ErrInsufficientFunds }
+
+// TransshipmentPendingError detalla que un cargamento at_terminal todavía no ha
+// consumido su tiempo de transbordo: ReadyAtSim es el sim-time a partir del cual el
+// siguiente despacho es admisible. Mapea a 409 (conflicto de estado temporal).
+type TransshipmentPendingError struct {
+	ReadyAtSim int64
+	NowSim     int64
+}
+
+func (e *TransshipmentPendingError) Error() string {
+	return fmt.Sprintf("world/fleet: transbordo en curso: listo en sim %d (ahora %d)", e.ReadyAtSim, e.NowSim)
+}
+
+// Unwrap hace que errors.Is(err, ErrTransshipmentPending) sea verdadero.
+func (e *TransshipmentPendingError) Unwrap() error { return ErrTransshipmentPending }

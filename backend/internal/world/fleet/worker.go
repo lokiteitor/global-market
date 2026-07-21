@@ -42,6 +42,7 @@ type TransitWorker struct {
 
 	inTransit     prometheus.Gauge
 	delivered     prometheus.Counter
+	transshipped  prometheus.Counter
 	breakdowns    prometheus.Counter
 	arrivals      prometheus.Counter
 	stranded      prometheus.Counter
@@ -83,6 +84,10 @@ func NewTransitWorker(pool *pgxpool.Pool, sim SimSource, opts WorkerOptions, log
 			Name: "ii_shipments_delivered_total",
 			Help: "Total de cargamentos entregados físicamente en su nodo destino.",
 		}),
+		transshipped: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "ii_shipment_transshipments_total",
+			Help: "Total de transbordos de cargamentos en terminales intermodales (rutas multimodales).",
+		}),
 		breakdowns: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "ii_vehicle_breakdowns_total",
 			Help: "Total de averías de vehículos en tránsito.",
@@ -106,7 +111,7 @@ func NewTransitWorker(pool *pgxpool.Pool, sim SimSource, opts WorkerOptions, log
 		}, []string{"segment"}),
 	}
 	if reg != nil {
-		reg.MustRegister(w.inTransit, w.delivered, w.breakdowns, w.arrivals, w.stranded, w.sweepDuration, w.congestion)
+		reg.MustRegister(w.inTransit, w.delivered, w.transshipped, w.breakdowns, w.arrivals, w.stranded, w.sweepDuration, w.congestion)
 	}
 	return w, nil
 }
@@ -183,10 +188,11 @@ func (w *TransitWorker) sweepTransit(ctx context.Context) (int, error) {
 // transitOutcome acumula los efectos de procesar un vehículo para volcarlos a las
 // métricas UNA sola vez tras el COMMIT.
 type transitOutcome struct {
-	broke     bool
-	arrived   bool
-	stranded  bool
-	delivered int
+	broke        bool
+	arrived      bool
+	stranded     bool
+	delivered    int
+	transshipped int
 }
 
 // processTransitVehicle bloquea y procesa un vehículo en su propia transacción:
@@ -301,36 +307,91 @@ func (w *TransitWorker) arriveAndDeliver(ctx context.Context, r *Repo, tx pgx.Tx
 	if err != nil {
 		return err
 	}
-	if len(deliveries) == 0 {
-		return nil
+	if len(deliveries) > 0 {
+		// El almacén del nodo destino (network_nodes.building_id) recibe el stock
+		// físico entregado; la propiedad contable la resuelve el settle del CCRI.
+		nodeInfo, err := r.GetNode(ctx, node)
+		if err != nil {
+			return err
+		}
+		for _, sh := range deliveries {
+			if err := r.DeliverShipment(ctx, sh.ID, node, simNow); err != nil {
+				return err
+			}
+			if nodeInfo.BuildingID != nil {
+				if err := r.AddInventory(ctx, *nodeInfo.BuildingID, sh.ProductID, sh.Quantity, simNow); err != nil {
+					return err
+				}
+			} else {
+				w.logger.Warn("world/fleet: nodo destino sin almacén; entrega sin integrar inventario físico",
+					slog.String("node_id", node.String()), slog.String("shipment_id", sh.ID.String()))
+			}
+			if err := outbox.Emit(ctx, tx, int64(simNow), AggregateShipment, sh.ID, EventShipmentArrived, ShipmentArrivedPayload{
+				ShipmentID: sh.ID.String(), ContractID: uuidOrEmpty(sh.ContractID), Quantity: fixed(sh.Quantity),
+				DestinationNodeID: node.String(), ArrivedAtSim: int64(simNow),
+			}); err != nil {
+				return err
+			}
+			oc.delivered++
+		}
 	}
-	// El almacén del nodo destino (network_nodes.building_id) recibe el stock
-	// físico entregado; la propiedad contable la resuelve el settle del CCRI.
-	nodeInfo, err := r.GetNode(ctx, node)
+	// Transbordo: la carga a bordo con destino MÁS ALLÁ de este nodo se queda en la
+	// terminal intermodal (at_terminal) a la espera del siguiente tramo de otro modo.
+	return w.transshipAtTerminal(ctx, r, tx, tv.ID, node, simNow, oc)
+}
+
+// transshipAtTerminal deja en la terminal (at_terminal) los cargamentos a bordo
+// cuyo destino no es el nodo de llegada: es el punto de cambio de modo de una ruta
+// multimodal (GDD 7.3). El siguiente tramo lo despacha el jugador/bot en un
+// vehículo del siguiente modo (transbordo explícito por tramo). Si el nodo no tiene
+// terminal, esa carga no debería estar ahí (el despacho lo previene): se avisa y se
+// deja a bordo del vehículo idle.
+func (w *TransitWorker) transshipAtTerminal(ctx context.Context, r *Repo, tx pgx.Tx, vehicleID, node uuid.UUID, simNow simtime.SimTime, oc *transitOutcome) error {
+	candidates, err := r.ListVehicleShipmentsToTransship(ctx, vehicleID, node)
 	if err != nil {
 		return err
 	}
-	for _, sh := range deliveries {
-		if err := r.DeliverShipment(ctx, sh.ID, node, simNow); err != nil {
+	if len(candidates) == 0 {
+		return nil
+	}
+	term, err := r.GetTerminalByNode(ctx, node)
+	if errors.Is(err, pgx.ErrNoRows) {
+		w.logger.Warn("world/fleet: fin de tramo en nodo sin terminal con carga de otro destino a bordo; queda a bordo",
+			slog.String("node_id", node.String()), slog.String("vehicle_id", vehicleID.String()),
+			slog.Int("cargamentos", len(candidates)))
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	for _, c := range candidates {
+		if err := r.TransshipShipment(ctx, c.ID, node, simNow); err != nil {
 			return err
 		}
-		if nodeInfo.BuildingID != nil {
-			if err := r.AddInventory(ctx, *nodeInfo.BuildingID, sh.ProductID, sh.Quantity, simNow); err != nil {
-				return err
-			}
-		} else {
-			w.logger.Warn("world/fleet: nodo destino sin almacén; entrega sin integrar inventario físico",
-				slog.String("node_id", node.String()), slog.String("shipment_id", sh.ID.String()))
+		vol, verr := requiredVolume(c.Quantity, w.unitVolumeOr1(ctx, r, c.ProductID))
+		if verr != nil {
+			vol = c.Quantity
 		}
-		if err := outbox.Emit(ctx, tx, int64(simNow), AggregateShipment, sh.ID, EventShipmentArrived, ShipmentArrivedPayload{
-			ShipmentID: sh.ID.String(), ContractID: uuidOrEmpty(sh.ContractID), Quantity: fixed(sh.Quantity),
-			DestinationNodeID: node.String(), ArrivedAtSim: int64(simNow),
+		if err := outbox.Emit(ctx, tx, int64(simNow), AggregateShipment, c.ID, EventShipmentAtTerminal, ShipmentAtTerminalPayload{
+			ShipmentID: c.ID.String(), ContractID: uuidOrEmpty(c.ContractID), Quantity: fixed(c.Quantity),
+			TerminalID: term.ID.String(), TerminalNodeID: node.String(), DestinationNodeID: uuidOrEmpty(c.Destination),
+			TransshipmentSeconds: transshipmentSeconds(vol, term.TransshipmentPerHour), AtTerminalAtSim: int64(simNow),
 		}); err != nil {
 			return err
 		}
-		oc.delivered++
+		oc.transshipped++
 	}
 	return nil
+}
+
+// unitVolumeOr1 devuelve el volumen por unidad de un producto (1 si la consulta
+// falla: la cantidad domina el cálculo informativo del tiempo de transbordo).
+func (w *TransitWorker) unitVolumeOr1(ctx context.Context, r *Repo, product uuid.UUID) int32 {
+	uv, err := r.GetProductUnitVolume(ctx, product)
+	if err != nil || uv <= 0 {
+		return 1
+	}
+	return uv
 }
 
 // flush vuelca los efectos acumulados a las métricas tras el COMMIT.
@@ -346,6 +407,9 @@ func (w *TransitWorker) flush(oc *transitOutcome) {
 	}
 	if oc.delivered > 0 {
 		w.delivered.Add(float64(oc.delivered))
+	}
+	if oc.transshipped > 0 {
+		w.transshipped.Add(float64(oc.transshipped))
 	}
 }
 

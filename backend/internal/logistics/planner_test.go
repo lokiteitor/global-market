@@ -20,6 +20,12 @@ var (
 	linkBD = uuid.MustParse("00000000-0000-0000-0000-00000000bd00")
 )
 
+// Grafos de prueba de un SOLO modo (road): no hay cambios de modo, así que las
+// terminales y la penalización de transbordo nunca se consultan.
+var noTerminals map[uuid.UUID]terminalInfo
+
+func noTransship(uuid.UUID) int64 { return 0 }
+
 // edge construye un rawEdge road de longitud/velocidad/congestión dados.
 func edge(id, from, to uuid.UUID, lengthM, speed, capacity int64, congestion, customsBp float64) rawEdge {
 	return rawEdge{
@@ -63,7 +69,7 @@ func TestDijkstraPicksFastestOfAlternatives(t *testing.T) {
 			edge(linkCB, nodeC, nodeB, 60000, 100, 1000, 1.0, 0),  // 60 km ⇒ 1 h (desvío = 2 h)
 		}
 		adj := buildAdjacency(edges, 0, DefaultFuelCostPerKm)
-		path, err := dijkstra(adj, nodeA, nodeB, weight)
+		path, err := dijkstra(adj, nodeA, nodeB, weight, noTerminals, noTransship)
 		if err != nil {
 			t.Fatalf("dijkstra: %v", err)
 		}
@@ -79,7 +85,7 @@ func TestDijkstraPicksFastestOfAlternatives(t *testing.T) {
 			edge(linkCB, nodeC, nodeB, 60000, 100, 1000, 1.0, 0),
 		}
 		adj := buildAdjacency(edges, 0, DefaultFuelCostPerKm)
-		path, err := dijkstra(adj, nodeA, nodeB, weight)
+		path, err := dijkstra(adj, nodeA, nodeB, weight, noTerminals, noTransship)
 		if err != nil {
 			t.Fatalf("dijkstra: %v", err)
 		}
@@ -96,7 +102,7 @@ func TestDijkstraNoRoute(t *testing.T) {
 		edge(linkAC, nodeA, nodeC, 6000, 100, 1000, 1.0, 0), // A→C, pero nada llega a D
 	}
 	adj := buildAdjacency(edges, 0, DefaultFuelCostPerKm)
-	if _, err := dijkstra(adj, nodeA, nodeD, weightSelector(OptimizeTime)); !errors.Is(err, ErrNoRoute) {
+	if _, err := dijkstra(adj, nodeA, nodeD, weightSelector(OptimizeTime), noTerminals, noTransship); !errors.Is(err, ErrNoRoute) {
 		t.Fatalf("esperado ErrNoRoute, obtenido %v", err)
 	}
 }
@@ -113,7 +119,7 @@ func TestDijkstraCostOptimize(t *testing.T) {
 	adj := buildAdjacency(edges, 0, DefaultFuelCostPerKm)
 
 	// Tiempo: el directo (más corto en km) gana pese a las aduanas.
-	timePath, err := dijkstra(adj, nodeA, nodeB, weightSelector(OptimizeTime))
+	timePath, err := dijkstra(adj, nodeA, nodeB, weightSelector(OptimizeTime), noTerminals, noTransship)
 	if err != nil {
 		t.Fatalf("dijkstra time: %v", err)
 	}
@@ -123,7 +129,7 @@ func TestDijkstraCostOptimize(t *testing.T) {
 
 	// Coste: las aduanas del directo (1000 fuel + 600 aduanas = 1600) superan al
 	// desvío (600 + 600 = 1200) → desvía por C.
-	costPath, err := dijkstra(adj, nodeA, nodeB, weightSelector(OptimizeCost))
+	costPath, err := dijkstra(adj, nodeA, nodeB, weightSelector(OptimizeCost), noTerminals, noTransship)
 	if err != nil {
 		t.Fatalf("dijkstra cost: %v", err)
 	}
@@ -143,7 +149,7 @@ func TestCapacityFilterExcludesLink(t *testing.T) {
 	// Volumen 100 > capacidad del directo (50) → el directo se excluye y solo
 	// queda el desvío por C.
 	adj := buildAdjacency(edges, 100, DefaultFuelCostPerKm)
-	path, err := dijkstra(adj, nodeA, nodeB, weightSelector(OptimizeTime))
+	path, err := dijkstra(adj, nodeA, nodeB, weightSelector(OptimizeTime), noTerminals, noTransship)
 	if err != nil {
 		t.Fatalf("dijkstra: %v", err)
 	}
@@ -153,7 +159,7 @@ func TestCapacityFilterExcludesLink(t *testing.T) {
 
 	// Con volumen 40 (<= 50) el directo vuelve a ser viable y gana.
 	adj = buildAdjacency(edges, 40, DefaultFuelCostPerKm)
-	path, err = dijkstra(adj, nodeA, nodeB, weightSelector(OptimizeTime))
+	path, err = dijkstra(adj, nodeA, nodeB, weightSelector(OptimizeTime), noTerminals, noTransship)
 	if err != nil {
 		t.Fatalf("dijkstra: %v", err)
 	}

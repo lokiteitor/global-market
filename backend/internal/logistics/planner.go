@@ -31,7 +31,17 @@ type Planner interface {
 type graphLoader interface {
 	NetworkNodeExists(ctx context.Context, id uuid.UUID) (bool, error)
 	LoadGraphEdges(ctx context.Context, modes []string) ([]rawEdge, error)
-	TerminalsAtNodes(ctx context.Context, nodeIDs []uuid.UUID) (map[uuid.UUID]uuid.UUID, error)
+	// LoadTerminalNodes devuelve TODAS las terminales del mundo (node → terminal):
+	// el pathfinding permite un cambio de modo SOLO en un nodo con terminal (GDD 7.3)
+	// y suma su tiempo de transbordo a la ETA.
+	LoadTerminalNodes(ctx context.Context) (map[uuid.UUID]terminalInfo, error)
+}
+
+// terminalInfo es la terminal intermodal de un nodo: su id y la capacidad de
+// transbordo por hora (para el tiempo de transbordo del cambio de modo).
+type terminalInfo struct {
+	id      uuid.UUID
+	perHour int64
 }
 
 // rawEdge es un enlace cargado del grafo con los agregados de sus segmentos
@@ -117,24 +127,64 @@ func (p *dijkstraPlanner) Plan(ctx context.Context, req PlanRequest) (RoutePlan,
 	if err != nil {
 		return RoutePlan{}, err
 	}
+	terminals, err := p.loader.LoadTerminalNodes(ctx)
+	if err != nil {
+		return RoutePlan{}, err
+	}
 	adj := buildAdjacency(edges, req.CargoVolume, p.fuelCostPerKm)
 
 	weight := weightSelector(optimize)
-	path, err := dijkstra(adj, req.Origin, req.Destination, weight)
+	// Penalización de transbordo (tiempo perdido en la terminal al cambiar de modo).
+	// Solo afecta al peso cuando se optimiza por TIEMPO; para coste no hay coste
+	// monetario de transbordo en la Fase 2 (diferido). En ambos criterios la ETA
+	// reportada incluye el transbordo (assemblePlan).
+	transship := func(node uuid.UUID) int64 {
+		if optimize != OptimizeTime {
+			return 0
+		}
+		return transshipEta(terminals, node, req.CargoVolume)
+	}
+	path, err := dijkstra(adj, req.Origin, req.Destination, weight, terminals, transship)
 	if err != nil {
 		return RoutePlan{}, err
 	}
 
-	return p.assemblePlan(ctx, req, path)
+	return p.assemblePlan(req, path, terminals)
+}
+
+// transshipEta devuelve el tiempo de transbordo (sim-segundos) en la terminal de un
+// nodo para un volumen dado (0 si el nodo no tiene terminal).
+func transshipEta(terminals map[uuid.UUID]terminalInfo, node uuid.UUID, volume int64) int64 {
+	t, ok := terminals[node]
+	if !ok {
+		return 0
+	}
+	return transshipmentSeconds(volume, t.perHour)
+}
+
+// transshipmentSeconds calcula el tiempo de transbordo (sim-segundos) de un volumen
+// en una terminal de tasa perHour. Redondeo a HORAS (granularidad de la ETA de los
+// tramos) con suelo de una hora; réplica de la fórmula del motor de tránsito de
+// world (world/fleet) para que la ETA planificada no diverja de la ejecución.
+func transshipmentSeconds(volume, perHour int64) int64 {
+	if volume <= 0 || perHour <= 0 {
+		return 3600
+	}
+	hours := (volume + perHour - 1) / perHour
+	if hours < 1 {
+		hours = 1
+	}
+	return hours * 3600
 }
 
 // assemblePlan construye el RoutePlan a partir del camino: ETAs por tramo, ETA
-// total, coste estimado (escalado por el volumen) y las terminales de transbordo
-// en los cambios de modo.
-func (p *dijkstraPlanner) assemblePlan(ctx context.Context, req PlanRequest, path []planEdge) (RoutePlan, error) {
+// total (tramos + transbordos), coste estimado (escalado por el volumen) y las
+// terminales de transbordo en los cambios de modo. El grafo garantiza (dijkstra)
+// que todo cambio de modo ocurre en un nodo con terminal, así que
+// transshipment_terminal_id siempre está presente donde cambia el modo.
+func (p *dijkstraPlanner) assemblePlan(req PlanRequest, path []planEdge, terminals map[uuid.UUID]terminalInfo) (RoutePlan, error) {
 	var totalEta, baseCost int64
 	var ok bool
-	junctionNodes := make([]uuid.UUID, 0)
 	for i := range path {
 		if totalEta, ok = addNonNeg(totalEta, path[i].eta); !ok {
 			return RoutePlan{}, ErrOverflow
@@ -142,16 +192,13 @@ func (p *dijkstraPlanner) assemblePlan(ctx context.Context, req PlanRequest, pat
 		if baseCost, ok = addNonNeg(baseCost, path[i].cost); !ok {
 			return RoutePlan{}, ErrOverflow
 		}
+		// Cambio de modo: suma el tiempo de transbordo de la terminal a la ETA total
+		// (el transbordo consume tiempo en la terminal, GDD 7.3).
 		if i+1 < len(path) && path[i].mode != path[i+1].mode {
-			junctionNodes = append(junctionNodes, path[i].to)
+			if totalEta, ok = addNonNeg(totalEta, transshipEta(terminals, path[i].to, req.CargoVolume)); !ok {
+				return RoutePlan{}, ErrOverflow
+			}
 		}
-	}
-
-	// Terminales de transbordo: solo se consultan las de los nodos donde cambia
-	// el modo (coste ∝ cambios, no ∝ tramos).
-	terminals := map[uuid.UUID]uuid.UUID{}
-	if len(junctionNodes) > 0 {
-		terminals, _ = p.loader.TerminalsAtNodes(ctx, junctionNodes)
 	}
 
 	estimated, err := scaleByVolume(baseCost, req.CargoVolume)
@@ -163,8 +210,8 @@ func (p *dijkstraPlanner) assemblePlan(ctx context.Context, req PlanRequest, pat
 	for i, e := range path {
 		leg := RoutePlanLeg{Seq: i, LinkID: e.linkID, Mode: e.mode, EtaSimSeconds: e.eta}
 		if i+1 < len(path) && e.mode != path[i+1].mode {
-			if tid, present := terminals[e.to]; present {
-				id := tid
+			if t, present := terminals[e.to]; present {
+				id := t.id
 				leg.TransshipmentTerminalID = &id
 			}
 		}
@@ -275,53 +322,84 @@ func addNonNeg(a, b int64) (int64, bool) {
 	return s, true
 }
 
-// ─── Dijkstra con min-heap ───────────────────────────────────────────────────
+// ─── Dijkstra con min-heap sobre estados (nodo, modo de llegada) ─────────────
+
+// state es un estado del grafo expandido: un nodo alcanzado por un enlace de un
+// modo concreto. El modo de llegada condiciona los enlaces de salida admisibles:
+// un cambio de modo (multimodal) solo es transitable en un nodo con terminal
+// intermodal (GDD 7.3). El origen usa el modo sentinela "" (sin llegada previa:
+// cualquier primer modo vale).
+type state struct {
+	node uuid.UUID
+	mode string
+}
 
 // dijkstra calcula el camino de coste mínimo (según weight) entre origin y dest
-// sobre la lista de adyacencia dirigida. Devuelve las aristas del camino en
-// orden (origen→destino) o ErrNoRoute si dest es inalcanzable. Pesos no
-// negativos ⇒ al extraer un nodo del heap su distancia es definitiva.
-func dijkstra(adj map[uuid.UUID][]planEdge, origin, dest uuid.UUID, weight func(planEdge) int64) ([]planEdge, error) {
-	dist := map[uuid.UUID]int64{origin: 0}
-	prevEdge := map[uuid.UUID]planEdge{}
-	prevNode := map[uuid.UUID]uuid.UUID{}
-	settled := map[uuid.UUID]bool{}
+// sobre el grafo EXPANDIDO por modo de llegada. Un cambio de modo solo se permite
+// en un nodo con terminal (terminals[node] presente) y suma transshipPenalty(node)
+// al peso; sin terminal, ese cambio no es transitable. Devuelve las aristas del
+// camino en orden (origen→destino) o ErrNoRoute si dest es inalcanzable con esas
+// restricciones. Pesos no negativos ⇒ al extraer un estado del heap su distancia es
+// definitiva.
+func dijkstra(adj map[uuid.UUID][]planEdge, origin, dest uuid.UUID, weight func(planEdge) int64,
+	terminals map[uuid.UUID]terminalInfo, transshipPenalty func(node uuid.UUID) int64) ([]planEdge, error) {
+	start := state{node: origin, mode: ""}
+	dist := map[state]int64{start: 0}
+	prevEdge := map[state]planEdge{}
+	prevState := map[state]state{}
+	settled := map[state]bool{}
 
-	pq := &nodeHeap{{node: origin, dist: 0}}
+	pq := &stateHeap{{st: start, dist: 0}}
+	var end state
+	found := false
 	for pq.Len() > 0 {
-		cur := heap.Pop(pq).(nodeDist)
-		if settled[cur.node] {
+		cur := heap.Pop(pq).(stateDist)
+		if settled[cur.st] {
 			continue // entrada obsoleta (relajación posterior mejor)
 		}
-		settled[cur.node] = true
-		if cur.node == dest {
+		settled[cur.st] = true
+		if cur.st.node == dest {
+			end = cur.st
+			found = true
 			break
 		}
-		for _, e := range adj[cur.node] {
-			if settled[e.to] {
+		for _, e := range adj[cur.st.node] {
+			// Cambio de modo: solo transitable en un nodo con terminal intermodal.
+			modeChange := cur.st.mode != "" && e.mode != cur.st.mode
+			if modeChange {
+				if _, ok := terminals[cur.st.node]; !ok {
+					continue
+				}
+			}
+			next := state{node: e.to, mode: e.mode}
+			if settled[next] {
 				continue
 			}
-			nd, ok := addNonNeg(cur.dist, weight(e))
+			step := weight(e)
+			if modeChange {
+				step += transshipPenalty(cur.st.node)
+			}
+			nd, ok := addNonNeg(cur.dist, step)
 			if !ok {
 				continue // desbordamiento: tratar como inalcanzable por esta arista
 			}
-			if best, seen := dist[e.to]; !seen || nd < best {
-				dist[e.to] = nd
-				prevEdge[e.to] = e
-				prevNode[e.to] = cur.node
-				heap.Push(pq, nodeDist{node: e.to, dist: nd})
+			if best, seen := dist[next]; !seen || nd < best {
+				dist[next] = nd
+				prevEdge[next] = e
+				prevState[next] = cur.st
+				heap.Push(pq, stateDist{st: next, dist: nd})
 			}
 		}
 	}
 
-	if !settled[dest] {
+	if !found {
 		return nil, fmt.Errorf("%w (%s → %s)", ErrNoRoute, origin, dest)
 	}
 
-	// Reconstrucción origen→destino.
+	// Reconstrucción origen→destino recorriendo los estados previos.
 	var rev []planEdge
-	for n := dest; n != origin; n = prevNode[n] {
-		rev = append(rev, prevEdge[n])
+	for s := end; s != start; s = prevState[s] {
+		rev = append(rev, prevEdge[s])
 	}
 	for i, j := 0, len(rev)-1; i < j; i, j = i+1, j-1 {
 		rev[i], rev[j] = rev[j], rev[i]
@@ -329,21 +407,21 @@ func dijkstra(adj map[uuid.UUID][]planEdge, origin, dest uuid.UUID, weight func(
 	return rev, nil
 }
 
-// nodeDist es una entrada del min-heap de Dijkstra (nodo con su distancia
+// stateDist es una entrada del min-heap de Dijkstra (estado con su distancia
 // tentativa).
-type nodeDist struct {
-	node uuid.UUID
+type stateDist struct {
+	st   state
 	dist int64
 }
 
-// nodeHeap es un min-heap por distancia (container/heap).
-type nodeHeap []nodeDist
+// stateHeap es un min-heap por distancia (container/heap).
+type stateHeap []stateDist
 
-func (h nodeHeap) Len() int           { return len(h) }
-func (h nodeHeap) Less(i, j int) bool { return h[i].dist < h[j].dist }
-func (h nodeHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
-func (h *nodeHeap) Push(x any)        { *h = append(*h, x.(nodeDist)) }
-func (h *nodeHeap) Pop() any {
+func (h stateHeap) Len() int           { return len(h) }
+func (h stateHeap) Less(i, j int) bool { return h[i].dist < h[j].dist }
+func (h stateHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h *stateHeap) Push(x any)        { *h = append(*h, x.(stateDist)) }
+func (h *stateHeap) Pop() any {
 	old := *h
 	n := len(old)
 	it := old[n-1]

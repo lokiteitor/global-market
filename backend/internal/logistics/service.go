@@ -22,9 +22,10 @@ type Service struct {
 	opts    Options
 	logger  *slog.Logger
 
-	routePlans    *prometheus.CounterVec
-	routesCreated prometheus.Counter
-	planDuration  prometheus.Histogram
+	routePlans           *prometheus.CounterVec
+	routePlansMultimodal prometheus.Counter
+	routesCreated        prometheus.Counter
+	planDuration         prometheus.Histogram
 }
 
 // NewService construye el servicio sobre el pool compartido de la plataforma.
@@ -52,6 +53,10 @@ func NewService(pool *pgxpool.Pool, opts Options, logger *slog.Logger, reg prome
 			Name: "ii_route_plans_total",
 			Help: "Total de route-plans calculados, por resultado (found, no_route, not_found, invalid, error).",
 		}, []string{"result"}),
+		routePlansMultimodal: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "ii_route_plans_multimodal_total",
+			Help: "Total de route-plans hallados que son multimodales (≥2 modos con transbordo en terminal).",
+		}),
 		routesCreated: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "ii_routes_created_total",
 			Help: "Total de rutas creadas por las corporaciones.",
@@ -63,7 +68,7 @@ func NewService(pool *pgxpool.Pool, opts Options, logger *slog.Logger, reg prome
 		}),
 	}
 	if reg != nil {
-		reg.MustRegister(s.routePlans, s.routesCreated, s.planDuration)
+		reg.MustRegister(s.routePlans, s.routePlansMultimodal, s.routesCreated, s.planDuration)
 	}
 	return s, nil
 }
@@ -101,13 +106,33 @@ func (s *Service) PlanRoute(ctx context.Context, req PlanRequest) (RoutePlan, er
 		return RoutePlan{}, err
 	}
 	s.routePlans.WithLabelValues("found").Inc()
+	multimodal := isMultimodal(plan)
+	if multimodal {
+		s.routePlansMultimodal.Inc()
+	}
 	s.logger.Info("route-plan calculado",
 		slog.String("origin", req.Origin.String()),
 		slog.String("destination", req.Destination.String()),
 		slog.String("optimize", req.Optimize),
 		slog.Int("legs", len(plan.Legs)),
+		slog.Bool("multimodal", multimodal),
 		slog.Int64("total_eta_sim_seconds", plan.TotalEtaSimSeconds))
 	return plan, nil
+}
+
+// isMultimodal indica si un plan combina ≥2 modos de transporte (implica al menos
+// un transbordo en terminal).
+func isMultimodal(plan RoutePlan) bool {
+	if len(plan.Legs) < 2 {
+		return false
+	}
+	first := plan.Legs[0].Mode
+	for _, leg := range plan.Legs[1:] {
+		if leg.Mode != first {
+			return true
+		}
+	}
+	return false
 }
 
 // Planner devuelve el planner del servicio (la interface lista para la jerarquía

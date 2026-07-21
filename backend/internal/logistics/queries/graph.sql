@@ -41,6 +41,16 @@ SELECT id, node_id
 FROM world.terminals
 WHERE node_id = ANY(sqlc.arg(node_ids)::uuid[]);
 
+-- LoadTerminalNodes devuelve TODAS las terminales intermodales del mundo (node_id
+-- → id, capacidad de transbordo por hora). El pathfinding las carga una vez por
+-- consulta para (a) permitir un cambio de modo SOLO en un nodo con terminal (GDD
+-- 7.3: sin terminal, el transbordo no es transitable) y (b) sumar el tiempo de
+-- transbordo a la ETA del tramo donde cambia el modo. Las terminales son escasas
+-- (una por junction intermodal), así que cargarlas enteras es barato.
+-- name: LoadTerminalNodes :many
+SELECT id, node_id, transshipment_per_hour
+FROM world.terminals;
+
 -- LinksByIDs devuelve la topología (modo, extremos) de un conjunto de enlaces
 -- para validar la contigüidad y el multimodalismo de una ruta. NO preserva el
 -- orden de entrada: la capa de servicio reordena por la secuencia pedida y

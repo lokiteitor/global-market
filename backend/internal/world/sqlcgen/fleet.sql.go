@@ -11,6 +11,31 @@ import (
 	"github.com/google/uuid"
 )
 
+const countRouteLegsWrongMode = `-- name: CountRouteLegsWrongMode :one
+SELECT COUNT(*)::bigint AS wrong
+FROM world.route_legs rl
+JOIN world.network_links l ON l.id = rl.link_id
+WHERE rl.route_id = $1
+  AND l.mode <> $2::world.link_mode
+`
+
+type CountRouteLegsWrongModeParams struct {
+	RouteID uuid.UUID
+	Mode    WorldLinkMode
+}
+
+// CountRouteLegsWrongMode cuenta los tramos de una ruta cuyo enlace NO es del modo
+// dado. El despacho de la Fase 2 es POR TRAMO DE UN SOLO MODO (transbordo explícito
+// en terminal, GDD 7.3): un vehículo solo puede recorrer enlaces de SU modo, así
+// que una ruta con algún tramo de otro modo (0 = todos coinciden) no es despachable
+// por ese vehículo. Un tren no circula por road, ni un camión por rail/sea.
+func (q *Queries) CountRouteLegsWrongMode(ctx context.Context, arg CountRouteLegsWrongModeParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countRouteLegsWrongMode, arg.RouteID, arg.Mode)
+	var wrong int64
+	err := row.Scan(&wrong)
+	return wrong, err
+}
+
 const dispatchShipment = `-- name: DispatchShipment :exec
 UPDATE world.shipments
    SET vehicle_id = $1, at_node_id = NULL,
@@ -224,6 +249,37 @@ func (q *Queries) GetShipment(ctx context.Context, id uuid.UUID) (GetShipmentRow
 		&i.AtNodeID,
 		&i.Status,
 		&i.UpdatedAtSim,
+	)
+	return i, err
+}
+
+const getTerminalByNode = `-- name: GetTerminalByNode :one
+SELECT id, node_id, owner_account_id, transshipment_per_hour, queue_length
+FROM world.terminals
+WHERE node_id = $1
+`
+
+type GetTerminalByNodeRow struct {
+	ID                   uuid.UUID
+	NodeID               uuid.UUID
+	OwnerAccountID       uuid.UUID
+	TransshipmentPerHour int32
+	QueueLength          int32
+}
+
+// GetTerminalByNode devuelve la terminal intermodal de un nodo (si existe): su id,
+// dueño y capacidad de transbordo por hora. La usan el despacho (puerta de tiempo
+// de transbordo de un cargamento at_terminal) y el motor de tránsito (decidir si
+// una llegada intermedia es un transbordo). pgx.ErrNoRows si el nodo no la tiene.
+func (q *Queries) GetTerminalByNode(ctx context.Context, nodeID uuid.UUID) (GetTerminalByNodeRow, error) {
+	row := q.db.QueryRow(ctx, getTerminalByNode, nodeID)
+	var i GetTerminalByNodeRow
+	err := row.Scan(
+		&i.ID,
+		&i.NodeID,
+		&i.OwnerAccountID,
+		&i.TransshipmentPerHour,
+		&i.QueueLength,
 	)
 	return i, err
 }
@@ -714,8 +770,9 @@ type LockShipmentForDispatchRow struct {
 }
 
 // LockShipmentForDispatch bloquea un cargamento (FOR UPDATE) para despacharlo:
-// añade el destino del contrato y el plazo (columnas de 0009). pgx.ErrNoRows si
-// no existe.
+// añade el destino del contrato y el plazo (columnas de 0009). Sirve tanto al
+// despacho del primer tramo (in_warehouse) como al de un tramo posterior de una
+// ruta multimodal (at_terminal tras un transbordo). pgx.ErrNoRows si no existe.
 func (q *Queries) LockShipmentForDispatch(ctx context.Context, id uuid.UUID) (LockShipmentForDispatchRow, error) {
 	row := q.db.QueryRow(ctx, lockShipmentForDispatch, id)
 	var i LockShipmentForDispatchRow
