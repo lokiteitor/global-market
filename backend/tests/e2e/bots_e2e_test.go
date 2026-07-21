@@ -43,7 +43,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -124,7 +123,6 @@ func TestBotsEconomyE2E(t *testing.T) {
 	coalID := queryUUID(t, ctx, pool, `SELECT id FROM world.products WHERE code = 'coal'`)
 	ironOreID := queryUUID(t, ctx, pool, `SELECT id FROM world.products WHERE code = 'iron_ore'`)
 	regionID := queryUUID(t, ctx, pool, `SELECT id FROM world.regions WHERE name = $1`, seed.RegionName)
-	junctionID := queryUUID(t, ctx, pool, `SELECT id FROM world.network_nodes WHERE kind = 'junction' AND region_id = $1`, regionID)
 	norteID := queryUUID(t, ctx, pool, `SELECT id FROM auth.accounts WHERE name = $1`, traderName)
 	norteNode, norteWH := warehouseNodeOf(t, ctx, pool, norteID)
 
@@ -322,13 +320,12 @@ func TestBotsEconomyE2E(t *testing.T) {
 				coalStatus, coalSells, coalPhys, ironStatus, ironBuys)
 		})
 
-	// Red vial hasta las minas de los bots: los bots construyen minas, pero
-	// las carreteras son infraestructura del mundo (mismo fixture que la
-	// integración de internal/bots).
+	// Las minas nacieron ENGANCHADAS a la red vial: el ramal road lo tiende su
+	// propia alta (world/buildings), no el test.
 	coalMineNode := queryUUID(t, ctx, pool, `SELECT id FROM world.network_nodes WHERE building_id = $1`, coalMineID)
 	ironMineNode := queryUUID(t, ctx, pool, `SELECT id FROM world.network_nodes WHERE building_id = $1`, ironMineID)
-	linkNodesBothWays(t, ctx, pool, regionID, coalMineNode, junctionID)
-	linkNodesBothWays(t, ctx, pool, regionID, ironMineNode, junctionID)
+	requireRoadSpur(t, ctx, pool, coalMineNode)
+	requireRoadSpur(t, ctx, pool, ironMineNode)
 
 	// ── (b1) El carbonero acepta la compra del hierro y DESPACHA ─────────────
 	var fuelContractID uuid.UUID
@@ -681,48 +678,29 @@ func stockTotalOf(t *testing.T, ctx context.Context, pool *pgxpool.Pool, owner, 
 	return b
 }
 
-// ─── Fixture de red vial (misma forma que la red del seed) ───────────────────
+// ─── Conectividad vial de los edificios de los bots ─────────────────────────
 
-// linkNodesBothWays crea enlaces road dirigidos en ambos sentidos entre dos
-// nodos, con su segmento único y congestión fluida: los bots construyen minas,
-// pero las carreteras son infraestructura del mundo.
-func linkNodesBothWays(t *testing.T, ctx context.Context, pool *pgxpool.Pool, regionID, a, b uuid.UUID) {
+// requireRoadSpur exige que el nodo del edificio esté enganchado a la red vial
+// con su ramal BIDIRECCIONAL (un enlace dirigido por sentido, cada uno con su
+// segmento). El ramal lo tiende el ALTA del edificio (world/buildings): el test
+// no toca la red — si no existiera, el bot no podría comprar camión (nodo
+// inaccesible para el modo) ni planificar ruta, y se quedaría con el capital
+// gastado y la producción invendible.
+func requireRoadSpur(t *testing.T, ctx context.Context, pool *pgxpool.Pool, nodeID uuid.UUID) {
 	t.Helper()
-	ax, ay := nodeXY(t, ctx, pool, a)
-	bx, by := nodeXY(t, ctx, pool, b)
-	length := int64(math.Round(math.Hypot(bx-ax, by-ay)))
-	if length < 1_000 {
-		length = 1_000 // nodos casi coincidentes: longitud mínima de trazado
+	var outgoing, incoming, segments int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FILTER (WHERE l.from_node_id = $1),
+		       count(*) FILTER (WHERE l.to_node_id = $1),
+		       count(s.id)
+		  FROM world.network_links l
+		  JOIN world.link_segments s ON s.link_id = l.id
+		 WHERE l.mode = 'road' AND (l.from_node_id = $1 OR l.to_node_id = $1)`,
+		nodeID).Scan(&outgoing, &incoming, &segments); err != nil {
+		t.Fatalf("ramal road del nodo %s: %v", nodeID, err)
 	}
-	insertRoadLink(t, ctx, pool, regionID, a, ax, ay, b, bx, by, length)
-	insertRoadLink(t, ctx, pool, regionID, b, bx, by, a, ax, ay, length)
-}
-
-func insertRoadLink(t *testing.T, ctx context.Context, pool *pgxpool.Pool, regionID, from uuid.UUID, fx, fy float64, to uuid.UUID, tx, ty float64, lengthM int64) {
-	t.Helper()
-	path := fmt.Sprintf("LINESTRING(%f %f, %f %f)", fx, fy, tx, ty)
-	linkID := uuid.Must(uuid.NewV7())
-	if _, err := pool.Exec(ctx, `
-		INSERT INTO world.network_links
-		       (id, mode, from_node_id, to_node_id, path, length_m, capacity_per_hour, base_speed_kmh)
-		VALUES ($1, 'road', $2, $3, ST_GeomFromText($4, 0), $5, 60, 80)`,
-		linkID, from, to, path, lengthM); err != nil {
-		t.Fatalf("creando el enlace road %s→%s: %v", from, to, err)
+	if outgoing < 1 || incoming < 1 || segments < 2 {
+		t.Fatalf("el nodo %s nació aislado: enlaces road salientes=%d entrantes=%d segmentos=%d",
+			nodeID, outgoing, incoming, segments)
 	}
-	if _, err := pool.Exec(ctx, `
-		INSERT INTO world.link_segments (id, link_id, region_id, seq, portion, length_m, congestion_ema)
-		VALUES ($1, $2, $3, 1, ST_GeomFromText($4, 0), $5, 1.0)`,
-		uuid.Must(uuid.NewV7()), linkID, regionID, path, lengthM); err != nil {
-		t.Fatalf("creando el segmento del enlace %s: %v", linkID, err)
-	}
-}
-
-func nodeXY(t *testing.T, ctx context.Context, pool *pgxpool.Pool, nodeID uuid.UUID) (float64, float64) {
-	t.Helper()
-	var x, y float64
-	if err := pool.QueryRow(ctx,
-		`SELECT ST_X(location), ST_Y(location) FROM world.network_nodes WHERE id = $1`, nodeID).Scan(&x, &y); err != nil {
-		t.Fatalf("ubicación del nodo %s: %v", nodeID, err)
-	}
-	return x, y
 }

@@ -44,7 +44,11 @@ func DefaultIronProducerConfig() IronProducerConfig {
 // receta mine_iron, que consume coal como combustible), COMBUSTIBLE por
 // mercado — si su stock de coal en la mina baja de FuelLowWater publica UNA
 // solicitud de compra (buy) con destino su nodo, manteniendo solo una activa
-// — y COMERCIO: mantiene UNA venta activa de iron_ore.
+// — y COMERCIO del núcleo (producerCore.trade): UNA venta activa de iron_ore,
+// ATENCIÓN de las solicitudes de compra de iron_ore del tablón por encima de
+// su umbral —lo que le convierte en el proveedor natural del transformador
+// industrial, cuyo único canal de abastecimiento son sus buy— y DESPACHO con
+// camión propio de los cargamentos que genera.
 type IronProducer struct {
 	producerCore
 	cfg IronProducerConfig
@@ -64,19 +68,23 @@ func (b *IronProducer) Name() string { return "iron_producer" }
 // ConfigJSON serializa los umbrales para auth.bot_profiles.behavior.
 func (b *IronProducer) ConfigJSON() ([]byte, error) { return json.Marshal(b.cfg) }
 
-// Decide implementa Behavior: una pasada idempotente del ciclo completo.
+// Decide implementa Behavior: una pasada idempotente del ciclo completo. La
+// envuelve base.pass: una pasada sin acción (combustible en camino, venta ya
+// activa, nada que despachar) emite igualmente su decisión `wait` con motivo.
 func (b *IronProducer) Decide(ctx context.Context, c *botsdk.Client, st *State) error {
-	ready, err := b.ensureSetup(ctx, c, st)
-	if err != nil || !ready {
-		return err
-	}
-	if _, err := cashBalance(ctx, c, st); err != nil {
-		return err
-	}
-	if err := b.maintainFuel(ctx, c, st); err != nil {
-		return err
-	}
-	return b.maintainSell(ctx, c, st)
+	return b.pass(func() error {
+		ready, err := b.ensureSetup(ctx, c, st)
+		if err != nil || !ready {
+			return err
+		}
+		if _, err := cashBalance(ctx, c, st); err != nil {
+			return err
+		}
+		if err := b.maintainFuel(ctx, c, st); err != nil {
+			return err
+		}
+		return b.trade(ctx, c, st)
+	})
 }
 
 // maintainFuel publica una solicitud de compra de coal (destino: su mina)
@@ -92,6 +100,8 @@ func (b *IronProducer) maintainFuel(ctx context.Context, c *botsdk.Client, st *S
 		return err
 	}
 	if stock >= b.cfg.FuelLowWater {
+		b.idle("fuel_stocked",
+			slog.Int64("fuel_stock", stock), slog.Int64("low_water", b.cfg.FuelLowWater))
 		return nil
 	}
 	active, err := myOpenPublication(ctx, c, st, botsdk.PublicationBuy, fuel.ID)
@@ -99,7 +109,12 @@ func (b *IronProducer) maintainFuel(ctx context.Context, c *botsdk.Client, st *S
 		return err
 	}
 	if active != nil {
-		return nil // ya hay una solicitud activa: regla de UNA publicación
+		// Ya hay una solicitud activa: regla de UNA publicación. La mina está
+		// parada esperando ese combustible, no colgada.
+		b.idle("awaiting_fuel",
+			slog.String("publication_id", active.ID),
+			slog.Int64("fuel_stock", stock), slog.Int64("low_water", b.cfg.FuelLowWater))
+		return nil
 	}
 	basePrice, err := fuel.BasePrice.Int64()
 	if err != nil {

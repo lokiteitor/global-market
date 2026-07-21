@@ -66,7 +66,16 @@ type Orchestrator struct {
 	metrics   *Metrics
 	repo      *auth.PGRepository
 	ledgerSvc *ledger.Service
+
+	// mu protege sup: el supervisor solo existe mientras Run está en vuelo y la
+	// densidad dinámica lo consulta desde otra goroutine.
+	mu  sync.Mutex
+	sup *supervisor
 }
+
+// El orquestador ES la población gobernable por la densidad dinámica: sus bots
+// se pausan y reanudan en caliente sin reiniciar el proceso.
+var _ Population = (*Orchestrator)(nil)
 
 // NewOrchestrator construye el orquestador. reg puede ser nil (tests sin
 // instrumentar).
@@ -122,6 +131,16 @@ func (o *Orchestrator) population() []ProvisionedBot {
 	for i := 1; i <= o.opts.Traders; i++ {
 		name := fmt.Sprintf("Bot Mercader %02d", i)
 		add(name, "arbitrageur", NewTrader(DefaultTraderConfig(o.opts.Capital), name, o.logger, o.metrics))
+	}
+	for i := 1; i <= o.opts.Transformers; i++ {
+		name := fmt.Sprintf("Bot Siderúrgica %02d", i)
+		add(name, "industrial_transformer",
+			NewIndustrialTransformer(DefaultIndustrialTransformerConfig(o.opts.TransformerMarginBP), name, o.logger, o.metrics))
+	}
+	for i := 1; i <= o.opts.Freighters; i++ {
+		name := fmt.Sprintf("Bot Transportista %02d", i)
+		add(name, "freighter",
+			NewFreighter(DefaultFreighterConfig(o.opts.FreighterMarginBP, o.opts.Capital), name, o.logger, o.metrics))
 	}
 	return bots
 }
@@ -265,11 +284,17 @@ func (o *Orchestrator) currentSimTime(ctx context.Context) (simtime.SimTime, err
 
 // ─── Ejecución de la población ──────────────────────────────────────────────
 
-// Run aprovisiona la población y la ejecuta (una goroutine por bot, todo el
-// gameplay por el SDK) hasta que ctx se cancele. Devuelve nil en el apagado
+// Run aprovisiona la población y la ejecuta (una goroutine por bot activo, todo
+// el gameplay por el SDK) hasta que ctx se cancele. Devuelve nil en el apagado
 // limpio.
+//
+// La ejecución se delega en un SUPERVISOR de plazas: cada bot aprovisionado
+// ocupa una plaza que se puede parar y arrancar EN CALIENTE (densidad dinámica,
+// GDD §13.4 modo 2) conservando cuenta, capital y estado local. Al arrancar
+// corre la población completa; el controlador de densidad —si está activo— la
+// ajusta desde su primer ciclo.
 func (o *Orchestrator) Run(ctx context.Context) error {
-	bots, err := o.Provision(ctx)
+	provisioned, err := o.Provision(ctx)
 	if err != nil {
 		return err
 	}
@@ -277,48 +302,110 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 		slog.Int("coal_producers", o.opts.CoalProducers),
 		slog.Int("iron_producers", o.opts.IronProducers),
 		slog.Int("traders", o.opts.Traders),
+		slog.Int("transformers", o.opts.Transformers),
+		slog.Int("freighters", o.opts.Freighters),
 		slog.Duration("tick", o.opts.Tick),
 		slog.String("api_url", o.opts.APIURL))
 
-	var wg sync.WaitGroup
-	for _, bot := range bots {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			o.runBot(ctx, bot)
-		}()
+	sup := newSupervisor(ctx, provisioned, o.runBot, o.logger, o.metrics)
+	o.setSupervisor(sup)
+	defer o.setSupervisor(nil)
+
+	for archetype, n := range sup.provisioned() {
+		sup.start(archetype, n)
 	}
-	wg.Wait()
+
+	<-ctx.Done()
+	sup.close()
+	sup.wait()
 	o.logger.Info("población de bots detenida")
 	return nil
 }
 
+// setSupervisor publica (o retira) el supervisor vigente. Fuera de Run, las
+// operaciones de Population son no-ops seguras: la densidad puede arrancar
+// antes que el orquestador sin condición de carrera.
+func (o *Orchestrator) setSupervisor(sup *supervisor) {
+	o.mu.Lock()
+	o.sup = sup
+	o.mu.Unlock()
+}
+
+// supervisor devuelve el supervisor vigente (nil si Run no está en vuelo).
+func (o *Orchestrator) supervisor() *supervisor {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.sup
+}
+
+// ─── Population: pausa y reanudación en caliente (densidad dinámica) ─────────
+
+// Provisioned devuelve la población aprovisionada por arquetipo (vacío mientras
+// Run no haya aprovisionado).
+func (o *Orchestrator) Provisioned() map[string]int {
+	sup := o.supervisor()
+	if sup == nil {
+		return map[string]int{}
+	}
+	return sup.provisioned()
+}
+
+// Active devuelve cuántos bots del arquetipo están ejecutando su bucle.
+func (o *Orchestrator) Active(archetype string) int {
+	sup := o.supervisor()
+	if sup == nil {
+		return 0
+	}
+	return sup.active(archetype)
+}
+
+// Start reanuda hasta n bots parados del arquetipo y devuelve cuántos arrancó.
+func (o *Orchestrator) Start(archetype string, n int) int {
+	sup := o.supervisor()
+	if sup == nil {
+		return 0
+	}
+	return sup.start(archetype, n)
+}
+
+// Stop pausa hasta n bots activos del arquetipo (cierre limpio de su sesión) y
+// devuelve cuántos paró. NO retira cuentas: el bot conserva capital, activos y
+// contratos, y puede reanudarse en cualquier ciclo posterior.
+func (o *Orchestrator) Stop(archetype string, n int) int {
+	sup := o.supervisor()
+	if sup == nil {
+		return 0
+	}
+	return sup.stop(archetype, n)
+}
+
 // runBot mantiene vivas las sesiones de un bot: si la sesión cae (login
 // rechazado, API inaccesible, token expirado) espera y vuelve a entrar. Si la
-// cuenta fue retirada (ADR-024) la goroutine termina: una cuenta retirada no
-// vuelve a jugar.
-func (o *Orchestrator) runBot(ctx context.Context, bot ProvisionedBot) {
+// cuenta fue retirada (ADR-024) la goroutine termina y devuelve true: una cuenta
+// retirada no vuelve a jugar, ni siquiera si la densidad reanuda su plaza. La
+// cancelación de ctx (apagado o pausa por densidad) devuelve false.
+func (o *Orchestrator) runBot(ctx context.Context, bot ProvisionedBot, st *State) bool {
 	log := o.logger.With(slog.String("bot", bot.Name), slog.String("behavior", bot.Behavior.Name()))
-	st := NewState()
 	for ctx.Err() == nil {
 		if retired, err := o.accountRetired(ctx, bot.AccountID); err != nil {
 			log.Warn("no se pudo comprobar el estado de la cuenta; se reintenta", slog.Any("error", err))
 		} else if retired {
 			log.Info("cuenta retirada: el bot deja de jugar")
-			return
+			return true
 		}
 		err := o.botSession(ctx, bot, st, log)
 		if errors.Is(err, errBotRetired) {
 			log.Info("cuenta retirada: el bot deja de jugar")
-			return
+			return true
 		}
 		if err != nil && ctx.Err() == nil {
 			log.Warn("sesión de bot terminada; se reintenta", slog.Any("error", err))
 		}
 		if err := sleepCtx(ctx, sessionRetryWait); err != nil {
-			return
+			return false
 		}
 	}
+	return false
 }
 
 // accountRetired indica si la cuenta ya no está activa (retirada/suspendida).
@@ -450,6 +537,219 @@ func drainEvents(events <-chan botsdk.Event, log *slog.Logger) {
 		}
 	}
 }
+
+// ─── Supervisor de plazas: arranque y parada en caliente ────────────────────
+
+// slotState es el estado de una plaza de ejecución.
+type slotState int
+
+const (
+	slotIdle     slotState = iota // parada: aún sin arrancar o pausada por densidad
+	slotRunning                   // ejecutando su bucle de sesión y decisión
+	slotStopping                  // cancelada, esperando el cierre limpio
+	slotRetired                   // cuenta retirada (ADR-024): no vuelve a arrancar
+)
+
+// botSlot es la plaza de UN bot aprovisionado. El State local SOBREVIVE a las
+// pausas: al reanudar, el bot no vuelve a descubrir su implantación desde cero
+// (la API sigue siendo la fuente de verdad; el State solo cachea ids).
+type botSlot struct {
+	bot    ProvisionedBot
+	st     *State
+	state  slotState
+	cancel context.CancelFunc
+	done   chan struct{}
+}
+
+// botRunner es el bucle de vida de un bot (Orchestrator.runBot): corre hasta
+// que su contexto se cancela y devuelve true si terminó por cuenta retirada.
+type botRunner func(ctx context.Context, bot ProvisionedBot, st *State) (retired bool)
+
+// supervisor gestiona las goroutines de la población: una plaza por bot
+// aprovisionado, arrancable y parable EN CALIENTE sin reiniciar el proceso ni
+// re-aprovisionar. Es el sustrato de la densidad dinámica (GDD §13.4 modo 2).
+type supervisor struct {
+	root    context.Context
+	run     botRunner
+	logger  *slog.Logger
+	metrics *Metrics
+
+	mu      sync.Mutex
+	slots   map[string][]*botSlot // arquetipo (Behavior.Name) → plazas
+	closing bool                  // apagado en curso: no se arrancan más plazas
+	wg      sync.WaitGroup
+}
+
+// newSupervisor agrupa la población aprovisionada en plazas por arquetipo. Las
+// plazas nacen paradas: el llamante decide cuántas arranca.
+func newSupervisor(root context.Context, provisioned []ProvisionedBot, run botRunner, logger *slog.Logger, metrics *Metrics) *supervisor {
+	s := &supervisor{
+		root:    root,
+		run:     run,
+		logger:  logger,
+		metrics: metrics,
+		slots:   make(map[string][]*botSlot),
+	}
+	for _, bot := range provisioned {
+		archetype := bot.Behavior.Name()
+		s.slots[archetype] = append(s.slots[archetype], &botSlot{bot: bot, st: NewState()})
+	}
+	for archetype := range s.slots {
+		s.metrics.Active.WithLabelValues(archetype).Set(0)
+	}
+	return s
+}
+
+// provisioned devuelve las plazas vivas por arquetipo (las retiradas ya no
+// cuentan: su cuenta no puede volver a jugar).
+func (s *supervisor) provisioned() map[string]int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make(map[string]int, len(s.slots))
+	for archetype, slots := range s.slots {
+		n := 0
+		for _, slot := range slots {
+			if slot.state != slotRetired {
+				n++
+			}
+		}
+		out[archetype] = n
+	}
+	return out
+}
+
+// active cuenta las plazas del arquetipo que están ejecutando su bucle.
+func (s *supervisor) active(archetype string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.activeLocked(archetype)
+}
+
+func (s *supervisor) activeLocked(archetype string) int {
+	n := 0
+	for _, slot := range s.slots[archetype] {
+		if slot.state == slotRunning {
+			n++
+		}
+	}
+	return n
+}
+
+// start arranca hasta n plazas paradas del arquetipo (en orden estable) y
+// devuelve cuántas arrancó.
+func (s *supervisor) start(archetype string, n int) int {
+	if n <= 0 {
+		return 0
+	}
+	s.mu.Lock()
+	started := 0
+	if !s.closing && s.root.Err() == nil {
+		for _, slot := range s.slots[archetype] {
+			if started >= n {
+				break
+			}
+			if slot.state != slotIdle {
+				continue
+			}
+			s.launchLocked(slot)
+			started++
+		}
+	}
+	active := s.activeLocked(archetype)
+	s.mu.Unlock()
+
+	if started > 0 {
+		s.metrics.Active.WithLabelValues(archetype).Set(float64(active))
+		s.logger.Info("bots: plazas arrancadas",
+			slog.String("archetype", archetype),
+			slog.Int("started", started),
+			slog.Int("active", active))
+	}
+	return started
+}
+
+// stop para hasta n plazas activas del arquetipo (las últimas primero, para que
+// la población superviviente sea estable) y espera su cierre limpio. Devuelve
+// cuántas paró. NO retira cuentas.
+func (s *supervisor) stop(archetype string, n int) int {
+	if n <= 0 {
+		return 0
+	}
+	s.mu.Lock()
+	slots := s.slots[archetype]
+	waiting := make([]chan struct{}, 0, n)
+	for i := len(slots) - 1; i >= 0 && len(waiting) < n; i-- {
+		slot := slots[i]
+		if slot.state != slotRunning {
+			continue
+		}
+		slot.state = slotStopping
+		if slot.cancel != nil {
+			slot.cancel()
+		}
+		if slot.done != nil {
+			waiting = append(waiting, slot.done)
+		}
+	}
+	active := s.activeLocked(archetype)
+	s.mu.Unlock()
+
+	// El cierre se espera FUERA del lock: la goroutine necesita el mutex para
+	// liberar su plaza al terminar.
+	for _, done := range waiting {
+		<-done
+	}
+	if len(waiting) > 0 {
+		s.metrics.Active.WithLabelValues(archetype).Set(float64(active))
+		s.logger.Info("bots: plazas paradas",
+			slog.String("archetype", archetype),
+			slog.Int("stopped", len(waiting)),
+			slog.Int("active", active))
+	}
+	return len(waiting)
+}
+
+// launchLocked lanza la goroutine de una plaza. Exige el lock tomado.
+func (s *supervisor) launchLocked(slot *botSlot) {
+	ctx, cancel := context.WithCancel(s.root)
+	done := make(chan struct{})
+	slot.cancel = cancel
+	slot.done = done
+	slot.state = slotRunning
+
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		defer close(done)
+		retired := s.run(ctx, slot.bot, slot.st)
+		cancel() // libera el contexto hijo sea cual sea la salida
+
+		archetype := slot.bot.Behavior.Name()
+		s.mu.Lock()
+		if slot.done == done { // sigue siendo esta encarnación de la plaza
+			slot.cancel = nil
+			slot.done = nil
+			slot.state = slotIdle
+		}
+		if retired {
+			slot.state = slotRetired
+		}
+		active := s.activeLocked(archetype)
+		s.mu.Unlock()
+		s.metrics.Active.WithLabelValues(archetype).Set(float64(active))
+	}()
+}
+
+// close rechaza arranques posteriores: se invoca al apagar, antes de wait, para
+// que ninguna plaza se lance mientras se espera el cierre de la población.
+func (s *supervisor) close() {
+	s.mu.Lock()
+	s.closing = true
+	s.mu.Unlock()
+}
+
+// wait espera a que todas las goroutines de la población terminen.
+func (s *supervisor) wait() { s.wg.Wait() }
 
 // jitterTick aplica jitter uniforme ±20% al tick.
 func jitterTick(d time.Duration) time.Duration {

@@ -3,15 +3,19 @@ package contracts_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/lokiteitor/global-market/backend/internal/contracts"
+	"github.com/lokiteitor/global-market/backend/internal/platform/db"
 	"github.com/lokiteitor/global-market/backend/internal/platform/httpx"
 )
 
@@ -23,14 +27,15 @@ type fakeAPI struct {
 	boardCursor string
 	boardErr    error
 
-	pub        contracts.Publication
-	pubErr     error
-	createErr  error
-	cancelErr  error
-	acc        contracts.Acceptance
-	acceptErr  error
-	getAccErr  error
-	contractID *uuid.UUID
+	pub               contracts.Publication
+	pubErr            error
+	createErr         error
+	cancelErr         error
+	acc               contracts.Acceptance
+	acceptErr         error
+	getAccErr         error
+	contractID        *uuid.UUID
+	freightContractID *uuid.UUID
 
 	contracts    []contracts.Contract
 	contractsErr error
@@ -65,6 +70,9 @@ func (f *fakeAPI) GetAcceptance(context.Context, uuid.UUID, uuid.UUID) (contract
 }
 func (f *fakeAPI) ResolveAcceptanceContract(context.Context, contracts.Acceptance) (*uuid.UUID, error) {
 	return f.contractID, nil
+}
+func (f *fakeAPI) ResolveAcceptanceFreightContract(context.Context, contracts.Acceptance) (*uuid.UUID, error) {
+	return f.freightContractID, nil
 }
 func (f *fakeAPI) ListContracts(context.Context, uuid.UUID, contracts.ContractFilter) ([]contracts.Contract, string, error) {
 	return f.contracts, "", f.contractsErr
@@ -294,5 +302,70 @@ func TestHandlersAcceptanceExposesContractID(t *testing.T) {
 	}
 	if data["quantity_served"] != "50" || data["status"] != "served" {
 		t.Fatalf("aceptación mal serializada: %v", data)
+	}
+}
+
+// TestHandlersSerializationConflict fija el contrato del camino de contención:
+// una transacción SERIALIZABLE que agota su presupuesto de reintentos NO se
+// aplicó, así que la misma petición sigue siendo válida. El cliente debe
+// recibir algo REINTENTABLE (503 + Retry-After + SERIALIZATION_CONFLICT), no un
+// 500 INTERNAL opaco. Cubre publicar y cancelar: los dos caminos más
+// disputados del tablón bajo carga masiva de bots (GDD §15.4).
+func TestHandlersSerializationConflict(t *testing.T) {
+	pgErr := &pgconn.PgError{Code: "40001", Message: "could not serialize access due to read/write dependencies among transactions"}
+	exhausted := func() error {
+		return fmt.Errorf("contracts: asentando la partida: %w",
+			&db.SerializationError{Attempts: 11, Elapsed: 900 * time.Millisecond, Err: pgErr})
+	}
+
+	for _, tc := range []struct {
+		name         string
+		api          *fakeAPI
+		method, path string
+		body         string
+	}{
+		{
+			name:   "cancelar",
+			api:    &fakeAPI{cancelErr: exhausted()},
+			method: "DELETE", path: "/contracts/publications/" + uuid.New().String(),
+		},
+		{
+			name:   "publicar",
+			api:    &fakeAPI{createErr: exhausted()},
+			method: "POST", path: "/contracts/publications",
+			body: `{"kind":"buy","product_id":"` + uuid.New().String() + `","quantity_total":"10","unit_price":"100","destination_node_id":"` + uuid.New().String() + `","delivery_sim_seconds":3600}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := newTestServer(tc.api, true)
+			var r *http.Request
+			if tc.body == "" {
+				r = httptest.NewRequest(tc.method, tc.path, nil)
+			} else {
+				r = httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body))
+			}
+			rec := httptest.NewRecorder()
+			srv.ServeHTTP(rec, r)
+
+			if rec.Code != http.StatusServiceUnavailable {
+				t.Fatalf("status %d, esperado 503 (cuerpo %s)", rec.Code, rec.Body.String())
+			}
+			retryAfter := rec.Header().Get("Retry-After")
+			if secs, err := strconv.Atoi(retryAfter); err != nil || secs < 1 {
+				t.Fatalf("Retry-After %q, esperado un entero de segundos >= 1", retryAfter)
+			}
+			var body map[string]any
+			if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+				t.Fatalf("respuesta no es JSON: %s", rec.Body.String())
+			}
+			errObj, _ := body["error"].(map[string]any)
+			if errObj["code"] != "SERIALIZATION_CONFLICT" {
+				t.Fatalf("code %v, esperado SERIALIZATION_CONFLICT", errObj["code"])
+			}
+			details, _ := errObj["details"].(map[string]any)
+			if details["retry_after_seconds"] == nil {
+				t.Fatalf("details sin retry_after_seconds: %v", errObj)
+			}
+		})
 	}
 }

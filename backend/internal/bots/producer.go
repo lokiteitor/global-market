@@ -39,6 +39,17 @@ type ProducerConfig struct {
 	// SellDeliverySimSeconds es el plazo declarado de la venta (la entrega de
 	// una sell es in situ; el plazo solo acota el contrato).
 	SellDeliverySimSeconds int64 `json:"sell_delivery_sim_seconds"`
+	// BuyAcceptMinPriceBP es el precio mínimo (fracción del base_price en
+	// basis points) al que el productor acepta solicitudes de compra de su
+	// producto: 9000 ⇒ acepta si unit_price >= 90% del base_price.
+	BuyAcceptMinPriceBP int64 `json:"buy_accept_min_price_bp"`
+	// VehicleTypeCode es el tipo de camión que compra para despachar.
+	VehicleTypeCode string `json:"vehicle_type_code"`
+	// MaxVehicles acota la flota: sin camión propio se compra uno (entregado
+	// en su nodo); con la flota completa y el camión libre pero en OTRO nodo
+	// (donde lo dejó su última entrega), se REPOSICIONA en vacío hasta el
+	// cargamento; solo se espera si está ocupado.
+	MaxVehicles int `json:"max_vehicles"`
 }
 
 // defaultProducerConfig son los umbrales comunes por defecto.
@@ -55,12 +66,16 @@ func defaultProducerConfig(product, mineType, recipe string) ProducerConfig {
 		SellMinLot:             50,
 		SellPriceBP:            10_000,
 		SellDeliverySimSeconds: simDaySeconds,
+		BuyAcceptMinPriceBP:    9_000,
+		VehicleTypeCode:        "truck_small",
+		MaxVehicles:            1,
 	}
 }
 
 // producerCore implementa el ciclo común de un productor primario: SETUP
 // incremental vía API (yacimiento → concesión → mina → operational → receta →
-// cola) y el mantenimiento de UNA publicación de venta activa. Cada paso solo
+// cola) y el COMERCIO de su producto (trade): UNA venta activa, atención de las
+// solicitudes de compra del tablón y despacho de lo aceptado. Cada paso solo
 // actúa si el estado observable de la API lo pide (idempotencia).
 type producerCore struct {
 	base
@@ -197,7 +212,7 @@ func (p *producerCore) ensureSetup(ctx context.Context, c *botsdk.Client, st *St
 
 	// (7) Mantener la cola de producción: pendientes < MinPendingBatches ⇒
 	// encolar BatchesPerQueue.
-	pending, err := p.pendingBatches(ctx, c, st)
+	pending, err := pendingBatches(ctx, c, st.mineID)
 	if err != nil {
 		return false, err
 	}
@@ -219,29 +234,6 @@ func (p *producerCore) ensureSetup(ctx context.Context, c *botsdk.Client, st *St
 	return true, nil
 }
 
-// pendingBatches suma los lotes aún no producidos de las órdenes no
-// terminales de la mina.
-func (p *producerCore) pendingBatches(ctx context.Context, c *botsdk.Client, st *State) (int, error) {
-	batches, err := botsdk.CollectAll(ctx, func(ctx context.Context, cursor string) (botsdk.Page[botsdk.ProductionBatch], error) {
-		return c.ListProductionBatches(ctx, st.mineID, botsdk.ProductionBatchesQuery{
-			PageQuery: botsdk.PageQuery{Cursor: cursor, Limit: 200},
-		})
-	})
-	if err != nil {
-		return 0, fmt.Errorf("bots: listando la cola de producción: %w", err)
-	}
-	pending := 0
-	for _, b := range batches {
-		switch b.Status {
-		case botsdk.BatchCompleted, botsdk.BatchCancelled:
-			continue
-		default:
-			pending += b.BatchesQueued - b.BatchesDone
-		}
-	}
-	return pending, nil
-}
-
 // maintainSell mantiene UNA publicación de venta activa del producto: si no
 // hay ninguna propia visible y el stock libre en la mina alcanza SellMinLot,
 // publica min(stock, SellLotMax) al precio base_price×SellPriceBP.
@@ -252,13 +244,20 @@ func (p *producerCore) maintainSell(ctx context.Context, c *botsdk.Client, st *S
 		return err
 	}
 	if mine != nil {
-		return nil // ya hay una venta activa: regla de UNA publicación
+		// Ya hay una venta activa: regla de UNA publicación.
+		p.idle("sell_already_active",
+			slog.String("product", p.cfg.ProductCode),
+			slog.String("publication_id", mine.ID))
+		return nil
 	}
 	free, err := stockFreeAt(ctx, c, product.ID, st.mineID)
 	if err != nil {
 		return err
 	}
 	if free < p.cfg.SellMinLot {
+		p.idle("stock_below_min_lot",
+			slog.String("product", p.cfg.ProductCode),
+			slog.Int64("stock", free), slog.Int64("min_lot", p.cfg.SellMinLot))
 		return nil
 	}
 	basePrice, err := product.BasePrice.Int64()
@@ -296,6 +295,198 @@ func (p *producerCore) maintainSell(ctx context.Context, c *botsdk.Client, st *S
 		slog.String("product", p.cfg.ProductCode),
 		slog.Int64("quantity", qty), slog.Int64("unit_price", price))
 	return nil
+}
+
+// trade es la parte COMERCIAL común a TODO productor primario: mantiene su
+// venta activa, ATIENDE las solicitudes de compra de su producto que pagan por
+// encima de su umbral y despacha lo aceptado.
+//
+// Que atender compras sea del NÚCLEO y no de un arquetipo concreto es lo que
+// cierra la cadena industrial entre bots (GDD §13.4, "mundo vivo"): el
+// transformador solo se abastece publicando solicitudes de compra con destino
+// su planta, así que un productor que solo publica ventas y nunca cruza una
+// buy deja al horno sin insumo indefinidamente aunque tenga stock y aunque el
+// comprador pague MÁS que su propio precio de venta. La población es
+// backstop de liquidez de los dos lados del tablón o no lo es de ninguno.
+func (p *producerCore) trade(ctx context.Context, c *botsdk.Client, st *State) error {
+	if err := p.maintainSell(ctx, c, st); err != nil {
+		return err
+	}
+	if err := p.attendBuys(ctx, c, st); err != nil {
+		return err
+	}
+	return p.dispatchShipments(ctx, c, st)
+}
+
+// attendBuys busca en el tablón solicitudes de compra del producto propio y
+// acepta como máximo UNA por pasada (origen = su mina) si el precio alcanza el
+// umbral y hay stock libre que la cubra.
+func (p *producerCore) attendBuys(ctx context.Context, c *botsdk.Client, st *State) error {
+	product := st.products[p.cfg.ProductCode]
+	basePrice, err := product.BasePrice.Int64()
+	if err != nil {
+		return fmt.Errorf("bots: base_price inválido de %s: %w", p.cfg.ProductCode, err)
+	}
+	minPrice := applyBP(basePrice, p.cfg.BuyAcceptMinPriceBP)
+
+	free, err := stockFreeAt(ctx, c, product.ID, st.mineID)
+	if err != nil {
+		return err
+	}
+	if free <= 0 {
+		p.idle("no_stock_to_serve_buys", slog.String("product", p.cfg.ProductCode))
+		return nil
+	}
+	cash := st.LastCash
+
+	scanned := 0
+	for pub, err := range botsdk.All(ctx, func(ctx context.Context, cursor string) (botsdk.Page[botsdk.Publication], error) {
+		return c.Board(ctx, botsdk.BoardQuery{
+			Kind:      botsdk.PublicationBuy,
+			ProductID: product.ID,
+			Sort:      botsdk.SortUnitPriceDesc,
+			PageQuery: botsdk.PageQuery{Cursor: cursor, Limit: 200},
+		})
+	}) {
+		if err != nil {
+			return fmt.Errorf("bots: consultando solicitudes de compra: %w", err)
+		}
+		scanned++
+		if pub.PublisherAccountID == st.AccountID {
+			continue
+		}
+		again, err := acceptableAgain(ctx, c, st, pub.ID)
+		if err != nil {
+			return err
+		}
+		if !again {
+			continue // aceptación propia aún en sorteo sobre esta solicitud
+		}
+		price, err := pub.UnitPrice.Int64()
+		if err != nil {
+			continue
+		}
+		if price < minPrice {
+			// Orden unit_price_desc: lo que sigue paga aún menos.
+			break
+		}
+		remaining, err := pub.QuantityRemaining.Int64()
+		if err != nil || remaining <= 0 {
+			continue
+		}
+		minLot, err := pub.MinLot.Int64()
+		if err != nil {
+			continue
+		}
+		qty := acceptQty(remaining, minLot, free)
+		if qty <= 0 {
+			continue
+		}
+		// Garantía del vendedor: 10% del valor en caja.
+		if guarantee := qty * price / 10; cash < guarantee {
+			p.decide("skip_buy", "insufficient_cash_for_guarantee",
+				slog.String("publication_id", pub.ID),
+				slog.Int64("guarantee", guarantee), slog.Int64("cash", cash))
+			continue
+		}
+		qtyStr, err := botsdk.QtyFromInt64(qty)
+		if err != nil {
+			return err
+		}
+		acc, err := c.Accept(ctx, pub.ID, qtyStr, st.mineNodeID)
+		if err != nil {
+			if code, ok := blockedCode(err); ok {
+				p.decide("blocked", code, slog.String("step", "accept_buy"),
+					slog.String("publication_id", pub.ID))
+				return nil
+			}
+			return fmt.Errorf("bots: aceptando la compra %s: %w", pub.ID, err)
+		}
+		st.pendingAcceptances[pub.ID] = acc.ID
+		p.decide("accept_buy", "price_at_or_above_threshold",
+			slog.String("publication_id", pub.ID),
+			slog.String("acceptance_id", acc.ID),
+			slog.String("product", p.cfg.ProductCode),
+			slog.Int64("quantity", qty),
+			slog.Int64("unit_price", price),
+			slog.Int64("min_price", minPrice))
+		return nil // una aceptación por pasada
+	}
+	// Barrido completo sin aceptar nada: se anota el motivo para el latido de
+	// la pasada (§ base.pass).
+	p.idle("no_buy_on_board",
+		slog.String("product", p.cfg.ProductCode),
+		slog.Int("scanned", scanned),
+		slog.Int64("min_price", minPrice),
+		slog.Int64("stock_free", free))
+	return nil
+}
+
+// dispatchShipments despacha los cargamentos in_warehouse de contratos
+// propios: asegura camión, plan de ruta origen→destino, ruta y dispatch.
+func (p *producerCore) dispatchShipments(ctx context.Context, c *botsdk.Client, st *State) error {
+	shipments, err := botsdk.CollectAll(ctx, func(ctx context.Context, cursor string) (botsdk.Page[botsdk.Shipment], error) {
+		return c.ListShipments(ctx, botsdk.ShipmentsQuery{
+			Status:    botsdk.ShipmentInWarehouse,
+			PageQuery: botsdk.PageQuery{Cursor: cursor, Limit: 200},
+		})
+	})
+	if err != nil {
+		return fmt.Errorf("bots: listando cargamentos: %w", err)
+	}
+	for _, sh := range shipments {
+		if sh.ContractID == "" || sh.AtNodeID == "" {
+			continue
+		}
+		contract, err := c.GetContract(ctx, sh.ContractID)
+		if err != nil {
+			return fmt.Errorf("bots: consultando el contrato %s del cargamento: %w", sh.ContractID, err)
+		}
+		if contract.Status != botsdk.ContractActive || contract.DestinationNodeID == sh.AtNodeID {
+			continue
+		}
+		slot, err := ensureVehicleAt(ctx, c, st, &p.base, p.vehiclePolicy(), sh.AtNodeID)
+		if err != nil {
+			return err
+		}
+		if !slot.ready {
+			// Espera (o viaje en vacío en curso) ya registrada: el camión llegará
+			// al nodo del cargamento y una pasada posterior lo despachará.
+			continue
+		}
+		vehicleID := slot.id
+		routeID, ok, err := ensureRoute(ctx, c, st, &p.base, botsdk.ModeRoad, sh.AtNodeID, contract.DestinationNodeID)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			continue
+		}
+		if _, err := c.Dispatch(ctx, sh.ID, vehicleID, routeID); err != nil {
+			if code, blocked := blockedCode(err); blocked {
+				p.decide("blocked", code, slog.String("step", "dispatch"),
+					slog.String("shipment_id", sh.ID))
+				continue
+			}
+			return fmt.Errorf("bots: despachando el cargamento %s: %w", sh.ID, err)
+		}
+		p.decide("dispatch", "shipment_in_warehouse",
+			slog.String("shipment_id", sh.ID),
+			slog.String("contract_id", sh.ContractID),
+			slog.String("vehicle_id", vehicleID),
+			slog.String("route_id", routeID),
+			slog.String("origin_node_id", sh.AtNodeID),
+			slog.String("destination_node_id", contract.DestinationNodeID))
+	}
+	p.idle("no_shipment_to_dispatch",
+		slog.Int("shipments_in_warehouse", len(shipments)))
+	return nil
+}
+
+// vehiclePolicy es la política de flota del productor primario: un camión
+// ligero para despachar sus propias ventas.
+func (p *producerCore) vehiclePolicy() vehiclePolicy {
+	return vehiclePolicy{typeCode: p.cfg.VehicleTypeCode, max: p.cfg.MaxVehicles}
 }
 
 // squareAround construye un polígono cuadrado cerrado (CCW) centrado en

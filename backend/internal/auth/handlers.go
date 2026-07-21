@@ -177,8 +177,13 @@ func (h *Handlers) Me() http.Handler {
 	})
 }
 
-// internalError loguea el error real y responde 500 INTERNAL genérico.
+// internalError loguea el error real y responde 500 INTERNAL genérico. Las
+// peticiones que el cliente abortó (o cuyo plazo expiró) no son un fallo del
+// servicio: salen por WriteClientGone, fuera de los 5xx y del log de errores.
 func (h *Handlers) internalError(w http.ResponseWriter, r *http.Request, msg string, err error) {
+	if httpx.WriteClientGone(w, r, h.logger, err, msg) {
+		return
+	}
 	h.logger.LogAttrs(r.Context(), slog.LevelError, msg, slog.Any("error", err))
 	httpx.WriteError(w, http.StatusInternalServerError, httpx.CodeInternal,
 		"error interno del servidor", nil)

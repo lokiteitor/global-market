@@ -915,6 +915,26 @@ func (s *Service) ResolveAcceptanceContract(ctx context.Context, a Acceptance) (
 	return &id, nil
 }
 
+// ResolveAcceptanceFreightContract devuelve el contrato de FLETE resultante de
+// una aceptación servida de una publicación freight (nil si no llegó a
+// contrato). Mismo vínculo sin FK que ResolveAcceptanceContract: publicación +
+// aceptante como transportista. Es lo que permite a un transportista pasar de
+// "acepté esta solicitud" a "este es mi contrato de flete" sin adivinar.
+func (s *Service) ResolveAcceptanceFreightContract(ctx context.Context, a Acceptance) (*uuid.UUID, error) {
+	if a.Status != AcceptanceServed {
+		return nil, nil
+	}
+	fc, err := s.repo.GetFreightContractForAcceptance(ctx, a.PublicationID, a.AcceptorAccountID)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return nil, nil
+	case err != nil:
+		return nil, fmt.Errorf("contracts: resolviendo el flete de la aceptación %s: %w", a.ID, err)
+	}
+	id := fc.ID
+	return &id, nil
+}
+
 // ─── Liquidación pro-rata (compartida por el worker y el consumidor) ─────────
 
 // settleAndEmit liquida un contrato pro-rata con ledger.settle_contract_prorata

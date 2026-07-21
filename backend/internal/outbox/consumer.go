@@ -65,9 +65,11 @@ func WithLogger(l *slog.Logger) ConsumerOption {
 
 // NewConsumer construye el consumidor lógico name, interesado en los tipos de
 // evento eventTypes. El cursor se registra on-demand en el primer polling
-// (INSERT ... ON CONFLICT DO NOTHING sobre outbox.consumer_cursors); no hay
-// alta previa. La configuración se valida en Run: una configuración rota
-// impide arrancar el bucle, no la construcción.
+// (INSERT ... ON CONFLICT sobre outbox.consumer_cursors), que además deja la
+// SUSCRIPCIÓN declarada en la fila (event_types, 0016): sin ella el retraso de
+// un consumidor no se puede medir desde fuera del proceso. No hay alta previa.
+// La configuración se valida en Run: una configuración rota impide arrancar el
+// bucle, no la construcción.
 func NewConsumer(pool *pgxpool.Pool, name string, eventTypes []string, opts ...ConsumerOption) *Consumer {
 	c := &Consumer{
 		pool:       pool,
@@ -172,14 +174,30 @@ func (c *Consumer) validate(interval time.Duration, handler Handler) error {
 	return nil
 }
 
+// lagProbeLimit acota la medición del retraso durante el DRENAJE: por encima
+// de este número de eventos pendientes el gauge satura (la lectura operativa
+// —«backlog grande»— es la misma) y ponerse al día no se vuelve cuadrático.
+// La magnitud exacta de un backlog mayor la dan el probe de stress y
+// ii_outbox_lag_observed.
+const lagProbeLimit = 10_000
+
 // SQL del polling. El cursor con FOR UPDATE serializa instancias concurrentes
 // del mismo consumidor; el índice ix_outbox_type_seq soporta el filtro por
 // tipo + orden por seq (0006_outbox).
 const (
+	// sqlEnsureCursor registra el cursor on-demand y mantiene al día la
+	// SUSCRIPCIÓN declarada en la fila (0016_outbox_consumer_interest): es lo
+	// que permite medir el retraso REAL de este consumidor —eventos de SUS
+	// tipos por encima de su cursor— en vez de compararlo con la cabecera
+	// global del outbox, que un consumidor de eventos raros nunca alcanza. El
+	// UPDATE solo se ejecuta si la suscripción cambió: en régimen estacionario
+	// el polling no escribe esta fila.
 	sqlEnsureCursor = `
-INSERT INTO outbox.consumer_cursors (consumer_name)
-VALUES ($1)
-ON CONFLICT (consumer_name) DO NOTHING`
+INSERT INTO outbox.consumer_cursors (consumer_name, event_types)
+VALUES ($1, $2)
+ON CONFLICT (consumer_name) DO UPDATE
+   SET event_types = EXCLUDED.event_types, updated_at = now()
+ WHERE consumer_cursors.event_types IS DISTINCT FROM EXCLUDED.event_types`
 
 	sqlLockCursor = `
 SELECT last_seq FROM outbox.consumer_cursors WHERE consumer_name = $1 FOR UPDATE`
@@ -194,7 +212,14 @@ LIMIT $3`
 	sqlAdvanceCursor = `
 UPDATE outbox.consumer_cursors SET last_seq = $2, updated_at = now() WHERE consumer_name = $1`
 
-	sqlMaxSeq = `SELECT COALESCE(max(seq), 0) FROM outbox.events`
+	// sqlPendingCount cuenta los eventos DE LOS TIPOS SUSCRITOS que quedan por
+	// encima del cursor (retraso real del consumidor), acotado a $3.
+	sqlPendingCount = `
+SELECT count(*) FROM (
+  SELECT 1 FROM outbox.events
+   WHERE seq > $1 AND event_type = ANY($2)
+   LIMIT $3
+) pending`
 )
 
 // poll procesa UN lote y devuelve cuántos eventos confirmó. Todo ocurre en
@@ -210,8 +235,8 @@ func (c *Consumer) poll(ctx context.Context, handler Handler) (int, error) {
 	// Rollback tras Commit devuelve ErrTxClosed: inocuo.
 	defer tx.Rollback(context.WithoutCancel(ctx)) //nolint:errcheck
 
-	// Registro on-demand del consumidor y lock de su cursor.
-	if _, err := tx.Exec(ctx, sqlEnsureCursor, c.name); err != nil {
+	// Registro on-demand del consumidor (con su suscripción) y lock de su cursor.
+	if _, err := tx.Exec(ctx, sqlEnsureCursor, c.name, c.eventTypes); err != nil {
 		return 0, fmt.Errorf("outbox: registrando el consumidor %s: %w", c.name, err)
 	}
 	var cursor int64
@@ -239,10 +264,17 @@ func (c *Consumer) poll(ctx context.Context, handler Handler) (int, error) {
 		}
 	}
 
-	// max(seq) del snapshot de la transacción, para el gauge de lag.
-	var maxSeq int64
-	if err := tx.QueryRow(ctx, sqlMaxSeq).Scan(&maxSeq); err != nil {
-		return 0, fmt.Errorf("outbox: consultando max(seq): %w", err)
+	// Retraso REAL tras el lote: eventos DE LOS TIPOS SUSCRITOS por encima del
+	// cursor, en el snapshot de esta transacción. NO se compara con la cabecera
+	// global del outbox: los eventos ajenos no son trabajo de este consumidor y
+	// contarlos daba un retraso fantasma que crecía con la historia del mundo.
+	// Si el lote no llenó el LIMIT, la propia lectura ya demostró que no queda
+	// ninguno: 0 sin consultar. Solo el drenaje paga la cuenta, acotada.
+	var pending int64
+	if len(events) >= c.batchSize {
+		if err := tx.QueryRow(ctx, sqlPendingCount, newCursor, c.eventTypes, lagProbeLimit).Scan(&pending); err != nil {
+			return 0, fmt.Errorf("outbox: midiendo el retraso de %s: %w", c.name, err)
+		}
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -252,7 +284,7 @@ func (c *Consumer) poll(ctx context.Context, handler Handler) (int, error) {
 	if len(events) > 0 {
 		eventsProcessed.WithLabelValues(c.name).Add(float64(len(events)))
 	}
-	consumerLag.WithLabelValues(c.name).Set(float64(max(maxSeq-newCursor, 0)))
+	consumerLag.WithLabelValues(c.name).Set(float64(pending))
 	return len(events), nil
 }
 

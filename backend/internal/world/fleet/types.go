@@ -87,11 +87,12 @@ type VehicleFilter struct {
 
 // ShipmentFilter son los filtros de GET /world/shipments.
 type ShipmentFilter struct {
-	Status     string
-	ContractID *uuid.UUID
-	VehicleID  *uuid.UUID
-	Cursor     string
-	Limit      int
+	Status            string
+	ContractID        *uuid.UUID
+	FreightContractID *uuid.UUID
+	VehicleID         *uuid.UUID
+	Cursor            string
+	Limit             int
 }
 
 // VehiclePurchase es el cuerpo de POST /world/vehicles (schema VehiclePurchase).
@@ -113,6 +114,13 @@ type VehicleUpdate struct {
 type ShipmentDispatch struct {
 	VehicleID uuid.UUID
 	RouteID   uuid.UUID
+}
+
+// VehicleReposition es el cuerpo de POST /world/vehicles/{id}/reposition (schema
+// VehicleReposition): el viaje EN VACÍO de un vehículo idle por una ruta propia
+// que empieza en su nodo actual.
+type VehicleReposition struct {
+	RouteID uuid.UUID
 }
 
 // ─── Función de avance analítica (advance_fn JSONB) ───────────────────────────

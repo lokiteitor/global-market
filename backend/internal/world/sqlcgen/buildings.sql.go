@@ -327,6 +327,69 @@ func (q *Queries) InsertNetworkNode(ctx context.Context, arg InsertNetworkNodePa
 	return id, err
 }
 
+const insertRoadSpurLink = `-- name: InsertRoadSpurLink :one
+INSERT INTO world.network_links
+       (id, mode, from_node_id, to_node_id, path, length_m, capacity_per_hour, base_speed_kmh)
+SELECT $1, 'road'::world.link_mode, f.id, t.id,
+       ST_MakeLine(f.location, t.location),
+       GREATEST(1, round(ST_Distance(f.location, t.location)))::int,
+       $2::int, $3::int
+FROM world.network_nodes f, world.network_nodes t
+WHERE f.id = $4 AND t.id = $5
+RETURNING id, length_m
+`
+
+type InsertRoadSpurLinkParams struct {
+	ID              uuid.UUID
+	CapacityPerHour int32
+	BaseSpeedKmh    int32
+	FromNodeID      uuid.UUID
+	ToNodeID        uuid.UUID
+}
+
+type InsertRoadSpurLinkRow struct {
+	ID      uuid.UUID
+	LengthM int32
+}
+
+// InsertRoadSpurLink crea UN enlace road dirigido from→to con el trazado recto
+// entre las ubicaciones de ambos nodos y su longitud euclídea (metros de mundo,
+// SRID 0 planar, ADR-019). El grafo es dirigido: el ramal bidireccional son dos
+// llamadas, una por sentido.
+func (q *Queries) InsertRoadSpurLink(ctx context.Context, arg InsertRoadSpurLinkParams) (InsertRoadSpurLinkRow, error) {
+	row := q.db.QueryRow(ctx, insertRoadSpurLink,
+		arg.ID,
+		arg.CapacityPerHour,
+		arg.BaseSpeedKmh,
+		arg.FromNodeID,
+		arg.ToNodeID,
+	)
+	var i InsertRoadSpurLinkRow
+	err := row.Scan(&i.ID, &i.LengthM)
+	return i, err
+}
+
+const insertRoadSpurSegment = `-- name: InsertRoadSpurSegment :exec
+INSERT INTO world.link_segments (id, link_id, region_id, seq, portion, length_m, congestion_ema)
+SELECT $1, l.id, $2, 1, l.path, l.length_m, 1.0
+FROM world.network_links l
+WHERE l.id = $3
+`
+
+type InsertRoadSpurSegmentParams struct {
+	ID       uuid.UUID
+	RegionID uuid.UUID
+	LinkID   uuid.UUID
+}
+
+// InsertRoadSpurSegment crea el ÚNICO segmento (seq 1) del ramal, con la
+// geometría y longitud del propio enlace y congestión fluida (EMA 1.0). El ramal
+// es intra-región: un solo segmento, el de la región del edificio.
+func (q *Queries) InsertRoadSpurSegment(ctx context.Context, arg InsertRoadSpurSegmentParams) error {
+	_, err := q.db.Exec(ctx, insertRoadSpurSegment, arg.ID, arg.RegionID, arg.LinkID)
+	return err
+}
+
 const listBuildingInventory = `-- name: ListBuildingInventory :many
 
 SELECT building_id, product_id, quantity, updated_at_sim
@@ -518,6 +581,34 @@ func (q *Queries) NearestCityLevelInRegion(ctx context.Context, arg NearestCityL
 	var level int32
 	err := row.Scan(&level)
 	return level, err
+}
+
+const nearestRoadNodeInRegion = `-- name: NearestRoadNodeInRegion :one
+SELECT n.id
+FROM world.network_nodes n
+WHERE n.region_id = $1
+  AND n.id <> $2
+  AND EXISTS (
+      SELECT 1 FROM world.network_links l
+       WHERE l.mode = 'road' AND (l.from_node_id = n.id OR l.to_node_id = n.id))
+ORDER BY n.location <-> (SELECT location FROM world.network_nodes WHERE id = $2)
+LIMIT 1
+`
+
+type NearestRoadNodeInRegionParams struct {
+	RegionID uuid.UUID
+	NodeID   uuid.UUID
+}
+
+// NearestRoadNodeInRegion devuelve el nodo de la MISMA región ya incidente a
+// algún enlace road más cercano al nodo dado: el punto de enganche del ramal de
+// última milla del edificio nuevo (GDD 7.2, red vial como infraestructura del
+// mundo). ErrNoRows si la región todavía no tiene red vial.
+func (q *Queries) NearestRoadNodeInRegion(ctx context.Context, arg NearestRoadNodeInRegionParams) (uuid.UUID, error) {
+	row := q.db.QueryRow(ctx, nearestRoadNodeInRegion, arg.RegionID, arg.NodeID)
+	var id uuid.UUID
+	err := row.Scan(&id)
+	return id, err
 }
 
 const nodeKindPresentInRegion = `-- name: NodeKindPresentInRegion :one

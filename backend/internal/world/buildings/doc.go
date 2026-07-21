@@ -10,7 +10,20 @@
 // existentes (ST_Intersects); (d) las placement_rules del tipo (near_resource,
 // requires_node_kind) se cumplen. El coste de construcción se asienta como sink
 // (transacción maintenance) y se crea el nodo del grafo logístico en el centroide
-// del footprint (mina→mine, resto→factory). La construcción COMPLETA
+// del footprint (mina→mine, resto→factory).
+//
+// CONECTIVIDAD: el nodo nace ENGANCHADO a la red vial. En la misma transacción se
+// tiende un RAMAL ROAD BIDIRECCIONAL (un enlace dirigido por sentido, cada uno con
+// su único link_segment en la región) desde el nodo nuevo hasta el nodo
+// road-conectado más cercano de SU región. Sin ese ramal el nodo quedaría aislado:
+// POST /world/vehicles rechazaría la entrega (nodo inaccesible para el modo) y el
+// planificador no encontraría ruta, así que el edificio no podría despachar ni
+// recibir nada y el bucle económico no arrancaría (GDD 7.2). La carretera es
+// infraestructura del MUNDO —igual que la que tienden el seed y el worldgen, con
+// su misma capacidad y velocidad base— y no se cobra aparte: el coste que paga la
+// corporación es el build_cost del tipo. Si la región todavía no tiene ningún nodo
+// con enlace road, el alta NO falla: el edificio se crea sin ramal y queda un warn
+// en el log. La construcción COMPLETA
 // (under_construction→operational) la realiza el motor tras II_BUILD_SIM_SECONDS
 // (simplificación consciente: tiempo fijo). La mejora sube el nivel con coste no
 // lineal según la level_curve del tipo.

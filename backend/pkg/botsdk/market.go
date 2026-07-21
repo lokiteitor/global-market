@@ -146,6 +146,51 @@ func (c *Client) ListDeliveries(ctx context.Context, contractID string) ([]Contr
 	return out, err
 }
 
+// ── Contratos CCRI-Flete (GDD 5.3.2) ──
+
+// Rol de una parte en un CCRI-Flete (query param role de
+// /contracts/freight-contracts).
+const (
+	RoleShipper = "shipper"
+	RoleCarrier = "carrier"
+)
+
+// FreightContractsQuery filtra GET /contracts/freight-contracts.
+type FreightContractsQuery struct {
+	// Role es RoleShipper (cargador) o RoleCarrier (transportista); vacío =
+	// ambos.
+	Role   string
+	Status ContractStatus
+	PageQuery
+}
+
+// values serializa la query.
+func (q FreightContractsQuery) values() url.Values {
+	v := url.Values{}
+	if q.Role != "" {
+		v.Set("role", q.Role)
+	}
+	if q.Status != "" {
+		v.Set("status", string(q.Status))
+	}
+	q.apply(v)
+	return v
+}
+
+// ListFreightContracts devuelve los contratos de flete en los que la
+// corporación es cargadora o transportista (GET /contracts/freight-contracts).
+// La carga viaja en la cuenta custody del contrato: el transportista la lleva
+// físicamente pero el ledger le impide venderla.
+func (c *Client) ListFreightContracts(ctx context.Context, q FreightContractsQuery) (Page[FreightContract], error) {
+	return getList[FreightContract](ctx, c, "/contracts/freight-contracts", q.values())
+}
+
+// GetFreightContract devuelve un contrato de flete propio
+// (GET /contracts/freight-contracts/{id}; 403 si no se es parte).
+func (c *Client) GetFreightContract(ctx context.Context, freightContractID string) (FreightContract, error) {
+	return getOne[FreightContract](ctx, c, "/contracts/freight-contracts/"+pathID(freightContractID), nil)
+}
+
 // ── Historial de mercado ──
 
 // OhlcQuery parametriza GET /market/ohlc. ProductID es obligatorio.

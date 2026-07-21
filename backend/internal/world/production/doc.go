@@ -26,8 +26,12 @@
 //     outbox.Emit mueve a la vez el plano FÍSICO (building_inventories,
 //     resource_deposits, buildings.fuel_stock) y el CONTABLE (production_output /
 //     consumption / wage sobre ledger.*), respetando combustible, salarios,
-//     insumos y capacidad de almacén. Sin combustible → paused_no_fuel; sin
-//     fondos para el salario → paused_no_workers (cascada de insolvencia sin
+//     insumos y capacidad de almacén. Como el consumo mueve los DOS planos, la
+//     fase de comprobación exige cubrir el material en AMBOS: el físico y el
+//     saldo COMPROMETIBLE (stock_free) que debita el asiento —el físico incluye
+//     stock ya reservado por una venta y puede adelantarse al asiento dentro de
+//     la ventana que tolera la reconciliación—. Sin combustible → paused_no_fuel;
+//     sin fondos para el salario → paused_no_workers (cascada de insolvencia sin
 //     deuda, GDD 5.9); sin insumos/yacimiento o almacén lleno el lote no avanza
 //     (permanece running, se reintenta) sin inventar estados nuevos del enum
 //     (ADR-020: sin cambios de esquema en esta fase).

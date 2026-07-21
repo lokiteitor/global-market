@@ -17,6 +17,11 @@ const (
 	EventVehicleArrived   = "vehicle.arrived"
 	EventVehicleBroken    = "vehicle.broken"
 	EventVehicleStranded  = "vehicle.stranded"
+	// EventVehicleRepositioned es el hito de un viaje EN VACÍO: un vehículo idle
+	// arranca sin carga hacia otro nodo de la red (GDD 7.3). Sin él un vehículo
+	// solo podría moverse llevando carga y quedaría varado en el destino de su
+	// última entrega.
+	EventVehicleRepositioned = "vehicle.repositioned"
 
 	EventShipmentCreated    = "shipment.created"
 	EventShipmentDispatched = "shipment.dispatched"
@@ -85,6 +90,18 @@ type ShipmentDispatchedPayload struct {
 	OriginNodeID      string `json:"origin_node_id"`
 	DestinationNodeID string `json:"destination_node_id"`
 	DispatchedAtSim   int64  `json:"dispatched_at_sim"`
+}
+
+// VehicleRepositionedPayload es el payload de vehicle.repositioned (viaje en
+// vacío: el vehículo arranca SIN carga hacia el nodo final de la ruta).
+type VehicleRepositionedPayload struct {
+	VehicleID         string `json:"vehicle_id"`
+	OwnerAccountID    string `json:"owner_account_id"`
+	RouteID           string `json:"route_id"`
+	OriginNodeID      string `json:"origin_node_id"`
+	DestinationNodeID string `json:"destination_node_id"`
+	DistanceM         int64  `json:"distance_m"`
+	RepositionedAtSim int64  `json:"repositioned_at_sim"`
 }
 
 // VehicleArrivedPayload es el payload de vehicle.arrived (hito de llegada al

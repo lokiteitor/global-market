@@ -26,6 +26,7 @@ import (
 	"github.com/lokiteitor/global-market/backend/internal/market"
 	"github.com/lokiteitor/global-market/backend/internal/outbox"
 	"github.com/lokiteitor/global-market/backend/internal/platform/config"
+	"github.com/lokiteitor/global-market/backend/internal/platform/db"
 	"github.com/lokiteitor/global-market/backend/internal/platform/metrics"
 	"github.com/lokiteitor/global-market/backend/internal/platform/service"
 	"github.com/lokiteitor/global-market/backend/internal/sim/clock"
@@ -69,6 +70,9 @@ func run() error {
 	// Métricas del outbox (emisión desde los sweeps + procesado del consumidor
 	// OHLC): el módulo las registra en el registry de cada binario (outbox.go).
 	outbox.RegisterMetrics(app.Metrics().Registry())
+	// Métricas de las transacciones SERIALIZABLE (reintentos por conflicto y
+	// presupuestos agotados): disparador MEDIDO de contención (SAD §13).
+	db.RegisterTxMetrics(app.Metrics().Registry())
 
 	// ── Reloj de simulación ──────────────────────────────────────────────────
 	clkOpts, err := clock.OptionsFromEnv()

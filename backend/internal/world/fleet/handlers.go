@@ -47,6 +47,7 @@ type API interface {
 	GetVehicle(ctx context.Context, owner, id uuid.UUID) (Vehicle, error)
 	PurchaseVehicle(ctx context.Context, owner uuid.UUID, in VehiclePurchase) (Vehicle, error)
 	UpdateVehicle(ctx context.Context, owner, id uuid.UUID, in VehicleUpdate) (Vehicle, error)
+	RepositionVehicle(ctx context.Context, owner, id uuid.UUID, in VehicleReposition) (Vehicle, error)
 	ListShipments(ctx context.Context, owner uuid.UUID, f ShipmentFilter) ([]Shipment, string, error)
 	GetShipment(ctx context.Context, owner, id uuid.UUID) (Shipment, error)
 	DispatchShipment(ctx context.Context, owner, shipmentID uuid.UUID, in ShipmentDispatch) (Shipment, error)
@@ -57,7 +58,7 @@ type API interface {
 
 var _ API = (*Service)(nil)
 
-// Handlers sirve los endpoints world fleet/shipments del contrato v1.3.0.
+// Handlers sirve los endpoints world fleet/shipments del contrato v1.5.0.
 type Handlers struct {
 	svc      API
 	identity Identity
@@ -81,6 +82,7 @@ func (h *Handlers) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /world/vehicles", h.purchaseVehicle)
 	mux.HandleFunc("GET /world/vehicles/{vehicleId}", h.getVehicle)
 	mux.HandleFunc("PATCH /world/vehicles/{vehicleId}", h.updateVehicle)
+	mux.HandleFunc("POST /world/vehicles/{vehicleId}/reposition", h.repositionVehicle)
 	mux.HandleFunc("GET /world/shipments", h.listShipments)
 	mux.HandleFunc("GET /world/shipments/{shipmentId}", h.getShipment)
 	mux.HandleFunc("POST /world/shipments/{shipmentId}/dispatch", h.dispatchShipment)
@@ -225,6 +227,36 @@ func (h *Handlers) updateVehicle(w http.ResponseWriter, r *http.Request) {
 	h.writeData(w, r, http.StatusOK, toVehicleJSON(v), "")
 }
 
+// ─── POST /world/vehicles/{id}/reposition ─────────────────────────────────────
+
+func (h *Handlers) repositionVehicle(w http.ResponseWriter, r *http.Request) {
+	owner, ok := h.identity.AccountID(r.Context())
+	if !ok {
+		unauthorized(w)
+		return
+	}
+	id, err := uuid.Parse(r.PathValue("vehicleId"))
+	if err != nil {
+		notFound(w, "el vehículo no existe")
+		return
+	}
+	var body vehicleRepositionJSON
+	if err := httpx.ReadJSON(w, r, &body, 0); err != nil {
+		return
+	}
+	in, verr := body.toInput()
+	if verr != nil {
+		writeValidationError(w, verr.field, verr.reason)
+		return
+	}
+	v, err := h.svc.RepositionVehicle(r.Context(), owner, id, in)
+	if err != nil {
+		h.writeError(w, r, err, "reposicionando el vehículo en vacío")
+		return
+	}
+	h.writeData(w, r, http.StatusOK, toVehicleJSON(v), "")
+}
+
 // ─── GET /world/shipments ─────────────────────────────────────────────────────
 
 func (h *Handlers) listShipments(w http.ResponseWriter, r *http.Request) {
@@ -247,6 +279,14 @@ func (h *Handlers) listShipments(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		f.ContractID = &id
+	}
+	if raw := q.Get("freight_contract_id"); raw != "" {
+		id, perr := uuid.Parse(raw)
+		if perr != nil {
+			writeValidationError(w, "freight_contract_id", "no es un UUID válido")
+			return
+		}
+		f.FreightContractID = &id
 	}
 	if raw := q.Get("vehicle_id"); raw != "" {
 		id, perr := uuid.Parse(raw)
@@ -420,6 +460,11 @@ func (h *Handlers) writeError(w http.ResponseWriter, r *http.Request, err error,
 	case errors.Is(err, ErrSlotHeld):
 		httpx.WriteError(w, http.StatusConflict, codeSlotHeld, err.Error(), nil)
 	default:
+		// Petición abortada por el cliente o plazo agotado: no es un fallo
+		// del servicio y no debe contarse como 5xx ni loguearse como ERROR.
+		if httpx.WriteClientGone(w, r, h.logger, err, doing) {
+			return
+		}
 		logging.WithRequestID(h.logger, httpx.RequestIDFromContext(r.Context())).LogAttrs(
 			r.Context(), slog.LevelError, "error "+doing, slog.String("error", err.Error()))
 		httpx.WriteError(w, http.StatusInternalServerError, httpx.CodeInternal, "error interno del servidor", nil)
@@ -597,6 +642,18 @@ func (b vehicleUpdateJSON) toInput() (VehicleUpdate, *fieldError) {
 		return VehicleUpdate{}, &fieldError{"body", "requiere route_id o schedule_maintenance"}
 	}
 	return in, nil
+}
+
+type vehicleRepositionJSON struct {
+	RouteID string `json:"route_id"`
+}
+
+func (b vehicleRepositionJSON) toInput() (VehicleReposition, *fieldError) {
+	route, err := uuid.Parse(b.RouteID)
+	if err != nil {
+		return VehicleReposition{}, &fieldError{"route_id", "no es un UUID válido"}
+	}
+	return VehicleReposition{RouteID: route}, nil
 }
 
 type shipmentDispatchJSON struct {

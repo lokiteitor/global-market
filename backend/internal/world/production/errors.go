@@ -34,4 +34,14 @@ var (
 	// ErrInvalidCursor: el cursor de paginación no fue emitido por este listado
 	// (→ 400 VALIDATION_ERROR).
 	ErrInvalidCursor = errors.New("world/production: cursor de paginación inválido")
+
+	// ErrInsufficientBalance: una partida del asiento dejaría en negativo el saldo
+	// de una cuenta que no lo admite (constraint ck_accounts_non_negative de
+	// 0004_ledger): stock_free del insumo/combustible o la caja del salario. Es un
+	// error de MOTOR, no del contrato: el barrido lo trata como estancamiento
+	// esperado (la transacción se revierte entera y el lote se reintenta) en vez de
+	// dejar escapar un SQLSTATE crudo. Las guardas de completeBatch miran ya ese
+	// mismo plano contable, así que solo debería aflorar en la ventana en que otra
+	// transacción vacía la cuenta entre la comprobación y el asiento.
+	ErrInsufficientBalance = errors.New("world/production: el saldo de la cuenta no cubre la partida")
 )

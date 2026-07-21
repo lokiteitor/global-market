@@ -6,9 +6,21 @@
 // Decide) donde TODO el gameplay pasa por pkg/botsdk contra la API pública —
 // mismos endpoints y rate limits que cualquier jugador (ADR-010).
 //
+// Corre además dos barridos de lifecycle en paralelo a la población:
+//
+//   - DENSIDAD DINÁMICA (GDD §13.4 modo 2, §19): ajusta continuamente cuántos
+//     bots de cada arquetipo están ACTIVOS según la actividad humana, la
+//     saturación del sistema (lag de outbox y cola de transbordo) y la
+//     cobertura del tablón — la válvula de carga principal, que reduce la
+//     población de bots antes que degradar la experiencia humana. Pausa y
+//     reanuda bots ya aprovisionados; no retira cuentas.
+//   - RETIRO (ADR-024): retira los bots insolventes-inactivos de forma
+//     sostenida, absorbiendo su caja al banco central.
+//
 // Expone su propio servidor de observabilidad en II_BOTS_ADDR (default
 // :8082) con /healthz, /readyz y /metrics (ii_bot_decisions_total,
-// ii_bot_errors_total, ii_bot_cash).
+// ii_bot_errors_total, ii_bot_cash, ii_bots_active, ii_bots_density_target,
+// ii_bots_density_adjustments_total, ii_outbox_lag_observed).
 package main
 
 import (
@@ -24,6 +36,7 @@ import (
 	"github.com/lokiteitor/global-market/backend/internal/bots"
 	"github.com/lokiteitor/global-market/backend/internal/ledger"
 	"github.com/lokiteitor/global-market/backend/internal/platform/config"
+	"github.com/lokiteitor/global-market/backend/internal/platform/db"
 	"github.com/lokiteitor/global-market/backend/internal/platform/service"
 	"github.com/lokiteitor/global-market/backend/internal/sim/clock"
 )
@@ -58,12 +71,20 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	densityOpts, err := bots.DensityOptionsFromEnv()
+	if err != nil {
+		return err
+	}
 
 	app, err := service.New(ctx, serviceName, botsOpts.Addr, cfg)
 	if err != nil {
 		return err
 	}
 	defer app.Close()
+
+	// Métricas de las transacciones SERIALIZABLE del lifecycle (aprovisionado,
+	// capitalización, retiro): disparador MEDIDO de contención (SAD §13).
+	db.RegisterTxMetrics(app.Metrics().Registry())
 
 	orch, err := bots.NewOrchestrator(app.Pool(), botsOpts, ledgerOpts, app.Logger(), app.Metrics().Registry())
 	if err != nil {
@@ -78,17 +99,33 @@ func run() error {
 		return err
 	}
 
+	// Densidad dinámica (GDD §13.4 modo 2): gobierna la población ACTIVA del
+	// propio orquestador (que implementa bots.Population: pausa y reanudación
+	// en caliente). Desactivable con II_BOTS_DENSITY_ENABLED=false, en cuyo
+	// caso la población arrancada queda fija.
+	var density *bots.DensityController
+	if densityOpts.Enabled {
+		density, err = bots.NewDensityController(app.Pool(), densityOpts, orch, app.Logger(), app.Metrics().Registry())
+		if err != nil {
+			return err
+		}
+	}
+
 	app.Logger().Info("orquestador de bots arrancando",
 		slog.Int("coal_producers", botsOpts.CoalProducers),
 		slog.Int("iron_producers", botsOpts.IronProducers),
 		slog.Int("traders", botsOpts.Traders),
+		slog.Int("transformers", botsOpts.Transformers),
+		slog.Int("freighters", botsOpts.Freighters),
 		slog.Int64("capital", botsOpts.Capital),
 		slog.Duration("tick", botsOpts.Tick),
 		slog.String("api_url", botsOpts.APIURL),
 		slog.String("addr", botsOpts.Addr),
 		slog.Duration("retire_interval", retireOpts.Interval),
 		slog.Int64("retire_cash_floor", retireOpts.CashFloor),
-		slog.Int64("retire_idle_sim_seconds", retireOpts.IdleSimSeconds))
+		slog.Int64("retire_idle_sim_seconds", retireOpts.IdleSimSeconds),
+		slog.Bool("density_enabled", densityOpts.Enabled),
+		slog.Duration("density_interval", densityOpts.Interval))
 
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -108,6 +145,18 @@ func run() error {
 			app.Logger().Error("bots: el barrido de retiro terminó con error", slog.Any("error", err))
 		}
 	}()
+
+	// Densidad dinámica en paralelo: mientras el orquestador aprovisiona, sus
+	// ciclos son no-ops seguras (población aún vacía).
+	if density != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := density.Run(ctx); err != nil {
+				app.Logger().Error("bots: la densidad dinámica terminó con error", slog.Any("error", err))
+			}
+		}()
+	}
 
 	// Sirve las sondas y métricas hasta la señal; al retornar, ctx ya está
 	// cancelado y los bots están parando: wg.Wait espera su cierre limpio.

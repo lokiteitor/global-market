@@ -3,7 +3,7 @@ $self: https://play.imperio-industrial.example/api/v1/openapi.yaml
 
 info:
   title: Imperio Industrial — API pública
-  version: 1.4.0
+  version: 1.5.0
   summary: API REST del MMO de simulación económica, industrial y logística "Imperio Industrial".
   description: |
     API pública del servidor autoritativo de **Imperio Industrial** (GDD/SAD v1.2).
@@ -47,6 +47,24 @@ info:
 
     ## Changelog
 
+    - **v1.5.0** (2026-07-21): **viaje en vacío** — nuevo `POST /world/vehicles/{vehicleId}/reposition`:
+      pone en ruta un vehículo propio `idle` **sin carga** por una ruta propia que empieza
+      en su nodo actual. Hasta ahora un vehículo solo podía moverse llevando un cargamento
+      y, como la entrega lo deja `idle` en el nodo **destino** —donde no nace carga nueva—,
+      quedaba varado allí de por vida: el dueño no podía cumplir ningún contrato posterior.
+      El reposicionamiento (deadhead) cierra ese ciclo con las **mismas** reglas físicas del
+      despacho (modo del vehículo, la ruta empieza donde está el vehículo, combustible para
+      toda la distancia) y emite el hito `vehicle.repositioned`. Cambio **aditivo**
+      retrocompatible.
+    - **v1.4.1** (2026-07-21): **visibilidad del transportista** — `GET /world/shipments`
+      (y el detalle) devuelve, además de los cargamentos propios, los que la corporación
+      transporta como **transportista** de un CCRI-Flete (el dueño es el cargador, pero
+      quien despacha es el transportista: sin verlos no podía ejecutar el flete aceptado),
+      con nuevo filtro `freight_contract_id`. Además, dos campos que el contrato ya
+      documentaba y la implementación no emitía: `declared_value` en las publicaciones
+      `freight` del tablón (base de la garantía que valora el transportista antes de
+      aceptar) y `freight_contract_id` en la aceptación servida de una publicación
+      `freight`. Cambios **aditivos** retrocompatibles.
     - **v1.4.0** (2026-07-21): **CCRI-Flete activado** (GDD 5.3.2, antes diferido a Fase 2).
       Las publicaciones `kind: freight` son **solicitudes del cargador**: bloquean en escrow
       `quantity_total × unit_price` (la tarifa del flete por unidad) al publicar, declaran el
@@ -1912,15 +1930,99 @@ paths:
         '500': { $ref: '#/components/responses/InternalError' }
         '503': { $ref: '#/components/responses/Maintenance' }
 
+  /world/vehicles/{vehicleId}/reposition:
+    parameters:
+      - name: vehicleId
+        in: path
+        required: true
+        schema:
+          $ref: '#/components/schemas/VehicleId'
+    post:
+      operationId: repositionVehicle
+      tags: [world, fleet]
+      summary: Reposicionar un vehículo (viaje EN VACÍO)
+      description: |
+        Pone en ruta un vehículo propio `idle` **sin carga** por una ruta propia que
+        **empieza en su nodo actual**. Es el viaje en vacío (*deadhead*) del transporte
+        real: el vehículo llega al nodo final de la ruta y queda `idle` allí, listo para
+        cargar.
+
+        **Por qué existe.** Un cargamento se entrega en el nodo destino del contrato y el
+        vehículo se queda `idle` **ahí**; la carga siguiente, en cambio, nace donde está la
+        mercancía (el almacén del vendedor, el origen de un flete). Sin viaje en vacío un
+        vehículo solo podría moverse llevando carga y quedaría varado en el destino de su
+        última entrega para siempre, incapaz de servir ningún contrato posterior.
+
+        Valida **lo mismo** que el despacho, salvo lo relativo a la carga: propiedad del
+        vehículo y de la ruta, vehículo `idle` y **sin cargamento a bordo** (un vehículo
+        cargado se mueve despachando el cargamento, nunca por aquí), todos los tramos de la
+        ruta del **modo** del vehículo, la ruta empieza en el nodo donde está el vehículo y
+        el combustible cubre la distancia completa. Emite el hito `vehicle.repositioned`.
+      parameters:
+        - $ref: '#/components/parameters/idempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VehicleReposition'
+      responses:
+        '200':
+          description: Vehículo en tránsito hacia el nodo final de la ruta, en vacío.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: '#/components/schemas/Vehicle'
+                  meta:
+                    $ref: '#/components/schemas/Meta'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: |
+            El vehículo o la ruta pertenecen a otra corporación, o el vehículo está SELLADO
+            durante un handoff (`VEHICLE_SEALED`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: 'El vehículo no está `idle` (`VEHICLE_NOT_IDLE`).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '422':
+          description: |
+            `VALIDATION_ERROR`: la ruta no empieza en el nodo del vehículo, contiene tramos
+            de otro modo, el vehículo lleva carga a bordo, o el combustible no cubre la
+            distancia de la ruta.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/Maintenance' }
+
   /world/shipments:
     get:
       operationId: listShipments
       tags: [world, fleet]
-      summary: Cargamentos propios
+      summary: Cargamentos visibles (propios y los que se transportan por flete)
       description: |
         Cargamentos etiquetados por contrato: el stock reservado viaja sin dejar de estar
         reservado. **Nada se teletransporta, tampoco en los fallos** — el stock de un
         contrato fallido se libera en su ubicación física actual (`released_in_situ`).
+
+        Devuelve los cargamentos **propios** y, en un **CCRI-Flete**, los que corresponden
+        a la corporación como **transportista**: el dueño del cargamento es el cargador,
+        pero quien lo despacha y lo lleva es el transportista (GDD 5.3.2), así que necesita
+        verlo. Misma regla de autorización que `POST /world/shipments/{shipmentId}/dispatch`.
       parameters:
         - name: status
           in: query
@@ -1930,6 +2032,11 @@ paths:
           in: query
           schema:
             $ref: '#/components/schemas/ContractId'
+        - name: freight_contract_id
+          in: query
+          description: Filtra por el CCRI-Flete del cargamento (el que un transportista debe despachar).
+          schema:
+            $ref: '#/components/schemas/FreightContractId'
         - name: vehicle_id
           in: query
           schema:
@@ -1961,6 +2068,9 @@ paths:
       operationId: getShipment
       tags: [world, fleet]
       summary: Detalle de un cargamento
+      description: |
+        Visible para el dueño del cargamento y, en un CCRI-Flete, para su **transportista**
+        (misma visibilidad que `GET /world/shipments`).
       parameters:
         - name: shipmentId
           in: path
@@ -2559,10 +2669,18 @@ components:
           schema:
             $ref: '#/components/schemas/ErrorEnvelope'
     Maintenance:
-      description: Ventana de mantenimiento diaria (sim-time congelado de forma coordinada).
+      description: |
+        Servicio temporalmente no disponible; SIEMPRE reintentable con la MISMA petición.
+        Dos causas, distinguibles por el `code`:
+
+        - `MAINTENANCE_WINDOW`: ventana de mantenimiento diaria (sim-time congelado de forma coordinada).
+        - `SERIALIZATION_CONFLICT`: la operación chocó con otras concurrentes sobre las mismas
+          cuentas del ledger y agotó su presupuesto de reintentos en el servidor. La transacción se
+          revirtió ENTERA —no queda ningún efecto parcial, ni garantías a medio bloquear— así que
+          reenviar la misma petición tras `Retry-After` es seguro y es lo esperado del cliente.
       headers:
         Retry-After:
-          description: Segundos estimados hasta el fin de la ventana.
+          description: Segundos estimados hasta poder reintentar (fin de la ventana, o drenaje de la ráfaga de escrituras).
           schema:
             type: integer
       content:
@@ -2576,6 +2694,12 @@ components:
                   code: MAINTENANCE_WINDOW
                   message: El mundo está en su ventana de mantenimiento diaria; el sim-time está congelado
                   details: { retry_after_seconds: 900 }
+            serialization_conflict:
+              value:
+                error:
+                  code: SERIALIZATION_CONFLICT
+                  message: la operación chocó con otras concurrentes y no se aplicó; reintenta la misma petición
+                  details: { retry_after_seconds: 1 }
 
   schemas:
     # ── Tipos primitivos del dominio ──
@@ -2872,8 +2996,9 @@ components:
             `INSUFFICIENT_COLLATERAL`, `INSUFFICIENT_FUNDS`, `PUBLICATION_EXHAUSTED`,
             `CANCEL_COOLDOWN_ACTIVE`, `BELOW_MIN_LOT`, `STOCK_ALREADY_RESERVED`,
             `PLACEMENT_INVALID`, `NOT_RESOURCE_OWNER`, `VEHICLE_SEALED`,
-            `NO_ROUTE_FOUND`, `MAINTENANCE_WINDOW`, `RATE_LIMITED`,
-            `VALIDATION_ERROR`, `NOT_FOUND`, `UNAUTHORIZED`, `INTERNAL`.
+            `NO_ROUTE_FOUND`, `MAINTENANCE_WINDOW`, `SERIALIZATION_CONFLICT`,
+            `RATE_LIMITED`, `VALIDATION_ERROR`, `NOT_FOUND`, `UNAUTHORIZED`,
+            `INTERNAL`.
           examples: [INSUFFICIENT_COLLATERAL]
         message:
           type: string
@@ -3914,6 +4039,18 @@ components:
         route_id:
           $ref: '#/components/schemas/RouteId'
           description: Ruta propia que empieza en el nodo del cargamento y termina en el nodo destino del contrato.
+    VehicleReposition:
+      type: object
+      description: |
+        Orden de viaje EN VACÍO de un vehículo propio `idle`: lo pone en ruta **sin carga**
+        por una ruta propia que empieza en su nodo actual, para que quede disponible donde
+        hay carga que recoger. Sin él, un vehículo se queda varado en el destino de su
+        última entrega.
+      required: [route_id]
+      properties:
+        route_id:
+          $ref: '#/components/schemas/RouteId'
+          description: Ruta propia, toda ella del modo del vehículo, que empieza en el nodo donde está el vehículo.
     Terminal:
       type: object
       required: [id, node_id, owner_account_id, transshipment_per_hour, queue_length]

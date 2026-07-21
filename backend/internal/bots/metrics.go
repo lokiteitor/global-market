@@ -13,6 +13,10 @@ type Metrics struct {
 	// Cash publica la caja de cada bot en unidades menores, actualizada al
 	// decidir (ii_bot_cash{bot}).
 	Cash *prometheus.GaugeVec
+	// Active publica cuántos bots de cada arquetipo están ejecutando su bucle
+	// de decisión (ii_bots_active{archetype}): la población que la densidad
+	// dinámica gobierna, no la aprovisionada.
+	Active *prometheus.GaugeVec
 }
 
 // NewMetrics registra las métricas del módulo en el registry (nil = sin
@@ -31,9 +35,13 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 			Name: "ii_bot_cash",
 			Help: "Caja de cada bot en unidades menores de dinero, actualizada al decidir.",
 		}, []string{"bot"}),
+		Active: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "ii_bots_active",
+			Help: "Bots de cada arquetipo ejecutando su bucle de decisión (población activa, válvula de carga del GDD §19).",
+		}, []string{"archetype"}),
 	}
 	if reg != nil {
-		reg.MustRegister(m.Decisions, m.Errors, m.Cash)
+		reg.MustRegister(m.Decisions, m.Errors, m.Cash, m.Active)
 	}
 	return m
 }

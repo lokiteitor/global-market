@@ -3,6 +3,7 @@ package production
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -147,15 +148,15 @@ func WorkerOptionsFromEnv() (WorkerOptions, error) {
 		opts.SweepInterval = d
 	}
 	if v := strings.TrimSpace(os.Getenv(EnvSweepBatchSize)); v != "" {
-		var n int
-		if _, err := fmt.Sscanf(v, "%d", &n); err != nil {
+		n, err := strconv.Atoi(v)
+		if err != nil {
 			return WorkerOptions{}, fmt.Errorf("world/production: %s inválido %q (entero): %w", EnvSweepBatchSize, v, err)
 		}
 		opts.BatchSize = n
 	}
 	if v := strings.TrimSpace(os.Getenv(EnvBuildSimSeconds)); v != "" {
-		var n int64
-		if _, err := fmt.Sscanf(v, "%d", &n); err != nil {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
 			return WorkerOptions{}, fmt.Errorf("world/production: %s inválido %q (entero): %w", EnvBuildSimSeconds, v, err)
 		}
 		opts.BuildSimSeconds = n
@@ -168,9 +169,9 @@ func WorkerOptionsFromEnv() (WorkerOptions, error) {
 		opts.ReconcileInterval = d
 	}
 	if v := strings.TrimSpace(os.Getenv(EnvReconcileGrace)); v != "" {
-		var n int
-		if _, err := fmt.Sscanf(v, "%d", &n); err != nil {
-			return WorkerOptions{}, fmt.Errorf("world/production: %s inválido %q (entero): %w", EnvReconcileGrace, v, err)
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return WorkerOptions{}, fmt.Errorf("world/production: %s inválido %q (entero de pasadas consecutivas, NO una duración): %w", EnvReconcileGrace, v, err)
 		}
 		opts.ReconcileGrace = n
 	}

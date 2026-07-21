@@ -171,7 +171,7 @@ El fan-out lo alimenta el consumidor de outbox **`notification_gateway`** (proce
 | `contract.confirmed` / `.delivered` / `.settled` / `.expired_undelivered` | el comprador **y** el vendedor |
 | `shipment.created` / `.dispatched` / `.released` | el dueño del cargamento |
 | `shipment.arrived` | el dueño **y** el comprador del contrato |
-| `vehicle.purchased` / `.updated` / `.arrived` / `.broken` / `.stranded` | el dueño |
+| `vehicle.purchased` / `.updated` / `.repositioned` / `.arrived` / `.broken` / `.stranded` | el dueño |
 | `building.created` / `.updated` / `.upgraded` / `.constructed` | el dueño |
 | `batch.queued` / `.completed` / `.paused` / `.cancelled` | el dueño |
 | `concession.granted` / `.renewed` | el titular |

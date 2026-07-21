@@ -242,6 +242,39 @@ func (r *Repo) InsertNetworkNode(ctx context.Context, id uuid.UUID, kind sqlcgen
 	return nodeID, nil
 }
 
+// NearestRoadNodeInRegion devuelve el nodo road-conectado de la región más
+// cercano al nodo dado (enganche del ramal de última milla); pgx.ErrNoRows si la
+// región aún no tiene red vial.
+func (r *Repo) NearestRoadNodeInRegion(ctx context.Context, regionID, nodeID uuid.UUID) (uuid.UUID, error) {
+	return r.q.NearestRoadNodeInRegion(ctx, sqlcgen.NearestRoadNodeInRegionParams{
+		RegionID: regionID,
+		NodeID:   nodeID,
+	})
+}
+
+// InsertRoadSpurLink crea el enlace road dirigido from→to con su único segmento
+// en la región y devuelve el id del enlace y su longitud en metros.
+func (r *Repo) InsertRoadSpurLink(ctx context.Context, linkID, segmentID, regionID, fromNodeID, toNodeID uuid.UUID) (uuid.UUID, int32, error) {
+	link, err := r.q.InsertRoadSpurLink(ctx, sqlcgen.InsertRoadSpurLinkParams{
+		ID:              linkID,
+		CapacityPerHour: spurRoadCapacityPerHour,
+		BaseSpeedKmh:    spurRoadBaseSpeedKmh,
+		FromNodeID:      fromNodeID,
+		ToNodeID:        toNodeID,
+	})
+	if err != nil {
+		return uuid.Nil, 0, fmt.Errorf("world/buildings: creando el ramal road %s→%s: %w", fromNodeID, toNodeID, err)
+	}
+	if err := r.q.InsertRoadSpurSegment(ctx, sqlcgen.InsertRoadSpurSegmentParams{
+		ID:       segmentID,
+		RegionID: regionID,
+		LinkID:   link.ID,
+	}); err != nil {
+		return uuid.Nil, 0, fmt.Errorf("world/buildings: creando el segmento del ramal road %s: %w", link.ID, err)
+	}
+	return link.ID, link.LengthM, nil
+}
+
 // ─── Configuración y mejora ──────────────────────────────────────────────────
 
 // NearestCityLevelInRegion devuelve el nivel de la ciudad más cercana al

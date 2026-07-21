@@ -349,6 +349,11 @@ func (h *Handlers) writeError(w http.ResponseWriter, r *http.Request, err error,
 		errors.Is(err, ErrValidation):
 		httpx.WriteError(w, http.StatusUnprocessableEntity, httpx.CodeValidationError, err.Error(), nil)
 	default:
+		// Petición abortada por el cliente o plazo agotado: no es un fallo
+		// del servicio y no debe contarse como 5xx ni loguearse como ERROR.
+		if httpx.WriteClientGone(w, r, h.logger, err, doing) {
+			return
+		}
 		logging.WithRequestID(h.logger, httpx.RequestIDFromContext(r.Context())).LogAttrs(
 			r.Context(), slog.LevelError, "error "+doing, slog.String("error", err.Error()))
 		httpx.WriteError(w, http.StatusInternalServerError, httpx.CodeInternal, "error interno del servidor", nil)

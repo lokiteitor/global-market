@@ -88,6 +88,14 @@ func (m *Middleware) RequireAuth(next http.Handler) http.Handler {
 				writeUnauthorized(w)
 				return
 			}
+			// El cliente que aborta la petición mientras se resuelve su sesión
+			// no es un fallo del servicio: RequireAuth está en el camino de
+			// TODAS las peticiones autenticadas, así que contarlo como 5xx
+			// convertiría cada desconexión masiva de bots en un pico de errores
+			// del servidor (SAD §13: los disparadores se miden, no se adivinan).
+			if httpx.WriteClientGone(w, r, m.logger, err, "autenticando sesión") {
+				return
+			}
 			m.logger.LogAttrs(r.Context(), slog.LevelError, "error autenticando sesión",
 				slog.Any("error", err))
 			httpx.WriteError(w, http.StatusInternalServerError, httpx.CodeInternal,

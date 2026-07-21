@@ -38,7 +38,7 @@ var RoutedEventTypes = []string{
 	// shipment.* → corp del dueño (+ comprador en shipment.arrived)
 	"shipment.created", "shipment.dispatched", "shipment.at_terminal", "shipment.arrived", "shipment.released",
 	// vehicle.* / building.* / batch.* → corp del dueño
-	"vehicle.purchased", "vehicle.updated", "vehicle.arrived", "vehicle.broken", "vehicle.stranded",
+	"vehicle.purchased", "vehicle.updated", "vehicle.repositioned", "vehicle.arrived", "vehicle.broken", "vehicle.stranded",
 	"building.created", "building.updated", "building.upgraded", "building.constructed",
 	"batch.queued", "batch.completed", "batch.paused", "batch.cancelled",
 	// concession.* → corp del titular (en el traspaso, ambas partes)

@@ -294,14 +294,22 @@ func TestOutboxIntegration(t *testing.T) {
 				t.Errorf("%s{%s=%q} = %v, esperado >= %v", c.metric, c.label, c.value, got, c.want)
 			}
 		}
-		// El lag es un gauge (Set en cada polling): valores exactos.
-		// notifier quedó 2 eventos (contract.settled) por detrás del max(seq);
-		// settler quedó al día.
-		if got := metricValue(t, reg, "ii_outbox_consumer_lag", "consumer", "notifier"); got != 2 {
-			t.Errorf("lag de notifier: %v, esperado 2", got)
+		// El lag es un gauge (Set en cada polling): valores exactos. Mide el
+		// retraso REAL —eventos de LOS TIPOS SUSCRITOS pendientes—, no la
+		// distancia a la cabecera global del outbox: notifier terminó con 2
+		// contract.settled por encima de su cursor, pero NO son su trabajo (no
+		// los consume), así que está al día y vale 0. Con la resta a max(seq)
+		// este mismo caso daba 2 y el retraso fantasma crecía con la historia
+		// del mundo.
+		for _, consumer := range []string{"notifier", "settler"} {
+			if got := metricValue(t, reg, "ii_outbox_consumer_lag", "consumer", consumer); got != 0 {
+				t.Errorf("lag de %s: %v, esperado 0 (consumidor al día en sus tipos)", consumer, got)
+			}
 		}
-		if got := metricValue(t, reg, "ii_outbox_consumer_lag", "consumer", "settler"); got != 0 {
-			t.Errorf("lag de settler: %v, esperado 0", got)
+		// La suscripción queda declarada en la fila del cursor (migración 0016):
+		// es lo que permite medir ese retraso desde fuera del proceso.
+		if got := subscriptionOf(t, ctx, pool, "settler"); len(got) != 1 || got[0] != "contract.settled" {
+			t.Errorf("suscripción registrada de settler: %v, esperado [contract.settled]", got)
 		}
 	})
 
@@ -490,6 +498,18 @@ func cursorOf(t *testing.T, ctx context.Context, pool *pgxpool.Pool, name string
 		t.Fatalf("cursor de %s: %v", name, err)
 	}
 	return seq
+}
+
+// subscriptionOf devuelve los tipos de evento que el consumidor dejó
+// declarados en su fila de cursor (migración 0016).
+func subscriptionOf(t *testing.T, ctx context.Context, pool *pgxpool.Pool, name string) []string {
+	t.Helper()
+	var types []string
+	if err := pool.QueryRow(ctx,
+		`SELECT event_types FROM outbox.consumer_cursors WHERE consumer_name = $1`, name).Scan(&types); err != nil {
+		t.Fatalf("suscripción de %s: %v", name, err)
+	}
+	return types
 }
 
 // waitFor espera a que cond sea cierta con un plazo máximo.

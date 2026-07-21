@@ -106,12 +106,66 @@ func TestBuildingsIntegration(t *testing.T) {
 		if kind != "mine" {
 			t.Fatalf("kind del nodo = %q, esperado mine", kind)
 		}
+		// El nodo nace CONECTADO a la red vial: ramal road bidireccional (dos
+		// enlaces dirigidos) con su segmento en la región. Sin él, el edificio
+		// no admite entrega de vehículo ni ruta y queda inerte.
+		var nodeID uuid.UUID
+		if err := pool.QueryRow(ctx, `SELECT id FROM world.network_nodes WHERE building_id=$1`, uuid.MustParse(b.ID)).Scan(&nodeID); err != nil {
+			t.Fatalf("id del nodo: %v", err)
+		}
+		var outgoing, incoming, segments int
+		if err := pool.QueryRow(ctx, `
+			SELECT count(*) FILTER (WHERE l.from_node_id = $1),
+			       count(*) FILTER (WHERE l.to_node_id = $1),
+			       count(s.id)
+			  FROM world.network_links l
+			  JOIN world.link_segments s ON s.link_id = l.id AND s.region_id = $2
+			 WHERE l.mode = 'road' AND (l.from_node_id = $1 OR l.to_node_id = $1)`,
+			nodeID, region).Scan(&outgoing, &incoming, &segments); err != nil {
+			t.Fatalf("ramal road del nodo: %v", err)
+		}
+		if outgoing != 1 || incoming != 1 || segments != 2 {
+			t.Fatalf("ramal road del nodo %s: salientes=%d entrantes=%d segmentos=%d, esperado 1/1/2",
+				nodeID, outgoing, incoming, segments)
+		}
+		// El enganche es el nodo road-conectado MÁS CERCANO de la región.
+		var attached uuid.UUID
+		if err := pool.QueryRow(ctx, `
+			SELECT l.to_node_id FROM world.network_links l
+			 WHERE l.mode = 'road' AND l.from_node_id = $1`, nodeID).Scan(&attached); err != nil {
+			t.Fatalf("nodo de enganche del ramal: %v", err)
+		}
+		if attached != fx.nearJunction {
+			t.Fatalf("el ramal engancha en %s, esperado el junction más cercano %s", attached, fx.nearJunction)
+		}
 		// Coste al sink (build_cost 80000).
 		if d := cashBefore - cashBalance(t, ctx, pool, demo); d != 80000 {
 			t.Fatalf("la caja de Demo cayó %d, esperado 80000 (build_cost)", d)
 		}
 		if d := sinkBalance(t, ctx, pool) - sinkBefore; d != 80000 {
 			t.Fatalf("el sink subió %d, esperado 80000", d)
+		}
+	})
+
+	// ── Región sin red vial: el alta no falla, pero el nodo nace sin ramal ────
+	t.Run("región sin red vial: edificio sin ramal, sin error", func(t *testing.T) {
+		footprint := polygon(902000, 902000, 902200, 902200)
+		rec := do(t, demoMux, http.MethodPost, "/world/buildings",
+			fmt.Sprintf(`{"building_type_id":%q,"concession_id":%q,"footprint":%s}`, fx.furnaceType, fx.roadlessConc, footprint))
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("POST building en región sin red: status %d (body %s)", rec.Code, rec.Body.String())
+		}
+		b := dataOf[buildingDTO](t, rec)
+		var links int
+		if err := pool.QueryRow(ctx, `
+			SELECT count(*) FROM world.network_links l
+			  JOIN world.network_nodes n ON n.building_id = $1
+			 WHERE l.mode = 'road' AND (l.from_node_id = n.id OR l.to_node_id = n.id)`,
+			uuid.MustParse(b.ID)).Scan(&links); err != nil {
+			t.Fatalf("enlaces del nodo en región sin red: %v", err)
+		}
+		if links != 0 {
+			t.Fatalf("región sin red vial: se esperaban 0 enlaces road, hay %d", links)
 		}
 	})
 
@@ -269,6 +323,10 @@ type fixtures struct {
 	deepRecipe    uuid.UUID
 	concession1   uuid.UUID // libre, junto al yacimiento (18000..22000)
 	concession2   uuid.UUID // libre, lejos del yacimiento (39000..41000)
+	nearJunction  uuid.UUID // nodo road-conectado más cercano a la concesión 1
+	farJunction   uuid.UUID // el otro extremo de la red vial de prueba
+	roadlessRegin uuid.UUID // región SIN red vial
+	roadlessConc  uuid.UUID // concesión libre en la región sin red vial
 }
 
 func seedFixtures(t *testing.T, ctx context.Context, pool *pgxpool.Pool, region, demo, iron uuid.UUID) fixtures {
@@ -328,7 +386,55 @@ func seedFixtures(t *testing.T, ctx context.Context, pool *pgxpool.Pool, region,
 	// Concesiones libres de Demo (parcelas amplias, sin edificios).
 	insertConcession(t, ctx, pool, fx.concession1, region, demo, 18000, 18000, 22000, 22000)
 	insertConcession(t, ctx, pool, fx.concession2, region, demo, 39000, 39000, 41000, 41000)
+
+	// Red vial de prueba (el seed industrial —y con él la red— está omitido):
+	// dos junctions unidos por un par road bidireccional. El alta de edificio
+	// engancha su ramal al MÁS CERCANO de los dos.
+	fx.nearJunction = insertJunction(t, ctx, pool, region, 21000, 21000)
+	fx.farJunction = insertJunction(t, ctx, pool, region, 60000, 60000)
+	insertRoadPair(t, ctx, pool, region, fx.nearJunction, fx.farJunction)
+
+	// Región SIN red vial: allí el alta debe crear el edificio igualmente (sin
+	// ramal), no fallar.
+	fx.roadlessRegin = uuid.Must(uuid.NewV7())
+	exec(t, ctx, pool, `
+		INSERT INTO world.regions (id, name, grid_x, grid_y, bounds, biome, shard_key, canon_base)
+		VALUES ($1, 'Región Sin Red', 9, 9,
+		        ST_GeomFromText('POLYGON((900000 900000,910000 900000,910000 910000,900000 910000,900000 900000))', 0),
+		        'plains'::world.biome, 'shard-test', 1000)`, fx.roadlessRegin)
+	fx.roadlessConc = uuid.Must(uuid.NewV7())
+	insertConcession(t, ctx, pool, fx.roadlessConc, fx.roadlessRegin, demo, 901000, 901000, 903000, 903000)
 	return fx
+}
+
+// insertJunction crea un nodo de tránsito puro en la región (fixture de red).
+func insertJunction(t *testing.T, ctx context.Context, pool *pgxpool.Pool, region uuid.UUID, x, y int) uuid.UUID {
+	t.Helper()
+	id := uuid.Must(uuid.NewV7())
+	exec(t, ctx, pool, fmt.Sprintf(`
+		INSERT INTO world.network_nodes (id, kind, region_id, location)
+		VALUES ($1, 'junction', $2, ST_GeomFromText('POINT(%d %d)', 0))`, x, y), id, region)
+	return id
+}
+
+// insertRoadPair une dos nodos con enlaces road en ambos sentidos, cada uno con
+// su único segmento (la misma forma que la red del seed y del worldgen).
+func insertRoadPair(t *testing.T, ctx context.Context, pool *pgxpool.Pool, region, a, b uuid.UUID) {
+	t.Helper()
+	for _, d := range [2][2]uuid.UUID{{a, b}, {b, a}} {
+		link := uuid.Must(uuid.NewV7())
+		exec(t, ctx, pool, `
+			INSERT INTO world.network_links
+			       (id, mode, from_node_id, to_node_id, path, length_m, capacity_per_hour, base_speed_kmh)
+			SELECT $1, 'road', f.id, t.id, ST_MakeLine(f.location, t.location),
+			       GREATEST(1, round(ST_Distance(f.location, t.location)))::int, 60, 80
+			  FROM world.network_nodes f, world.network_nodes t
+			 WHERE f.id = $2 AND t.id = $3`, link, d[0], d[1])
+		exec(t, ctx, pool, `
+			INSERT INTO world.link_segments (id, link_id, region_id, seq, portion, length_m, congestion_ema)
+			SELECT $1, l.id, $2, 1, l.path, l.length_m, 1.0
+			  FROM world.network_links l WHERE l.id = $3`, uuid.Must(uuid.NewV7()), region, link)
+	}
 }
 
 func insertConcession(t *testing.T, ctx context.Context, pool *pgxpool.Pool, id, region, holder uuid.UUID, minX, minY, maxX, maxY int) {

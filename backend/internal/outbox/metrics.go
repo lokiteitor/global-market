@@ -22,12 +22,13 @@ var (
 		Help: "Total de eventos procesados y confirmados por cada consumidor.",
 	}, []string{"consumer"})
 
-	// consumerLag es el retraso de cada consumidor: max(seq) del outbox menos
-	// su cursor, actualizado en cada polling (incluye eventos de tipos a los
-	// que el consumidor no está suscrito).
+	// consumerLag es el retraso REAL de cada consumidor: eventos DE SUS TIPOS
+	// SUSCRITOS pendientes por encima de su cursor, actualizado en cada polling.
+	// Los eventos de tipos ajenos NO cuentan (no son su trabajo): un consumidor
+	// al día vale 0 aunque el mundo siga emitiendo. Satura en lagProbeLimit.
 	consumerLag = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "ii_outbox_consumer_lag",
-		Help: "Retraso del consumidor: max(seq) del outbox menos su cursor, actualizado en cada polling.",
+		Help: "Retraso del consumidor: eventos de sus tipos suscritos pendientes por encima de su cursor (satura en 10000).",
 	}, []string{"consumer"})
 )
 

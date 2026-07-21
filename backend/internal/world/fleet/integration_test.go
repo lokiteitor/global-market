@@ -43,8 +43,13 @@ type netFixture struct {
 	originNode, midNode   uuid.UUID
 	destNode, isolated    uuid.UUID
 	segA, segB            uuid.UUID
+	segC, segD            uuid.UUID
 	truckType, miniType   uuid.UUID
 	routeFull, routeShort uuid.UUID
+	// routeBack es el sentido inverso destino→origen (el grafo es DIRIGIDO: el
+	// camino de vuelta son sus propios enlaces): la ruta del viaje EN VACÍO con
+	// el que un vehículo varado tras una entrega vuelve donde hay carga.
+	routeBack uuid.UUID
 }
 
 // TestFleetIntegration ejercita world/fleet contra una BD real migrada (0001-0009)
@@ -360,6 +365,85 @@ func TestFleetIntegration(t *testing.T) {
 		}
 	})
 
+	// ── (5b) Viaje EN VACÍO: el vehículo varado vuelve donde hay carga ────────
+	// Sin esta primitiva un vehículo solo se mueve llevando carga y, como la
+	// entrega lo deja idle en el nodo DESTINO (donde no nace carga nueva), queda
+	// varado allí de por vida.
+	t.Run("reposicionamiento en vacio devuelve el vehiculo al origen", func(t *testing.T) {
+		resetFleet(t, ctx, pool)
+		simNow = 1000
+		// El camión está varado en el destino de su última entrega.
+		veh := makeVehicle(t, ctx, pool, demo, fx.truckType, fx.destNode, truckFuel, 0)
+
+		rec := do(t, demoMux, http.MethodPost, "/world/vehicles/"+veh.String()+"/reposition",
+			fmt.Sprintf(`{"route_id":%q}`, fx.routeBack))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("reposition válido: status %d body %s", rec.Code, rec.Body.String())
+		}
+		v := dataOf[vehicleDTO](t, rec)
+		if v.Status != "in_transit" || v.RouteID != fx.routeBack.String() {
+			t.Fatalf("vehículo tras reposicionar: status=%s route=%s (esperado in_transit/routeBack)", v.Status, v.RouteID)
+		}
+		if !outboxHas(t, ctx, pool, "vehicle.repositioned", veh) {
+			t.Fatal("no se emitió vehicle.repositioned")
+		}
+
+		wopts := fleet.DefaultWorkerOptions()
+		wopts.Roll = func() float64 { return 1.0 } // nunca avería
+		worker, err := fleet.NewTransitWorker(pool, sim, wopts, logger, nil)
+		if err != nil {
+			t.Fatalf("NewTransitWorker: %v", err)
+		}
+		simNow = 1000 + segTravelSecs
+		worker.RunOnce(ctx) // vence segC → segD
+		simNow = 1000 + 2*segTravelSecs
+		worker.RunOnce(ctx) // vence segD → llegada al origen, en vacío
+		vstatus, atNode, _, fuel, _, _ := vehicleRow(t, ctx, pool, veh)
+		if vstatus != "idle" || atNode != fx.originNode.String() {
+			t.Fatalf("tras el viaje en vacío: status=%s at_node=%s (esperado idle en el origen)", vstatus, atNode)
+		}
+		if fuel != truckFuel-fuelPerRoute {
+			t.Fatalf("combustible tras el viaje en vacío = %d, esperado %d", fuel, truckFuel-fuelPerRoute)
+		}
+		// Y ya puede volver a cargar donde SÍ nace la carga.
+		_, shID := stageShipment(t, ctx, pool, demo, norte, fx.widget, fx.originWH, fx.originNode, fx.destNode, shipQty, 900000)
+		if _, err := svc.DispatchShipment(ctx, demo, shID, fleet.ShipmentDispatch{VehicleID: veh, RouteID: fx.routeFull}); err != nil {
+			t.Fatalf("despacho tras el reposicionamiento: %v", err)
+		}
+	})
+
+	t.Run("reposicionamiento rechaza ruta ajena al nodo, carga a bordo, no idle y ajeno", func(t *testing.T) {
+		resetFleet(t, ctx, pool)
+		simNow = 1000
+		// La ruta no empieza donde está el vehículo.
+		veh := makeVehicle(t, ctx, pool, demo, fx.truckType, fx.destNode, truckFuel, 0)
+		if _, err := svc.RepositionVehicle(ctx, demo, veh, fleet.VehicleReposition{RouteID: fx.routeFull}); !isValidation(err) {
+			t.Fatalf("ruta que no empieza en el nodo del vehículo: err=%v (esperado validación 422)", err)
+		}
+		// Combustible insuficiente para el viaje en vacío.
+		dry := makeVehicle(t, ctx, pool, demo, fx.truckType, fx.destNode, 1, 0)
+		if _, err := svc.RepositionVehicle(ctx, demo, dry, fleet.VehicleReposition{RouteID: fx.routeBack}); !isValidation(err) {
+			t.Fatalf("combustible insuficiente: err=%v (esperado validación 422)", err)
+		}
+		// Con carga a bordo NO se reposiciona: esa carga se mueve despachando el
+		// cargamento (si no, viajaría fuera de su contrato).
+		_, shID := stageShipment(t, ctx, pool, demo, norte, fx.widget, fx.originWH, fx.originNode, fx.destNode, shipQty, 900000)
+		exec(t, ctx, pool, `UPDATE world.shipments SET status = 'in_transit', vehicle_id = $1, at_node_id = NULL WHERE id = $2`, veh, shID)
+		if _, err := svc.RepositionVehicle(ctx, demo, veh, fleet.VehicleReposition{RouteID: fx.routeBack}); !isValidation(err) {
+			t.Fatalf("vehículo con carga a bordo: err=%v (esperado validación 422)", err)
+		}
+		exec(t, ctx, pool, `DELETE FROM world.shipments WHERE id = $1`, shID)
+		// Vehículo no idle.
+		busy := makeTransitVehicle(t, ctx, pool, demo, fx.truckType, fx.segA)
+		if _, err := svc.RepositionVehicle(ctx, demo, busy, fleet.VehicleReposition{RouteID: fx.routeBack}); !errorIs(err, "no está idle") {
+			t.Fatalf("vehículo no idle: err=%v (esperado 409)", err)
+		}
+		// Vehículo ajeno.
+		if _, err := svc.RepositionVehicle(ctx, norte, veh, fleet.VehicleReposition{RouteID: fx.routeBack}); !errorIs(err, "otra corporación") {
+			t.Fatalf("vehículo ajeno: err=%v (esperado 403)", err)
+		}
+	})
+
 	// ── (6) Job de congestión actualiza la EMA por segmento ───────────────────
 	t.Run("job de congestion actualiza la EMA", func(t *testing.T) {
 		resetFleet(t, ctx, pool)
@@ -415,6 +499,11 @@ func seedNetwork(t *testing.T, ctx context.Context, pool *pgxpool.Pool, region, 
 	linkB := insertLink(t, ctx, pool, fx.midNode, fx.destNode, 20000, 100, "30000 10000,50000 10000")
 	fx.segA = insertSegment(t, ctx, pool, region, linkA, 20000, "10000 10000,30000 10000")
 	fx.segB = insertSegment(t, ctx, pool, region, linkB, 20000, "30000 10000,50000 10000")
+	// Sentido inverso (el grafo es dirigido: un ramal bidireccional son dos enlaces).
+	linkC := insertLink(t, ctx, pool, fx.destNode, fx.midNode, 20000, 100, "50000 10000,30000 10000")
+	linkD := insertLink(t, ctx, pool, fx.midNode, fx.originNode, 20000, 100, "30000 10000,10000 10000")
+	fx.segC = insertSegment(t, ctx, pool, region, linkC, 20000, "50000 10000,30000 10000")
+	fx.segD = insertSegment(t, ctx, pool, region, linkD, 20000, "30000 10000,10000 10000")
 
 	// Vehículos: camión (capacidad holgada) y mini (capacidad insuficiente).
 	fx.truckType = insertVehicleType(t, ctx, pool, "truck", fx.diesel, 1000, 100, 100, 1000, truckPrice)
@@ -423,6 +512,7 @@ func seedNetwork(t *testing.T, ctx context.Context, pool *pgxpool.Pool, region, 
 	// Rutas propias de demo: completa (origen→mid→destino) y corta (origen→mid).
 	fx.routeFull = insertRoute(t, ctx, pool, demo, "full", []uuid.UUID{linkA, linkB})
 	fx.routeShort = insertRoute(t, ctx, pool, demo, "short", []uuid.UUID{linkA})
+	fx.routeBack = insertRoute(t, ctx, pool, demo, "back", []uuid.UUID{linkC, linkD})
 
 	// Stock de widget en el almacén de origen (coherente físico↔contable).
 	seedStock(t, ctx, pool, demo, fx.originWH, fx.widget, bank, widgetStock)

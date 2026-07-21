@@ -15,6 +15,14 @@ export II_DATABASE_URL ?= postgres://imperio:imperio@localhost:5432/imperio?sslm
 .PHONY: help
 help: ## Lista las tareas disponibles
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}'
+	@echo ""
+	@echo "  stress / stress-docker EXIGEN II_STRESS_API_URL (obligatoria, SIN default: elegir"
+	@echo "  el target es siempre una decisión consciente). El harness REHÚSA arrancar si"
+	@echo "  II_ENV=prod o si el host de la API o de la BD no casa la allowlist de entornos NO"
+	@echo "  productivos (II_STRESS_ALLOW_HOSTS; por defecto localhost/127.0.0.1/::1/"
+	@echo "  host.docker.internal/*.stress.*/staging.*) — GDD §13.4: el modo stress test corre"
+	@echo "  en un ENTORNO DE PRUEBAS INDEPENDIENTE y nunca toca el mundo de producción."
+	@echo "  Ejemplo: II_STRESS_API_URL=http://localhost:8080/api/v1 II_STRESS_BOTS=500 make stress"
 
 # ─── Ciclo de vida global ────────────────────────────────────────────────
 .PHONY: build test lint fmt generate clean
@@ -27,7 +35,7 @@ clean: ## Elimina artefactos de build
 	rm -rf backend/bin frontend/.output frontend/.nuxt
 
 # ─── Ejecución ───────────────────────────────────────────────────────────
-.PHONY: dev run backend bots frontend
+.PHONY: dev run backend bots stress stress-docker frontend
 dev: infra-core migrate-up seed ## Prepara el entorno local: BD+observabilidad, esquema y seed (NO encadena worldgen: los tests asumen solo Askadia)
 	@echo ""
 	@echo "Entorno listo. En terminales separados:"
@@ -42,6 +50,10 @@ backend: ## Ejecuta gateway + engine en local
 	./scripts/run-backend.sh
 bots: ## Ejecuta el Bot Orchestration Service en local
 	cd backend && $(GO) run ./cmd/bots
+stress: ## Cluster de stress test contra un entorno NO productivo (II_STRESS_*)
+	cd backend && $(GO) run ./cmd/stress
+stress-docker: ## Igual que stress, en Docker (perfil compose stress, métricas en :8083)
+	$(COMPOSE) --profile stress up --build --abort-on-container-exit --exit-code-from stress
 frontend: ## Ejecuta el frontend en modo dev
 	cd frontend && $(NPM) run dev
 
@@ -86,7 +98,7 @@ infra: infra-core ## Alias de infra-core
 infra-core: ## PostgreSQL 18 + Prometheus + Grafana en Docker
 	$(COMPOSE) --profile core --profile obs up -d
 infra-down: ## Detiene todos los contenedores del proyecto
-	$(COMPOSE) --profile full --profile core --profile obs down
+	$(COMPOSE) --profile full --profile core --profile obs --profile stress down
 infra-logs:
 	$(COMPOSE) logs -f
 

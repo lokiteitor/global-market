@@ -31,6 +31,16 @@ const (
 	DefaultBuildSimSeconds int64 = 3600
 )
 
+// Parámetros del RAMAL ROAD de última milla que el alta de edificio tiende
+// desde su nodo hasta el nodo road-conectado más cercano de la región. Son los
+// MISMOS que usan el seed y el worldgen para la red vial (GDD 7.2): la carretera
+// es infraestructura del mundo, no un activo de la corporación, y su capacidad y
+// velocidad base no dependen de quién construya el edificio.
+const (
+	spurRoadCapacityPerHour int32 = 60
+	spurRoadBaseSpeedKmh    int32 = 80
+)
+
 // Límites de paginación FIJADOS por el contrato OpenAPI (limit: default 50,
 // maximum 200). No son configurables.
 const (

@@ -1,6 +1,7 @@
 package production_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -481,6 +482,64 @@ func TestProductionIntegration(t *testing.T) {
 		}
 		if n != 1 {
 			t.Fatalf("pasada 2 (persistente): Reconcile=%d, esperado 1 (divergencia escalada)", n)
+		}
+	})
+
+	// ── (m) La guarda de insumos mira el plano CONTABLE, no solo el físico ─────
+	// El insumo puede estar FÍSICAMENTE en el almacén y a la vez no tener saldo
+	// COMPROMETIBLE (stock_free): ventana de una venta publicada/aceptada —el
+	// stock pasa a stock_reserved sin moverse del almacén— o el desfase transitorio
+	// que la reconciliación tolera con II_RECONCILE_GRACE. La guarda física dejaba
+	// pasar el lote y el asiento de consumo (que debita stock_free) reventaba contra
+	// ck_accounts_non_negative (SQLSTATE 23514), registrado como WARN opaco con el
+	// mensaje crudo de PostgreSQL. Debe estancarse como los demás bloqueos de
+	// material: running, sin mutar nada, sin violación de constraint en el log.
+	t.Run("insumo sin saldo comprometible estanca el lote sin violar el check", func(t *testing.T) {
+		var logBuf bytes.Buffer
+		audited, err := production.NewWorker(pool, sim, wopts,
+			slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})), nil)
+		if err != nil {
+			t.Fatalf("NewWorker: %v", err)
+		}
+		b := insertBuilding(t, ctx, pool, region, demo, fx.concession, fx.furnaceType, "operational", 65000, 65000)
+		insertNode(t, ctx, pool, region, b, 65000, 65000)
+		seedStock(t, ctx, pool, demo, b, iron, burnInput) // físico == stock_free == 2
+		seedStock(t, ctx, pool, demo, b, coal, 100)
+		// Reservar TODO el insumo (stock_free → stock_reserved, asiento
+		// publication_lock) SIN mover el físico: el consumo dejaría stock_free en -2.
+		sfIron := stockFreeAccountID(t, ctx, pool, demo, iron, b)
+		srIron := uuid.Must(uuid.NewV7())
+		exec(t, ctx, pool, `
+			INSERT INTO ledger.accounts (id, kind, owner_account_id, product_id, warehouse_building_id)
+			VALUES ($1,'stock_reserved',$2,$3,$4)`, srIron, demo, iron, b)
+		postLedger(t, ctx, pool, "publication_lock", []ledgerEntry{{sfIron, -burnInput}, {srIron, burnInput}})
+
+		q := simNow
+		batch, err := svc.QueueBatches(ctx, demo, b, production.BatchInput{RecipeID: fx.burnRecipe, BatchesQueued: 1})
+		if err != nil {
+			t.Fatalf("QueueBatches: %v", err)
+		}
+		simNow = q + 200
+		audited.RunOnce(ctx)
+
+		if s := logBuf.String(); strings.Contains(s, "ck_accounts_non_negative") || strings.Contains(s, "23514") {
+			t.Fatalf("el lote reventó contra el check contable en vez de estancarse; log:\n%s", s)
+		}
+		status, done := batchState(t, ctx, pool, batch.ID)
+		if status != "running" || done != 0 {
+			t.Fatalf("lote = (%s, done %d), esperado (running, 0) por insumo sin saldo comprometible", status, done)
+		}
+		if got := inventoryQty(t, ctx, pool, b, iron); got != burnInput {
+			t.Fatalf("no debió consumir el insumo físico; iron = %d, esperado %d", got, burnInput)
+		}
+		if got := inventoryQty(t, ctx, pool, b, coal); got != 100 {
+			t.Fatalf("no debió consumir combustible; coal = %d, esperado 100", got)
+		}
+		if got := inventoryQty(t, ctx, pool, b, steel); got != 0 {
+			t.Fatalf("no debió producir; steel = %d, esperado 0", got)
+		}
+		if got := stockFree(t, ctx, pool, demo, iron, b); got != 0 {
+			t.Fatalf("stock_free del insumo = %d, esperado 0 (todo reservado, intacto)", got)
 		}
 	})
 }

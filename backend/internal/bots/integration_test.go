@@ -26,14 +26,15 @@
 package bots_test
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
 	"log/slog"
-	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -41,6 +42,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"github.com/lokiteitor/global-market/backend/internal/auth"
 	"github.com/lokiteitor/global-market/backend/internal/bots"
@@ -169,8 +171,6 @@ func TestBotsEconomicLoopIntegration(t *testing.T) {
 
 	// ── IDs del mundo sembrado ───────────────────────────────────────────────
 	coalID := queryUUID(t, ctx, pool, `SELECT id FROM world.products WHERE code = 'coal'`)
-	regionID := queryUUID(t, ctx, pool, `SELECT id FROM world.regions WHERE name = $1`, seed.RegionName)
-	junctionID := queryUUID(t, ctx, pool, `SELECT id FROM world.network_nodes WHERE kind = 'junction' AND region_id = $1`, regionID)
 	norteID := queryUUID(t, ctx, pool, `SELECT id FROM auth.accounts WHERE name = $1`, itNorteName)
 	norteNode := queryUUID(t, ctx, pool, `
 		SELECT n.id FROM world.network_nodes n
@@ -257,7 +257,11 @@ func TestBotsEconomicLoopIntegration(t *testing.T) {
 
 	traderClient := loginBot(t, ctx, apiURL, byName[traderBotName])
 	traderState := bots.NewState()
-	traderBot := bots.NewTrader(bots.DefaultTraderConfig(itCapital), traderBotName, logger, metrics)
+	// El trader escribe sus decisiones en un buffer: la auditoría exige log Y
+	// métrica, y el test comprueba las dos.
+	var traderLogs bytes.Buffer
+	traderBot := bots.NewTrader(bots.DefaultTraderConfig(itCapital), traderBotName,
+		slog.New(slog.NewJSONHandler(&traderLogs, nil)), metrics)
 
 	// ── (2) El coal_producer completa su setup y produce ─────────────────────
 	coalBotID := byName[coalBotName].AccountID
@@ -340,9 +344,9 @@ func TestBotsEconomicLoopIntegration(t *testing.T) {
 		 WHERE b.owner_account_id = $1 AND bt.code = 'iron_mine'`, ironBotID)
 	ironMineNode := queryUUID(t, ctx, pool, `SELECT id FROM world.network_nodes WHERE building_id = $1`, ironMineID)
 
-	// ── (3b) Red vial hasta las minas de los bots (infraestructura del mundo) ─
-	linkNodesBothWays(t, ctx, pool, regionID, coalMineNode, junctionID)
-	linkNodesBothWays(t, ctx, pool, regionID, ironMineNode, junctionID)
+	// ── (3b) Las minas nacieron enganchadas a la red vial por su propia alta ─
+	requireRoadSpur(t, ctx, pool, coalMineNode)
+	requireRoadSpur(t, ctx, pool, ironMineNode)
 
 	// ── (3c) El coal_producer acepta la compra y DESPACHA el cargamento ──────
 	coalCashBefore := cashOf(t, ctx, pool, coalBotID)
@@ -408,12 +412,135 @@ func TestBotsEconomicLoopIntegration(t *testing.T) {
 		t.Fatalf("caja del coal_producer tras liquidar: %d, esperado %d", got, wantCash)
 	}
 
-	// ── (4) El trader compra una ganga y re-lista con margen desde el almacén
-	//        ajeno donde reposa el stock ─────────────────────────────────────
+	// ── (3e) LIVENESS: el camión quedó varado en el nodo del COMPRADOR ──────
+	// Tras entregar, el ÚNICO camión del carbonero (MaxVehicles=1) está idle en
+	// la mina de hierro, no en la suya, y ningún cargamento futuro nace ahí.
+	// Sin viaje EN VACÍO el bot esperaría eternamente (wait/vehicle_*) y todos
+	// sus contratos posteriores incumplirían quemándole la garantía: debe
+	// REPOSICIONAR el camión hasta su mina y despachar el siguiente contrato.
+	truckID := queryUUID(t, ctx, pool, `SELECT id FROM world.vehicles WHERE owner_account_id = $1`, coalBotID)
+	if got := queryUUID(t, ctx, pool, `SELECT at_node_id FROM world.vehicles WHERE id = $1`, truckID); got != ironMineNode {
+		t.Fatalf("el camión quedó en %s, esperado varado en el nodo del comprador %s", got, ironMineNode)
+	}
+
 	norteClient := newSDKClient(t, apiURL)
 	if _, err := norteClient.Login(ctx, itNorteName, itNorteSecret); err != nil {
 		t.Fatalf("login Norte: %v", err)
 	}
+
+	// El carbonero repone stock libre para el siguiente contrato.
+	deadline = time.Now().Add(90 * time.Second)
+	for stockFreeOf(t, ctx, pool, coalBotID, coalID, coalMineID) < 100 {
+		if err := coalBot.Decide(ctx, coalClient, coalState); err != nil {
+			t.Fatalf("coal Decide (reposición de stock): %v", err)
+		}
+		prodWorker.RunOnce(ctx)
+		advanceSim(t, ctx, pool, batchStep)
+		if time.Now().After(deadline) {
+			t.Fatal("timeout: el coal_producer no repuso stock libre para el segundo contrato")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Norte pide carbón EN SU NODO: el cargamento nacerá en la mina del
+	// carbonero, donde su camión NO está. Paga por encima del resto del tablón
+	// para que el barrido unit_price_desc lo elija primero.
+	lot50, err := botsdk.QtyFromInt64(50)
+	if err != nil {
+		t.Fatalf("QtyFromInt64: %v", err)
+	}
+	norteBuy, err := norteClient.CreatePublication(ctx, botsdk.PublicationCreate{
+		Kind:               botsdk.PublicationBuy,
+		ProductID:          coalID.String(),
+		QuantityTotal:      "100",
+		UnitPrice:          "80",
+		MinLot:             lot50,
+		DestinationNodeID:  norteNode.String(),
+		DeliverySimSeconds: 10 * 86_400,
+	})
+	if err != nil {
+		t.Fatalf("Norte publicando la compra de coal: %v", err)
+	}
+
+	deadline = time.Now().Add(60 * time.Second)
+	var norteAccID string
+	for {
+		if err := coalBot.Decide(ctx, coalClient, coalState); err != nil {
+			t.Fatalf("coal Decide (aceptación de Norte): %v", err)
+		}
+		if id, ok := coalState.PendingAcceptance(norteBuy.ID); ok {
+			norteAccID = id
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timeout: el coal_producer no aceptó la compra de Norte")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	norteContractID := driveDrawUntilServed(t, ctx, ccriWorker, coalClient, norteAccID)
+	drainConsumer(t, ctx, pool, scConsumer, shipmentCreator.Handle, fleet.ConsumerShipmentCreator, "contract.confirmed")
+
+	// Decide repetidos con el motor de tránsito vivo: reposicionar en vacío →
+	// llegar a la mina → despachar. Sin la primitiva de viaje en vacío este
+	// bucle no termina nunca (el deadlock reportado).
+	norteShipment := queryUUID(t, ctx, pool, `SELECT id FROM world.shipments WHERE contract_id = $1`, norteContractID)
+	deadline = time.Now().Add(90 * time.Second)
+	for {
+		if err := coalBot.Decide(ctx, coalClient, coalState); err != nil {
+			t.Fatalf("coal Decide (reposicionamiento + despacho): %v", err)
+		}
+		var status string
+		if err := pool.QueryRow(ctx, `SELECT status::text FROM world.shipments WHERE id = $1`, norteShipment).Scan(&status); err != nil {
+			t.Fatalf("estado del cargamento de Norte: %v", err)
+		}
+		if status == "in_transit" {
+			break
+		}
+		advanceSim(t, ctx, pool, transitStep)
+		transitWorker.RunOnce(ctx)
+		if time.Now().After(deadline) {
+			t.Fatalf("timeout: el coal_producer no despachó el segundo contrato (estado %s) — camión varado", status)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	// El viaje en vacío es la decisión auditable que rompió el bloqueo, y NO se
+	// resolvió comprando un segundo camión (la flota sigue en 1).
+	if got := testutil.ToFloat64(metrics.Decisions.WithLabelValues(coalBotName, "reposition_vehicle")); got < 1 {
+		t.Fatalf("reposicionamientos auditados del coal_producer: %v, esperado >= 1", got)
+	}
+	if n := countRows(t, ctx, pool, `SELECT count(*) FROM world.vehicles WHERE owner_account_id = $1`, coalBotID); n != 1 {
+		t.Fatalf("flota del coal_producer: %d camiones, esperado 1 (reposiciona, no compra)", n)
+	}
+	// Y el segundo contrato se ENTREGA y liquida: nada de failed con 0 entregado.
+	driveTransitUntilDelivered(t, ctx, pool, transitWorker, norteShipment)
+	drainConsumer(t, ctx, pool, dcConsumer, deliveryConfirmer.Handle, contracts.ConsumerDeliveryConfirmer, "shipment.arrived")
+	var norteStatus string
+	var norteFill int
+	if err := pool.QueryRow(ctx, `SELECT status::text, COALESCE(fill_bp, 0) FROM ledger.contracts WHERE id = $1`, norteContractID).
+		Scan(&norteStatus, &norteFill); err != nil {
+		t.Fatalf("segundo contrato: %v", err)
+	}
+	if norteStatus != "settled" || norteFill != 10_000 {
+		t.Fatalf("segundo contrato del coal_producer: status=%s fill=%d, esperado settled/10000", norteStatus, norteFill)
+	}
+
+	// ── (4) El trader compra una ganga y re-lista con margen desde el almacén
+	//        ajeno donde reposa el stock ─────────────────────────────────────
+	// Pasada ociosa AUDITADA: sin gangas en el tablón (las ventas vivas están
+	// al base_price, por encima del umbral del 95%) el trader no compra, pero
+	// DEBE dejar rastro — log + ii_bot_decisions_total. Si no, un bot sin
+	// oportunidades es indistinguible de uno colgado o muerto.
+	traderLogs.Reset()
+	if err := traderBot.Decide(ctx, traderClient, traderState); err != nil {
+		t.Fatalf("trader Decide (tablón sin gangas): %v", err)
+	}
+	if got := testutil.ToFloat64(metrics.Decisions.WithLabelValues(traderBotName, "wait")); got != 1 {
+		t.Fatalf("esperas auditadas del trader: %v, esperada 1 (la pasada ociosa debe contar)", got)
+	}
+	if !strings.Contains(traderLogs.String(), `"reason":"no_bargain_on_board"`) {
+		t.Fatalf("el trader no registró la espera de la pasada ociosa: %s", traderLogs.String())
+	}
+
 	minLot, _ := botsdk.QtyFromInt64(50)
 	gangaPub, err := norteClient.CreatePublication(ctx, botsdk.PublicationCreate{
 		Kind:               botsdk.PublicationSell,
@@ -544,49 +671,30 @@ func drainConsumer(t *testing.T, ctx context.Context, pool *pgxpool.Pool, consum
 	}
 }
 
-// ─── Fixture de red vial ──────────────────────────────────────────────────────
+// ─── Conectividad vial de los edificios de los bots ──────────────────────────
 
-// linkNodesBothWays crea enlaces road dirigidos en ambos sentidos entre dos
-// nodos (con su segmento único, congestión fluida), como la red del seed: los
-// bots construyen minas pero las carreteras son infraestructura del mundo.
-func linkNodesBothWays(t *testing.T, ctx context.Context, pool *pgxpool.Pool, regionID, a, b uuid.UUID) {
+// requireRoadSpur exige que el nodo del edificio esté enganchado a la red vial
+// con su ramal BIDIRECCIONAL (un enlace dirigido por sentido, cada uno con su
+// segmento). El ramal lo tiende el ALTA del edificio (world/buildings): el test
+// no toca la red — sin él, el bot no podría comprar camión (nodo inaccesible
+// para el modo) ni planificar ruta.
+func requireRoadSpur(t *testing.T, ctx context.Context, pool *pgxpool.Pool, nodeID uuid.UUID) {
 	t.Helper()
-	ax, ay := nodeXY(t, ctx, pool, a)
-	bx, by := nodeXY(t, ctx, pool, b)
-	length := int64(math.Round(math.Hypot(bx-ax, by-ay)))
-	if length < 1_000 {
-		length = 1_000 // nodos casi coincidentes: longitud mínima de trazado
+	var outgoing, incoming, segments int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FILTER (WHERE l.from_node_id = $1),
+		       count(*) FILTER (WHERE l.to_node_id = $1),
+		       count(s.id)
+		  FROM world.network_links l
+		  JOIN world.link_segments s ON s.link_id = l.id
+		 WHERE l.mode = 'road' AND (l.from_node_id = $1 OR l.to_node_id = $1)`,
+		nodeID).Scan(&outgoing, &incoming, &segments); err != nil {
+		t.Fatalf("ramal road del nodo %s: %v", nodeID, err)
 	}
-	insertRoadLink(t, ctx, pool, regionID, a, ax, ay, b, bx, by, length)
-	insertRoadLink(t, ctx, pool, regionID, b, bx, by, a, ax, ay, length)
-}
-
-func insertRoadLink(t *testing.T, ctx context.Context, pool *pgxpool.Pool, regionID, from uuid.UUID, fx, fy float64, to uuid.UUID, tx, ty float64, lengthM int64) {
-	t.Helper()
-	path := fmt.Sprintf("LINESTRING(%f %f, %f %f)", fx, fy, tx, ty)
-	linkID := uuid.Must(uuid.NewV7())
-	if _, err := pool.Exec(ctx, `
-		INSERT INTO world.network_links
-		       (id, mode, from_node_id, to_node_id, path, length_m, capacity_per_hour, base_speed_kmh)
-		VALUES ($1, 'road', $2, $3, ST_GeomFromText($4, 0), $5, 60, 80)`,
-		linkID, from, to, path, lengthM); err != nil {
-		t.Fatalf("creando el enlace road %s→%s: %v", from, to, err)
+	if outgoing < 1 || incoming < 1 || segments < 2 {
+		t.Fatalf("el nodo %s nació aislado: enlaces road salientes=%d entrantes=%d segmentos=%d",
+			nodeID, outgoing, incoming, segments)
 	}
-	if _, err := pool.Exec(ctx, `
-		INSERT INTO world.link_segments (id, link_id, region_id, seq, portion, length_m, congestion_ema)
-		VALUES ($1, $2, $3, 1, ST_GeomFromText($4, 0), $5, 1.0)`,
-		uuid.Must(uuid.NewV7()), linkID, regionID, path, lengthM); err != nil {
-		t.Fatalf("creando el segmento del enlace %s: %v", linkID, err)
-	}
-}
-
-func nodeXY(t *testing.T, ctx context.Context, pool *pgxpool.Pool, nodeID uuid.UUID) (float64, float64) {
-	t.Helper()
-	var x, y float64
-	if err := pool.QueryRow(ctx, `SELECT ST_X(location), ST_Y(location) FROM world.network_nodes WHERE id = $1`, nodeID).Scan(&x, &y); err != nil {
-		t.Fatalf("ubicación del nodo %s: %v", nodeID, err)
-	}
-	return x, y
 }
 
 // ─── Clientes SDK ─────────────────────────────────────────────────────────────

@@ -600,6 +600,26 @@ func (r *Repo) GetSinkAccount(ctx context.Context) (ledgerAccount, error) {
 	return ledgerAccount{ID: row.ID, Balance: row.Balance}, nil
 }
 
+// GetStockFreeBalance devuelve el saldo COMPROMETIBLE contable de (dueño,
+// producto, almacén) —la cuenta stock_free que debitan los asientos de consumo—;
+// 0 si la cuenta aún no existe. Lectura PURA: a diferencia de
+// EnsureStockFreeAccount no crea nada, porque la fase de comprobación del motor
+// no muta. Es el plano que hay que mirar antes de consumir: el físico
+// (building_inventories) incluye stock ya comprometido en stock_reserved (una
+// venta publicada/aceptada no mueve la mercancía del almacén) y puede ir por
+// delante del asiento durante la ventana que tolera la reconciliación.
+func (r *Repo) GetStockFreeBalance(ctx context.Context, owner, product, warehouse uuid.UUID) (int64, error) {
+	o, p, w := owner, product, warehouse
+	row, err := r.q.GetStockFreeAccount(ctx, sqlcgen.GetStockFreeAccountParams{OwnerAccountID: &o, ProductID: &p, WarehouseBuildingID: &w})
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return 0, nil
+	case err != nil:
+		return 0, fmt.Errorf("world/production: consultando el saldo stock_free (%s, %s, %s): %w", owner, product, warehouse, err)
+	}
+	return row.Balance, nil
+}
+
 // EnsureStockFreeAccount localiza (o crea on-demand) la cuenta stock_free de
 // (dueño, producto, almacén).
 func (r *Repo) EnsureStockFreeAccount(ctx context.Context, owner, product, warehouse uuid.UUID) (ledgerAccount, error) {
@@ -689,7 +709,7 @@ func (r *Repo) PostLedgerTransaction(ctx context.Context, kind sqlcgen.LedgerTra
 			AccountID:     e.AccountID,
 			Amount:        e.Amount,
 		}); err != nil {
-			return fmt.Errorf("world/production: asentando la partida de %s (cuenta %s): %w", reference, e.AccountID, err)
+			return fmt.Errorf("world/production: asentando la partida de %s (cuenta %s): %w", reference, e.AccountID, mapLedgerError(err))
 		}
 	}
 	return nil

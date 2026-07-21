@@ -53,8 +53,56 @@ func TestBackoffDelayBounds(t *testing.T) {
 func TestWaitBackoffHonoursCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err := waitBackoff(ctx, 5); !errors.Is(err, context.Canceled) {
+	if err := waitBackoff(ctx, time.Second); !errors.Is(err, context.Canceled) {
 		t.Fatalf("waitBackoff con contexto cancelado: %v, esperado context.Canceled", err)
+	}
+}
+
+func TestBudgetAllows(t *testing.T) {
+	// Sin plazo (trabajos de fondo): siempre hay presupuesto.
+	if !budgetAllows(context.Background(), time.Hour) {
+		t.Fatal("un contexto sin deadline debe permitir el reintento")
+	}
+	// Plazo holgado: cede.
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	if !budgetAllows(ctx, 10*time.Millisecond) {
+		t.Fatal("un plazo holgado debe permitir el reintento")
+	}
+	// Plazo más corto que la espera: rendirse ahora, con tiempo de responder.
+	short, cancelShort := context.WithTimeout(context.Background(), 5*time.Millisecond)
+	defer cancelShort()
+	if budgetAllows(short, time.Second) {
+		t.Fatal("un plazo menor que el backoff NO debe permitir el reintento")
+	}
+}
+
+// TestSerializationErrorIsRetryable fija el contrato del error tipado: las
+// capas HTTP lo reconocen por ErrSerializationExhausted (para responder algo
+// reintentable) sin perder el 40001 subyacente para el diagnóstico.
+func TestSerializationErrorIsRetryable(t *testing.T) {
+	pgErr := &pgconn.PgError{Code: sqlstateSerializationFailure, Message: "could not serialize access"}
+	err := error(&SerializationError{Attempts: maxTxRetries + 1, Elapsed: 250 * time.Millisecond, Err: pgErr})
+	wrapped := fmt.Errorf("contracts: cancelando la publicación: %w", err)
+
+	if !errors.Is(wrapped, ErrSerializationExhausted) {
+		t.Fatal("el error agotado debe reconocerse con ErrSerializationExhausted a través de las capas")
+	}
+	var pg *pgconn.PgError
+	if !errors.As(wrapped, &pg) || pg.Code != sqlstateSerializationFailure {
+		t.Fatalf("el 40001 subyacente debe seguir accesible: %v", wrapped)
+	}
+	var serErr *SerializationError
+	if !errors.As(wrapped, &serErr) || serErr.Attempts != maxTxRetries+1 {
+		t.Fatalf("el error tipado debe conservar los intentos: %+v", serErr)
+	}
+	if serErr.RetryAfter() <= 0 {
+		t.Fatalf("RetryAfter = %v, esperado > 0", serErr.RetryAfter())
+	}
+	// No es un error de programación: retryableTxError sigue viéndolo como
+	// transitorio (importa si alguien lo reenvuelve y lo vuelve a evaluar).
+	if !retryableTxError(wrapped) {
+		t.Fatal("el error agotado sigue siendo transitorio para retryableTxError")
 	}
 }
 

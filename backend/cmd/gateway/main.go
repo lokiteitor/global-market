@@ -18,6 +18,7 @@ import (
 	"github.com/lokiteitor/global-market/backend/internal/gateway"
 	"github.com/lokiteitor/global-market/backend/internal/outbox"
 	"github.com/lokiteitor/global-market/backend/internal/platform/config"
+	"github.com/lokiteitor/global-market/backend/internal/platform/db"
 	"github.com/lokiteitor/global-market/backend/internal/platform/metrics"
 	"github.com/lokiteitor/global-market/backend/internal/platform/service"
 )
@@ -47,6 +48,10 @@ func run() error {
 	// acceptance.registered, publication.cancelled) al publicar/aceptar/cancelar;
 	// el módulo registra sus contadores en el registry de este binario (outbox.go).
 	outbox.RegisterMetrics(app.Metrics().Registry())
+	// Métricas de las transacciones SERIALIZABLE (reintentos por conflicto y
+	// presupuestos agotados): sin esto el disparador MEDIDO de contención
+	// (SAD §13) es ciego — publicar y cancelar son los caminos más disputados.
+	db.RegisterTxMetrics(app.Metrics().Registry())
 
 	opts, err := gateway.OptionsFromEnv()
 	if err != nil {

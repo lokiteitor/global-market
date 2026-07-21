@@ -248,18 +248,20 @@ func (r *Repo) GetProductUnitVolume(ctx context.Context, id uuid.UUID) (int32, e
 
 // ─── Cargamentos ──────────────────────────────────────────────────────────────
 
-// ListShipments lista los cargamentos de un titular con filtros y keyset.
-func (r *Repo) ListShipments(ctx context.Context, owner uuid.UUID, f ShipmentFilter, afterID *uuid.UUID, limit int32) ([]Shipment, error) {
+// ListShipments lista los cargamentos VISIBLES para una corporación (propios y
+// los que transporta como transportista de un flete) con filtros y keyset.
+func (r *Repo) ListShipments(ctx context.Context, account uuid.UUID, f ShipmentFilter, afterID *uuid.UUID, limit int32) ([]Shipment, error) {
 	rows, err := r.q.ListShipments(ctx, sqlcgen.ListShipmentsParams{
-		OwnerAccountID: owner,
-		Status:         nullShipmentStatus(f.Status),
-		ContractID:     f.ContractID,
-		VehicleID:      f.VehicleID,
-		AfterID:        afterID,
-		PageLimit:      limit,
+		AccountID:         account,
+		Status:            nullShipmentStatus(f.Status),
+		ContractID:        f.ContractID,
+		FreightContractID: f.FreightContractID,
+		VehicleID:         f.VehicleID,
+		AfterID:           afterID,
+		PageLimit:         limit,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("world/fleet: listando cargamentos de %s: %w", owner, err)
+		return nil, fmt.Errorf("world/fleet: listando cargamentos de %s: %w", account, err)
 	}
 	out := make([]Shipment, len(rows))
 	for i, row := range rows {

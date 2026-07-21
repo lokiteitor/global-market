@@ -45,6 +45,7 @@ type Service struct {
 
 	purchased     prometheus.Counter
 	dispatched    prometheus.Counter
+	repositioned  prometheus.Counter
 	slotPurchases prometheus.Counter
 }
 
@@ -76,13 +77,17 @@ func NewService(pool *pgxpool.Pool, sim SimSource, opts Options, logger *slog.Lo
 			Name: "ii_shipments_dispatched_total",
 			Help: "Total de cargamentos despachados (puestos en tránsito).",
 		}),
+		repositioned: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "ii_vehicles_repositioned_total",
+			Help: "Total de vehículos puestos en ruta EN VACÍO (viajes de reposicionamiento).",
+		}),
 		slotPurchases: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "ii_slot_purchases_total",
 			Help: "Total de slots de prioridad de terminal comprados (GDD 7.3).",
 		}),
 	}
 	if reg != nil {
-		reg.MustRegister(s.purchased, s.dispatched, s.slotPurchases)
+		reg.MustRegister(s.purchased, s.dispatched, s.repositioned, s.slotPurchases)
 	}
 	return s, nil
 }
@@ -317,9 +322,151 @@ func (s *Service) UpdateVehicle(ctx context.Context, owner, id uuid.UUID, in Veh
 	return v, nil
 }
 
+// ─── Reposicionamiento en vacío ───────────────────────────────────────────────
+
+// RepositionVehicle pone en ruta un vehículo propio idle SIN carga por una ruta
+// propia que empieza en su nodo actual: el viaje en vacío (deadhead) del
+// transporte real.
+//
+// Sin esta primitiva un vehículo solo podría moverse llevando un cargamento y,
+// como la entrega lo deja idle en el nodo DESTINO, quedaría varado allí para
+// siempre: ningún cargamento futuro nace en ese nodo, así que el vehículo nunca
+// volvería a estar donde hay carga. Es el mismo motor de tránsito del despacho
+// (mismas validaciones de modo, extremos y combustible); solo cambia que no hay
+// cargamento a bordo, y por eso se exige explícitamente que el vehículo vaya
+// vacío.
+func (s *Service) RepositionVehicle(ctx context.Context, owner, vehicleID uuid.UUID, in VehicleReposition) (Vehicle, error) {
+	simNow := s.sim.Now(ctx)
+
+	var originNode, destNode uuid.UUID
+	var distanceM int64
+	err := db.RunSerializable(ctx, s.pool, func(tx pgx.Tx) error {
+		r := s.repo.WithTx(tx)
+
+		v, err := r.LockVehicle(ctx, vehicleID)
+		switch {
+		case errors.Is(err, pgx.ErrNoRows):
+			return fmt.Errorf("%w (%s)", ErrVehicleNotFound, vehicleID)
+		case err != nil:
+			return fmt.Errorf("world/fleet: bloqueando el vehículo %s: %w", vehicleID, err)
+		}
+		if v.OwnerAccountID != owner {
+			return fmt.Errorf("%w (vehículo %s)", ErrForbidden, vehicleID)
+		}
+		if v.Status == string(sqlcgen.WorldVehicleStatusSealed) {
+			return fmt.Errorf("%w (%s)", ErrVehicleSealed, vehicleID)
+		}
+		if v.Status != string(sqlcgen.WorldVehicleStatusIdle) {
+			return fmt.Errorf("%w (estado %s)", ErrVehicleNotIdle, v.Status)
+		}
+		if v.AtNodeID == nil {
+			return fmt.Errorf("%w: el vehículo no está en un nodo", ErrValidation)
+		}
+		originNode = *v.AtNodeID
+
+		// EN VACÍO: un vehículo con carga a bordo se mueve despachando el
+		// cargamento (POST /world/shipments/{id}/dispatch), nunca por aquí; si no,
+		// la carga viajaría sin contrato que la ampare.
+		aboard, err := r.ListShipments(ctx, owner, ShipmentFilter{
+			VehicleID: &vehicleID, Status: string(sqlcgen.WorldShipmentStatusInTransit),
+		}, nil, 1)
+		if err != nil {
+			return err
+		}
+		if len(aboard) > 0 {
+			return fmt.Errorf("%w: el vehículo lleva carga a bordo (%s): se mueve despachando el cargamento", ErrValidation, aboard[0].ID)
+		}
+
+		vt, err := r.GetVehicleType(ctx, v.VehicleTypeID)
+		if err != nil {
+			return fmt.Errorf("world/fleet: consultando el tipo del vehículo %s: %w", vehicleID, err)
+		}
+
+		// Modo: un vehículo solo circula por enlaces de SU modo (GDD 7.3).
+		wrong, err := r.CountRouteLegsWrongMode(ctx, in.RouteID, vt.Mode)
+		if err != nil {
+			return err
+		}
+		if wrong > 0 {
+			return fmt.Errorf("%w (vehículo %s modo %s)", ErrWrongVehicleMode, vehicleID, vt.Mode)
+		}
+
+		routeOwner, _, err := r.GetRouteOwnerActive(ctx, in.RouteID)
+		switch {
+		case errors.Is(err, pgx.ErrNoRows):
+			return fmt.Errorf("%w (%s)", ErrNotFound, in.RouteID)
+		case err != nil:
+			return fmt.Errorf("world/fleet: consultando la ruta %s: %w", in.RouteID, err)
+		}
+		if routeOwner != owner {
+			return fmt.Errorf("%w (ruta %s)", ErrForbidden, in.RouteID)
+		}
+		first, err := r.GetRouteFirstSegment(ctx, in.RouteID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("%w: la ruta %s no tiene tramos", ErrValidation, in.RouteID)
+		} else if err != nil {
+			return fmt.Errorf("world/fleet: consultando el primer segmento de la ruta %s: %w", in.RouteID, err)
+		}
+		ep, err := r.GetRouteEndpoints(ctx, in.RouteID)
+		if err != nil {
+			return fmt.Errorf("world/fleet: consultando los extremos de la ruta %s: %w", in.RouteID, err)
+		}
+		if ep.FirstFromNode != originNode {
+			return fmt.Errorf("%w: la ruta no empieza en el nodo del vehículo", ErrValidation)
+		}
+		destNode = ep.LastToNode
+		distanceM = ep.TotalLengthM
+
+		// Combustible: alcanza la distancia total de la ruta (el vehículo nace con
+		// el tanque de su autonomía y no hay repostaje, ver PurchaseVehicle).
+		fuelNeeded := fuelForDistance(vt.FuelPer100km, ep.TotalLengthM)
+		if v.Fuel < fuelNeeded {
+			return fmt.Errorf("%w: el combustible del vehículo (%d) no cubre la distancia de la ruta (necesita %d)", ErrValidation, v.Fuel, fuelNeeded)
+		}
+
+		af := advanceFn{
+			BaseSpeedKmh:  minInt32(vt.SpeedKmh, first.BaseSpeedKmh),
+			CongestionEma: first.CongestionEma,
+			LengthM:       first.LengthM,
+			Dir:           1,
+		}
+		afBytes, err := af.marshal()
+		if err != nil {
+			return err
+		}
+		if err := r.DispatchVehicle(ctx, dispatchVehicleParams{
+			ID: vehicleID, RouteID: in.RouteID, OnSegment: first.SegmentID, AdvanceFn: afBytes, SimNow: simNow,
+		}); err != nil {
+			return err
+		}
+		return outbox.Emit(ctx, tx, int64(simNow), AggregateVehicle, vehicleID, EventVehicleRepositioned, VehicleRepositionedPayload{
+			VehicleID: vehicleID.String(), OwnerAccountID: owner.String(), RouteID: in.RouteID.String(),
+			OriginNodeID: originNode.String(), DestinationNodeID: destNode.String(),
+			DistanceM: distanceM, RepositionedAtSim: int64(simNow),
+		})
+	})
+	if err != nil {
+		return Vehicle{}, mapLedgerError(err)
+	}
+	s.repositioned.Inc()
+	s.logger.Info("vehículo reposicionado en vacío",
+		slog.String("vehicle_id", vehicleID.String()), slog.String("owner", owner.String()),
+		slog.String("route_id", in.RouteID.String()),
+		slog.String("origin_node_id", originNode.String()), slog.String("destination_node_id", destNode.String()),
+		slog.Int64("distance_m", distanceM))
+
+	v, err := s.repo.GetVehicle(ctx, vehicleID, simNow)
+	if err != nil {
+		return Vehicle{}, fmt.Errorf("world/fleet: releyendo el vehículo reposicionado %s: %w", vehicleID, err)
+	}
+	return v, nil
+}
+
 // ─── Cargamentos (lectura) ────────────────────────────────────────────────────
 
-// ListShipments devuelve los cargamentos del titular con filtros.
+// ListShipments devuelve los cargamentos VISIBLES para la corporación: los
+// propios y los de un CCRI-Flete en el que es TRANSPORTISTA (dueño = cargador,
+// pero el despacho es suyo: sin verlos no podría ejecutar el flete que aceptó).
 func (s *Service) ListShipments(ctx context.Context, owner uuid.UUID, f ShipmentFilter) ([]Shipment, string, error) {
 	if f.Status != "" && !validShipmentStatus(f.Status) {
 		return nil, "", fmt.Errorf("%w: status inválido %q", ErrValidation, f.Status)
@@ -344,7 +491,9 @@ func (s *Service) ListShipments(ctx context.Context, owner uuid.UUID, f Shipment
 	return rows, next, nil
 }
 
-// GetShipment devuelve un cargamento propio. 404/403 por propiedad.
+// GetShipment devuelve un cargamento visible para la corporación: propio o, en
+// un CCRI-Flete, el que transporta como transportista (misma visibilidad que
+// ListShipments y misma autorización que el despacho). 404/403 en otro caso.
 func (s *Service) GetShipment(ctx context.Context, owner, id uuid.UUID) (Shipment, error) {
 	ctx, cancel := context.WithTimeout(ctx, s.opts.QueryTimeout)
 	defer cancel()
@@ -355,10 +504,21 @@ func (s *Service) GetShipment(ctx context.Context, owner, id uuid.UUID) (Shipmen
 	case err != nil:
 		return Shipment{}, fmt.Errorf("world/fleet: consultando el cargamento %s: %w", id, err)
 	}
-	if sh.OwnerAccountID != owner {
-		return Shipment{}, fmt.Errorf("%w (%s)", ErrForbidden, id)
+	if sh.OwnerAccountID == owner {
+		return sh, nil
 	}
-	return sh, nil
+	if sh.FreightContractID != nil {
+		carrier, cerr := s.repo.GetFreightCarrier(ctx, *sh.FreightContractID)
+		switch {
+		case errors.Is(cerr, pgx.ErrNoRows):
+			// Flete inexistente: el cargamento solo lo ve su dueño.
+		case cerr != nil:
+			return Shipment{}, fmt.Errorf("world/fleet: consultando el transportista del flete %s: %w", *sh.FreightContractID, cerr)
+		case carrier == owner:
+			return sh, nil
+		}
+	}
+	return Shipment{}, fmt.Errorf("%w (%s)", ErrForbidden, id)
 }
 
 // ─── Despacho (ejecución logística del CCRI) ──────────────────────────────────

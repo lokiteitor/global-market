@@ -150,6 +150,45 @@ VALUES (
     ST_Centroid(ST_SetSRID(ST_GeomFromGeoJSON(sqlc.arg(footprint_geojson)::text), 0)))
 RETURNING id;
 
+-- NearestRoadNodeInRegion devuelve el nodo de la MISMA región ya incidente a
+-- algún enlace road más cercano al nodo dado: el punto de enganche del ramal de
+-- última milla del edificio nuevo (GDD 7.2, red vial como infraestructura del
+-- mundo). ErrNoRows si la región todavía no tiene red vial.
+-- name: NearestRoadNodeInRegion :one
+SELECT n.id
+FROM world.network_nodes n
+WHERE n.region_id = sqlc.arg(region_id)
+  AND n.id <> sqlc.arg(node_id)
+  AND EXISTS (
+      SELECT 1 FROM world.network_links l
+       WHERE l.mode = 'road' AND (l.from_node_id = n.id OR l.to_node_id = n.id))
+ORDER BY n.location <-> (SELECT location FROM world.network_nodes WHERE id = sqlc.arg(node_id))
+LIMIT 1;
+
+-- InsertRoadSpurLink crea UN enlace road dirigido from→to con el trazado recto
+-- entre las ubicaciones de ambos nodos y su longitud euclídea (metros de mundo,
+-- SRID 0 planar, ADR-019). El grafo es dirigido: el ramal bidireccional son dos
+-- llamadas, una por sentido.
+-- name: InsertRoadSpurLink :one
+INSERT INTO world.network_links
+       (id, mode, from_node_id, to_node_id, path, length_m, capacity_per_hour, base_speed_kmh)
+SELECT sqlc.arg(id), 'road'::world.link_mode, f.id, t.id,
+       ST_MakeLine(f.location, t.location),
+       GREATEST(1, round(ST_Distance(f.location, t.location)))::int,
+       sqlc.arg(capacity_per_hour)::int, sqlc.arg(base_speed_kmh)::int
+FROM world.network_nodes f, world.network_nodes t
+WHERE f.id = sqlc.arg(from_node_id) AND t.id = sqlc.arg(to_node_id)
+RETURNING id, length_m;
+
+-- InsertRoadSpurSegment crea el ÚNICO segmento (seq 1) del ramal, con la
+-- geometría y longitud del propio enlace y congestión fluida (EMA 1.0). El ramal
+-- es intra-región: un solo segmento, el de la región del edificio.
+-- name: InsertRoadSpurSegment :exec
+INSERT INTO world.link_segments (id, link_id, region_id, seq, portion, length_m, congestion_ema)
+SELECT sqlc.arg(id), l.id, sqlc.arg(region_id), 1, l.path, l.length_m, 1.0
+FROM world.network_links l
+WHERE l.id = sqlc.arg(link_id);
+
 -- ─── Configuración y mejora ───────────────────────────────────────────────────
 
 -- NearestCityLevelInRegion devuelve el nivel de la ciudad más cercana al

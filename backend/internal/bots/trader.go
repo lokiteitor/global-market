@@ -211,13 +211,18 @@ func (b *Trader) relistPrice(st *State, product botsdk.Product) (int64, error) {
 
 // scanBargains recorre las ventas del tablón (más baratas primero) y acepta
 // como máximo UNA por pasada si el precio está en o bajo el umbral y el
-// presupuesto (caja − colchón) la cubre.
+// presupuesto (caja − colchón) la cubre. Si termina el barrido sin aceptar
+// nada emite la decisión terminal wait/no_bargain_on_board con los umbrales
+// evaluados: una pasada ociosa DEBE dejar rastro (un bot sin oportunidades no
+// puede ser indistinguible de uno colgado en ii_bot_decisions_total).
 func (b *Trader) scanBargains(ctx context.Context, c *botsdk.Client, st *State, cash int64) error {
 	budget := cash - b.cushion()
 	if budget <= 0 {
 		b.decide("wait", "cash_at_cushion", slog.Int64("cash", cash), slog.Int64("cushion", b.cushion()))
 		return nil
 	}
+	scanned := 0
+	thresholds := make([]any, 0, len(b.cfg.ProductCodes))
 	for _, code := range b.cfg.ProductCodes {
 		product, err := productByCode(ctx, c, st, code)
 		if err != nil {
@@ -228,6 +233,7 @@ func (b *Trader) scanBargains(ctx context.Context, c *botsdk.Client, st *State, 
 			return fmt.Errorf("bots: base_price inválido de %s: %w", code, err)
 		}
 		maxPrice := applyBP(base, b.cfg.BuyMaxPriceBP)
+		thresholds = append(thresholds, slog.Int64(code, maxPrice))
 
 		for pub, err := range botsdk.All(ctx, func(ctx context.Context, cursor string) (botsdk.Page[botsdk.Publication], error) {
 			return c.Board(ctx, botsdk.BoardQuery{
@@ -241,6 +247,7 @@ func (b *Trader) scanBargains(ctx context.Context, c *botsdk.Client, st *State, 
 			if err != nil {
 				return fmt.Errorf("bots: consultando ventas de %s: %w", code, err)
 			}
+			scanned++
 			if pub.PublisherAccountID == st.AccountID {
 				continue
 			}
@@ -288,5 +295,11 @@ func (b *Trader) scanBargains(ctx context.Context, c *botsdk.Client, st *State, 
 			return nil // una aceptación por pasada: disciplina de presupuesto
 		}
 	}
+	// Barrido completo sin ganga: decisión terminal auditable.
+	b.decide("wait", "no_bargain_on_board",
+		slog.Int("scanned", scanned),
+		slog.Int64("budget", budget),
+		slog.Int64("buy_max_price_bp", b.cfg.BuyMaxPriceBP),
+		slog.Group("max_price", thresholds...))
 	return nil
 }

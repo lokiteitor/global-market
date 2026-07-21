@@ -1,13 +1,16 @@
 package ledger
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -375,5 +378,34 @@ func TestListEntriesResponseShape(t *testing.T) {
 	}
 	if meta := body["meta"].(map[string]any); meta["next_cursor"] != "MORE" {
 		t.Errorf("next_cursor: %v", meta["next_cursor"])
+	}
+}
+
+// TestListAccountsClienteAbortadoNoEs500 es la regresión de la corrida de 50
+// bots: al cerrar el harness sus clientes, la consulta en vuelo devolvía
+// context.Canceled y el handler lo mapeaba a 500 INTERNAL con una línea de
+// ERROR. Una desconexión del cliente no es un fallo del servidor y no puede
+// inflar los contadores 5xx del gateway (SAD §13: disparadores MEDIDOS).
+func TestListAccountsClienteAbortadoNoEs500(t *testing.T) {
+	reader := &fakeReader{err: fmt.Errorf("ledger: listando cuentas: %w", context.Canceled)}
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logs, nil))
+	mux := http.NewServeMux()
+	NewHandlers(reader, fixedIdentity{id: uuid.New(), ok: true}, fixedMeta{}, logger).Register(mux)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // el cliente se fue mientras la consulta estaba en vuelo
+	req := httptest.NewRequest(http.MethodGet, "/ledger/accounts", nil).WithContext(ctx)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+
+	if rr.Code >= 500 {
+		t.Fatalf("status = %d: una petición abortada por el cliente cuenta como 5xx", rr.Code)
+	}
+	if rr.Code != httpx.StatusClientClosedRequest {
+		t.Fatalf("status = %d, esperado %d", rr.Code, httpx.StatusClientClosedRequest)
+	}
+	if strings.Contains(logs.String(), `"level":"ERROR"`) {
+		t.Fatalf("la desconexión se registró como ERROR: %s", logs.String())
 	}
 }

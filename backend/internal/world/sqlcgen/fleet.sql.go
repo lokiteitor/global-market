@@ -642,25 +642,28 @@ func (q *Queries) InsertVehicle(ctx context.Context, arg InsertVehicleParams) (u
 
 const listShipments = `-- name: ListShipments :many
 
-SELECT id, owner_account_id, product_id, quantity, contract_id, freight_contract_id,
-       vehicle_id, at_node_id, status, updated_at_sim
-FROM world.shipments
-WHERE owner_account_id = $1
-  AND ($2::world.shipment_status IS NULL OR status = $2::world.shipment_status)
-  AND ($3::uuid IS NULL OR contract_id = $3::uuid)
-  AND ($4::uuid IS NULL OR vehicle_id = $4::uuid)
-  AND ($5::uuid IS NULL OR id > $5::uuid)
-ORDER BY id
-LIMIT $6
+SELECT sh.id, sh.owner_account_id, sh.product_id, sh.quantity, sh.contract_id,
+       sh.freight_contract_id, sh.vehicle_id, sh.at_node_id, sh.status, sh.updated_at_sim
+FROM world.shipments sh
+LEFT JOIN ledger.freight_contracts fc ON fc.id = sh.freight_contract_id
+WHERE (sh.owner_account_id = $1 OR fc.carrier_account_id = $1)
+  AND ($2::world.shipment_status IS NULL OR sh.status = $2::world.shipment_status)
+  AND ($3::uuid IS NULL OR sh.contract_id = $3::uuid)
+  AND ($4::uuid IS NULL OR sh.freight_contract_id = $4::uuid)
+  AND ($5::uuid IS NULL OR sh.vehicle_id = $5::uuid)
+  AND ($6::uuid IS NULL OR sh.id > $6::uuid)
+ORDER BY sh.id
+LIMIT $7
 `
 
 type ListShipmentsParams struct {
-	OwnerAccountID uuid.UUID
-	Status         NullWorldShipmentStatus
-	ContractID     *uuid.UUID
-	VehicleID      *uuid.UUID
-	AfterID        *uuid.UUID
-	PageLimit      int32
+	AccountID         uuid.UUID
+	Status            NullWorldShipmentStatus
+	ContractID        *uuid.UUID
+	FreightContractID *uuid.UUID
+	VehicleID         *uuid.UUID
+	AfterID           *uuid.UUID
+	PageLimit         int32
 }
 
 type ListShipmentsRow struct {
@@ -676,14 +679,20 @@ type ListShipmentsRow struct {
 	UpdatedAtSim      int64
 }
 
-// ─── Cargamentos propios ──────────────────────────────────────────────────────
-// ListShipments devuelve los cargamentos de un titular (SOLO propios) con filtros
-// por estado/contrato/vehículo y keyset por id.
+// ─── Cargamentos visibles ─────────────────────────────────────────────────────
+// ListShipments devuelve los cargamentos VISIBLES para una corporación: los
+// propios y —en un CCRI-Flete— los que le corresponden como TRANSPORTISTA (el
+// dueño es el CARGADOR, pero quien tiene que despacharlos y llevarlos es el
+// transportista, GDD 5.3.2; misma autorización que DispatchShipment). Lee
+// ledger.freight_contracts cross-schema (sin importar internal/contracts, SAD 7),
+// como GetFreightCarrier. Filtros por estado/contrato/flete/vehículo y keyset por
+// id.
 func (q *Queries) ListShipments(ctx context.Context, arg ListShipmentsParams) ([]ListShipmentsRow, error) {
 	rows, err := q.db.Query(ctx, listShipments,
-		arg.OwnerAccountID,
+		arg.AccountID,
 		arg.Status,
 		arg.ContractID,
+		arg.FreightContractID,
 		arg.VehicleID,
 		arg.AfterID,
 		arg.PageLimit,

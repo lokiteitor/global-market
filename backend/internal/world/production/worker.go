@@ -136,7 +136,8 @@ func (w *Worker) Run(ctx context.Context) error {
 		slog.Duration("sweep_interval", w.opts.SweepInterval),
 		slog.Int("batch_size", w.opts.BatchSize),
 		slog.Int64("build_sim_seconds", w.opts.BuildSimSeconds),
-		slog.Duration("reconcile_interval", w.opts.ReconcileInterval))
+		slog.Duration("reconcile_interval", w.opts.ReconcileInterval),
+		slog.Int("reconcile_grace_pasadas", w.opts.ReconcileGrace))
 	lastReconcile := time.Now()
 	for {
 		w.RunOnce(ctx)
@@ -253,12 +254,21 @@ func (w *Worker) sweepProduction(ctx context.Context) (int, error) {
 	}
 	processed := 0
 	for _, id := range ids {
-		if err := w.processBatch(ctx, id); err != nil {
+		err := w.processBatch(ctx, id)
+		switch {
+		case err == nil:
+			processed++
+		case errors.Is(err, ErrInsufficientBalance):
+			// Carrera resuelta por la BD: otra transacción vació la cuenta entre la
+			// comprobación y el asiento. La transacción se revirtió ENTERA (el lote
+			// sigue running y se reintenta), así que es un estancamiento esperado y
+			// no un fallo: WARN aquí solo enseñaría al operador a ignorar el log.
+			w.logger.Debug("world/production: lote no avanzado por saldo insuficiente en el asiento (se reintenta)",
+				slog.String("batch_id", id.String()), slog.Any("error", err))
+		default:
 			w.logger.Warn("world/production: fallo procesando un lote",
 				slog.String("batch_id", id.String()), slog.Any("error", err))
-			continue
 		}
-		processed++
 	}
 	return processed, nil
 }
@@ -357,14 +367,16 @@ func (w *Worker) completeBatch(ctx context.Context, r *Repo, tx pgx.Tx, pb procB
 
 	// ── Fase de comprobación (solo lecturas/locks; sin mutaciones) ──
 
-	// (1) Combustible físico (GDD 5.8).
+	// (1) Combustible disponible en AMBOS planos (GDD 5.8): el consumo mueve el
+	//     físico y el contable a la vez, así que comprobar solo uno deja pasar
+	//     lotes que el otro no puede cubrir.
 	hasFuel := pb.FuelProductID != nil && pb.FuelPerBatch > 0
 	if hasFuel {
-		avail, err := r.GetInventoryQty(ctx, building, *pb.FuelProductID)
+		ok, err := w.consumable(ctx, r, owner, building, *pb.FuelProductID, pb.FuelPerBatch, pb.Batch.ID)
 		if err != nil {
 			return err
 		}
-		if avail < pb.FuelPerBatch {
+		if !ok {
 			return w.pause(ctx, r, tx, pb, statusPausedNoFuel, reasonNoFuel, simNow, oc)
 		}
 	}
@@ -409,13 +421,13 @@ func (w *Worker) completeBatch(ctx context.Context, r *Repo, tx pgx.Tx, pb procB
 		}
 	} else {
 		for _, in := range inputs {
-			avail, err := r.GetInventoryQty(ctx, building, in.ProductID)
+			ok, err := w.consumable(ctx, r, owner, building, in.ProductID, in.Quantity, pb.Batch.ID)
 			if err != nil {
 				return err
 			}
-			if avail < in.Quantity {
+			if !ok {
 				oc.stalled = reasonNoInputs
-				return nil
+				return nil // running, se reintenta cuando el insumo esté disponible
 			}
 		}
 	}
@@ -547,6 +559,41 @@ func (w *Worker) completeBatch(ctx context.Context, r *Repo, tx pgx.Tx, pb procB
 	})
 }
 
+// consumable informa de si el edificio puede consumir qty de un producto: exige
+// cubrirlo en los DOS planos que el consumo mueve a la vez (GDD 15.3) —el físico
+// (world.building_inventories) y el contable (saldo stock_free del dueño en ese
+// almacén, que es lo que debita el asiento de consumo)—. Comprobar solo el físico
+// dejaba pasar lotes cuyo asiento reventaba contra ck_accounts_non_negative: el
+// físico incluye stock ya COMPROMETIDO en stock_reserved (una venta publicada o
+// aceptada reserva la mercancía sin sacarla del almacén) y además puede ir por
+// delante del asiento durante la ventana que la reconciliación tolera con
+// II_RECONCILE_GRACE. Un déficit solo contable se registra en DEBUG (es una
+// carencia legítima y transitoria, no un fallo), con el plano que la causó.
+func (w *Worker) consumable(ctx context.Context, r *Repo, owner, building, product uuid.UUID, qty int64, batchID uuid.UUID) (bool, error) {
+	physical, err := r.GetInventoryQty(ctx, building, product)
+	if err != nil {
+		return false, err
+	}
+	if physical < qty {
+		return false, nil
+	}
+	free, err := r.GetStockFreeBalance(ctx, owner, product, building)
+	if err != nil {
+		return false, err
+	}
+	if free < qty {
+		w.logger.Debug("world/production: material presente en el almacén pero sin saldo comprometible (reservado o asiento pendiente)",
+			slog.String("batch_id", batchID.String()),
+			slog.String("building_id", building.String()),
+			slog.String("product_id", product.String()),
+			slog.Int64("requerido", qty),
+			slog.Int64("fisico", physical),
+			slog.Int64("stock_free", free))
+		return false, nil
+	}
+	return true, nil
+}
+
 // pause lleva el lote a un estado de pausa del enum (paused_no_fuel/
 // paused_no_workers) y emite batch.paused. No produce ni cobra.
 func (w *Worker) pause(ctx context.Context, r *Repo, tx pgx.Tx, pb procBatch, status sqlcgen.WorldBatchStatus, reason string, simNow simtime.SimTime, oc *batchOutcome) error {
@@ -573,11 +620,13 @@ func (w *Worker) tryResume(ctx context.Context, r *Repo, pb procBatch, simNow si
 		if pb.FuelProductID == nil || pb.FuelPerBatch <= 0 {
 			ok = true
 		} else {
-			avail, err := r.GetInventoryQty(ctx, pb.Batch.BuildingID, *pb.FuelProductID)
+			// El mismo criterio de dos planos que pausó el lote: reanudarlo mirando
+			// solo el físico lo devolvería a la pausa en el barrido siguiente.
+			ready, err := w.consumable(ctx, r, pb.OwnerAccountID, pb.Batch.BuildingID, *pb.FuelProductID, pb.FuelPerBatch, pb.Batch.ID)
 			if err != nil {
 				return err
 			}
-			ok = avail >= pb.FuelPerBatch
+			ok = ready
 		}
 	case reasonNoWorkers:
 		wage, err := w.computeWage(ctx, r, pb)

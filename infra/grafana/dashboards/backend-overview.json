@@ -1,7 +1,7 @@
 {
   "uid": "ii-backend-overview",
   "title": "Imperio - Backend Overview",
-  "description": "Vision general del backend (gateway + engine + bots): trafico HTTP, latencia, errores, salud del proceso Go, poblacion de bots y Notification Gateway WS.",
+  "description": "Vision general del backend (gateway + engine + bots): trafico HTTP, latencia, errores, salud del proceso Go, poblacion de bots, Notification Gateway WS, densidad dinamica (valvula de carga, GDD 19) y corridas del harness de stress test (GDD 13.4 modo 3).",
   "tags": ["imperio", "backend"],
   "timezone": "browser",
   "schemaVersion": 39,
@@ -396,6 +396,341 @@
             "fillOpacity": 10,
             "showPoints": "never"
           }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 14,
+      "type": "row",
+      "title": "Densidad dinamica de bots (valvula de carga, GDD 19)",
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 52 },
+      "panels": []
+    },
+    {
+      "id": 15,
+      "type": "timeseries",
+      "title": "Bots activos por arquetipo",
+      "description": "ii_bots_active: poblacion que EJECUTA su bucle de decision (no la aprovisionada). Es la valvula de carga principal: ante saturacion baja antes que degradar la experiencia humana.",
+      "gridPos": { "h": 9, "w": 8, "x": 0, "y": 53 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "ii_bots_active",
+          "legendFormat": "{{archetype}}"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "lastNotNull"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 10, "showPoints": "never" },
+          "min": 0
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 16,
+      "type": "timeseries",
+      "title": "Objetivo de densidad por arquetipo",
+      "description": "ii_bots_density_target: poblacion activa objetivo que calcula el controlador en cada ciclo. La distancia con ii_bots_active es el suavizado (MaxStep e histeresis).",
+      "gridPos": { "h": 9, "w": 8, "x": 8, "y": 53 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "ii_bots_density_target",
+          "legendFormat": "{{archetype}}"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "lastNotNull"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 10, "showPoints": "never" },
+          "min": 0
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 17,
+      "type": "timeseries",
+      "title": "Ajustes de densidad/s (arranques y paradas)",
+      "description": "Tasa (rate 5m) de ii_bots_density_adjustments_total: bots arrancados (up) y parados (down) por el controlador.",
+      "gridPos": { "h": 9, "w": 8, "x": 16, "y": 53 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (direction) (rate(ii_bots_density_adjustments_total[5m]))",
+          "legendFormat": "{{direction}}"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "lastNotNull"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 10, "showPoints": "never" }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 18,
+      "type": "timeseries",
+      "title": "Senales observadas por la densidad",
+      "description": "ii_bots_density_signal (sesiones y comandos humanos, cola de transbordo, publicaciones vivas) junto a ii_outbox_lag_observed: las entradas de la formula, para reproducir cualquier decision registrada en el log.",
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 62 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "ii_bots_density_signal",
+          "legendFormat": "{{signal}}"
+        },
+        {
+          "refId": "B",
+          "expr": "ii_outbox_lag_observed",
+          "legendFormat": "outbox_lag"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "lastNotNull"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 10, "showPoints": "never" },
+          "min": 0
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 19,
+      "type": "row",
+      "title": "Stress test (harness efimero, job=stress)",
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 71 },
+      "panels": []
+    },
+    {
+      "id": 20,
+      "type": "timeseries",
+      "title": "Throughput del harness (ops/s)",
+      "description": "Tasa (rate 1m) de ii_stress_ops_total: carga realmente cursada contra la API publica, por operacion. El harness solo existe mientras dura la corrida.",
+      "gridPos": { "h": 9, "w": 8, "x": 0, "y": 72 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (op) (rate(ii_stress_ops_total{outcome=\"ok\"}[1m]))",
+          "legendFormat": "{{op}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum (rate(ii_stress_ops_total{outcome=\"error\"}[1m]))",
+          "legendFormat": "error"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "lastNotNull"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 10, "showPoints": "never" },
+          "min": 0
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 21,
+      "type": "timeseries",
+      "title": "Latencia p95 del harness por operacion",
+      "description": "histogram_quantile(0.95) sobre ii_stress_op_duration_seconds: lo que el sistema bajo prueba tarda en responder al harness, medido desde el cliente.",
+      "gridPos": { "h": 9, "w": 8, "x": 8, "y": 72 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le, op) (rate(ii_stress_op_duration_seconds_bucket[1m])))",
+          "legendFormat": "{{op}}"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "lastNotNull"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 10, "showPoints": "never" },
+          "min": 0
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 22,
+      "type": "timeseries",
+      "title": "Errores del harness por clase",
+      "description": "Tasa (rate 1m) de ii_stress_errors_total. 5xx y network son fallo del sistema bajo prueba; 429, 409 y 422 son respuesta LEGITIMA bajo carga (rate limit y conflictos de dominio) y no invalidan la corrida.",
+      "gridPos": { "h": 9, "w": 8, "x": 16, "y": 72 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (class) (rate(ii_stress_errors_total[1m]))",
+          "legendFormat": "{{class}}"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "lastNotNull"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 10, "showPoints": "never" },
+          "min": 0
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 23,
+      "type": "timeseries",
+      "title": "Bots del harness en carga",
+      "description": "ii_stress_active_bots frente a ii_stress_provisioned_bots: la rampa de entrada y la poblacion efectiva de la corrida.",
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 81 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "ii_stress_active_bots",
+          "legendFormat": "activos"
+        },
+        {
+          "refId": "B",
+          "expr": "ii_stress_provisioned_bots",
+          "legendFormat": "aprovisionados"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "lastNotNull"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 10, "showPoints": "never" },
+          "min": 0
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 24,
+      "type": "timeseries",
+      "title": "Lag del outbox durante la corrida",
+      "description": "ii_outbox_lag_observed (lo publica el Bot Orchestration Service, no el harness): eventos pendientes del consumidor mas retrasado. Disparador de evolucion MEDIDO del SAD 13 y senal de saturacion que recorta la densidad de bots.",
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 81 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "ii_outbox_lag_observed",
+          "legendFormat": "outbox_lag"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "lastNotNull"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 10, "showPoints": "never" },
+          "min": 0
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 25,
+      "type": "row",
+      "title": "Contencion de transacciones SERIALIZABLE (disparador medido, SAD 13)",
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 90 },
+      "panels": []
+    },
+    {
+      "id": 26,
+      "type": "timeseries",
+      "title": "Reintentos por conflicto de serializacion/s",
+      "description": "rate(ii_tx_serialization_retries_total). Ruido NORMAL bajo carga: los predicate locks de SSI son de pagina y las claves UUIDv7 concentran las inserciones concurrentes en la misma pagina del indice, asi que la mayoria son conflictos FALSOS que el reintento absorbe. Vigilar la TENDENCIA: si crece sin que crezca el trafico, la contencion esta subiendo.",
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 91 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (job) (rate(ii_tx_serialization_retries_total[5m]))",
+          "legendFormat": "{{job}}"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "lastNotNull"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 25, "showPoints": "never" },
+          "color": { "mode": "fixed", "fixedColor": "yellow" }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 27,
+      "type": "timeseries",
+      "title": "Presupuestos de reintento agotados/s (503 SERIALIZATION_CONFLICT)",
+      "description": "rate(ii_tx_serialization_exhausted_total). CADA incremento es una operacion que el usuario NO pudo completar y que se respondio 503 + Retry-After. Este es el disparador: por encima de cero sostenido hay que bajar la densidad de bots (GDD 19) o reducir la contencion del camino afectado.",
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 91 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (job) (rate(ii_tx_serialization_exhausted_total[5m]))",
+          "legendFormat": "{{job}}"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "lastNotNull"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 25, "showPoints": "never" },
+          "color": { "mode": "fixed", "fixedColor": "red" }
         },
         "overrides": []
       }

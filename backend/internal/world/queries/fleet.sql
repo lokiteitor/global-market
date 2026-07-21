@@ -216,20 +216,27 @@ SELECT EXISTS (
 -- name: GetProductUnitVolume :one
 SELECT unit_volume FROM world.products WHERE id = sqlc.arg(id);
 
--- ─── Cargamentos propios ──────────────────────────────────────────────────────
+-- ─── Cargamentos visibles ─────────────────────────────────────────────────────
 
--- ListShipments devuelve los cargamentos de un titular (SOLO propios) con filtros
--- por estado/contrato/vehículo y keyset por id.
+-- ListShipments devuelve los cargamentos VISIBLES para una corporación: los
+-- propios y —en un CCRI-Flete— los que le corresponden como TRANSPORTISTA (el
+-- dueño es el CARGADOR, pero quien tiene que despacharlos y llevarlos es el
+-- transportista, GDD 5.3.2; misma autorización que DispatchShipment). Lee
+-- ledger.freight_contracts cross-schema (sin importar internal/contracts, SAD 7),
+-- como GetFreightCarrier. Filtros por estado/contrato/flete/vehículo y keyset por
+-- id.
 -- name: ListShipments :many
-SELECT id, owner_account_id, product_id, quantity, contract_id, freight_contract_id,
-       vehicle_id, at_node_id, status, updated_at_sim
-FROM world.shipments
-WHERE owner_account_id = sqlc.arg(owner_account_id)
-  AND (sqlc.narg(status)::world.shipment_status IS NULL OR status = sqlc.narg(status)::world.shipment_status)
-  AND (sqlc.narg(contract_id)::uuid IS NULL OR contract_id = sqlc.narg(contract_id)::uuid)
-  AND (sqlc.narg(vehicle_id)::uuid IS NULL OR vehicle_id = sqlc.narg(vehicle_id)::uuid)
-  AND (sqlc.narg(after_id)::uuid IS NULL OR id > sqlc.narg(after_id)::uuid)
-ORDER BY id
+SELECT sh.id, sh.owner_account_id, sh.product_id, sh.quantity, sh.contract_id,
+       sh.freight_contract_id, sh.vehicle_id, sh.at_node_id, sh.status, sh.updated_at_sim
+FROM world.shipments sh
+LEFT JOIN ledger.freight_contracts fc ON fc.id = sh.freight_contract_id
+WHERE (sh.owner_account_id = sqlc.arg(account_id) OR fc.carrier_account_id = sqlc.arg(account_id))
+  AND (sqlc.narg(status)::world.shipment_status IS NULL OR sh.status = sqlc.narg(status)::world.shipment_status)
+  AND (sqlc.narg(contract_id)::uuid IS NULL OR sh.contract_id = sqlc.narg(contract_id)::uuid)
+  AND (sqlc.narg(freight_contract_id)::uuid IS NULL OR sh.freight_contract_id = sqlc.narg(freight_contract_id)::uuid)
+  AND (sqlc.narg(vehicle_id)::uuid IS NULL OR sh.vehicle_id = sqlc.narg(vehicle_id)::uuid)
+  AND (sqlc.narg(after_id)::uuid IS NULL OR sh.id > sqlc.narg(after_id)::uuid)
+ORDER BY sh.id
 LIMIT sqlc.arg(page_limit);
 
 -- GetShipment devuelve un cargamento por id (la propiedad la aplica el servicio).

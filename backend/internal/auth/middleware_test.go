@@ -1,7 +1,9 @@
 package auth
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -9,6 +11,8 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+
+	"github.com/lokiteitor/global-market/backend/internal/platform/httpx"
 )
 
 // newTestMiddleware monta el middleware sobre un fake con reloj determinista.
@@ -262,5 +266,35 @@ func TestRateLimitAPIPerAccount(t *testing.T) {
 	clock.advance(time.Second)
 	if rec := do(accA); rec.Code != http.StatusOK {
 		t.Fatalf("petición de A tras recarga: status %d, esperado 200", rec.Code)
+	}
+}
+
+// TestRequireAuthClienteAbortadoNoEs500 cubre el camino de MAYOR volumen del
+// mismo fallo: RequireAuth está delante de todas las peticiones autenticadas,
+// así que un cliente que se va mientras se resuelve su sesión generaba un 500 y
+// una línea de ERROR por petición. Una desconexión no es un fallo del servicio.
+func TestRequireAuthClienteAbortadoNoEs500(t *testing.T) {
+	clock := newFakeClock()
+	repo := newFakeRepo(clock.now)
+	repo.failWith = fmt.Errorf("auth: resolviendo sesión: %w", context.Canceled)
+	mw := newTestMiddleware(t, repo, clock, Options{APIRPS: 20, APIBurst: 40})
+	var saw bool
+	h := mw.RequireAuth(okHandler(&saw))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // el cliente cerró la conexión mientras se autenticaba
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/ledger/accounts", nil).WithContext(ctx)
+	req.Header.Set("Authorization", "Bearer token-cualquiera")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code >= 500 {
+		t.Fatalf("status = %d: la desconexión del cliente cuenta como 5xx del gateway", rec.Code)
+	}
+	if rec.Code != httpx.StatusClientClosedRequest {
+		t.Fatalf("status = %d, esperado %d", rec.Code, httpx.StatusClientClosedRequest)
+	}
+	if saw {
+		t.Fatal("la petición abortada alcanzó el handler")
 	}
 }

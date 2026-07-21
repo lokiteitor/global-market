@@ -2,9 +2,10 @@
 # Imperio Industrial — Infraestructura local (ADR-016: todo despliegue en /infra)
 #
 # Perfiles:
-#   core  → postgres                    (make infra-core lo combina con obs)
-#   obs   → prometheus + grafana
-#   full  → stack completo en Docker    (make run)
+#   core   → postgres                    (make infra-core lo combina con obs)
+#   obs    → prometheus + grafana
+#   full   → stack completo en Docker    (make run)
+#   stress → harness de stress test      (make stress-docker; NUNCA producción)
 #
 # Punto de entrada único: Makefile raíz (ADR-016). No invocar a mano salvo debug.
 # ══════════════════════════════════════════════════════════════════════════
@@ -109,8 +110,6 @@ services:
         condition: service_healthy
 
   frontend:
-    # NOTA: /frontend aún no existe; el Dockerfile queda preparado y el
-    # perfil full no se usa hasta que llegue el cliente Nuxt (ADR-021).
     build:
       context: ../frontend
       dockerfile: ../infra/docker/frontend.Dockerfile
@@ -118,6 +117,63 @@ services:
     profiles: [full]
     expose:
       - "3000"
+
+  # ─── Perfil stress: cluster de carga contra un entorno NO productivo ─────
+  #
+  # GDD §13.4 (modo 3) y §15.4: el harness es un cluster DESACOPLADO que juega
+  # por las MISMAS APIs públicas que los humanos y corre en un ENTORNO DE
+  # PRUEBAS INDEPENDIENTE — nunca el mundo de producción. La salvaguarda vive
+  # en el binario (internal/stress/safety.go): sin II_STRESS_API_URL no
+  # arranca, y rehúsa si II_ENV=prod o si el host de la API o de la BD no casa
+  # la allowlist. Aquí NO se le da valor por defecto a la URL a propósito:
+  # elegir el target es siempre una decisión consciente del operador.
+  #
+  #   II_STRESS_API_URL=http://host.docker.internal:8080/api/v1 make stress-docker
+  #
+  # Escala horizontal (§15.4): `docker compose --profile stress up --scale
+  # stress=N` levanta N instancias contra las mismas APIs (usa II_STRESS_RUN_ID
+  # distinto por instancia para no compartir prefijo de cuentas).
+  stress:
+    build:
+      context: ../backend
+      dockerfile: ../infra/docker/backend.Dockerfile
+      args:
+        CMD: stress
+        PORT: "8083"
+    container_name: imperio-stress
+    profiles: [stress]
+    environment:
+      # Entorno declarado NO productivo: la salvaguarda rehúsa prod/production.
+      II_ENV: dev
+      # Sin default deliberadamente: vacía ⇒ el harness rehúsa arrancar.
+      II_STRESS_API_URL: ${II_STRESS_API_URL:-}
+      # BD del entorno de pruebas (solo el provisioner: cuentas y capital).
+      II_STRESS_DATABASE_URL: ${II_STRESS_DATABASE_URL:-postgres://imperio:imperio@postgres:5432/imperio?sslmode=disable}
+      # La allowlist SUSTITUYE a la de por defecto: añade los nombres de
+      # servicio de la red de compose (stack local) a los hosts no productivos.
+      II_STRESS_ALLOW_HOSTS: ${II_STRESS_ALLOW_HOSTS:-localhost,127.0.0.1,::1,host.docker.internal,postgres,gateway,stress.*,*.stress.*,staging.*,*.staging.*}
+      II_STRESS_ADDR: ":8083"
+      II_STRESS_BOTS: ${II_STRESS_BOTS:-200}
+      II_STRESS_RAMP: ${II_STRESS_RAMP:-30s}
+      II_STRESS_DURATION: ${II_STRESS_DURATION:-120s}
+      II_STRESS_TICK: ${II_STRESS_TICK:-1s}
+      II_STRESS_MIX: ${II_STRESS_MIX:-}
+      II_STRESS_WRITE_RATIO: ${II_STRESS_WRITE_RATIO:-0.3}
+      # Lado VENDEDOR del harness: sin dotación de stock solo puede publicar buy
+      # y la operación de aceptación depende de ofertas ajenas (se degrada a
+      # cero justo al escalar la población). 0 la desactiva.
+      II_STRESS_STOCK_ENDOWMENT: ${II_STRESS_STOCK_ENDOWMENT:-10000}
+      II_STRESS_SELL_SHARE: ${II_STRESS_SELL_SHARE:-0.5}
+      # /tmp es el único directorio escribible de la imagen distroless nonroot;
+      # el informe se recupera con `docker cp imperio-stress:/tmp/... .`
+      II_STRESS_REPORT: /tmp/stress-report.json
+      II_STRESS_TARGET_METRICS: ${II_STRESS_TARGET_METRICS:-}
+    ports:
+      # Métricas propias del harness (job "stress" de Prometheus).
+      - "8083:8083"
+    extra_hosts:
+      # Permite cargar el stack del host (make backend) desde el contenedor.
+      - "host.docker.internal:host-gateway"
 
   caddy:
     image: caddy:2

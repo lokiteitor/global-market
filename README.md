@@ -12,9 +12,9 @@ Los tres invariantes que gobiernan todo el diseño:
 
 ```
 /backend      Servidor completo en Go: gateway (REST+WS+auth), engine (simulación),
-              orquestador de bots (cmd/bots), runner de migraciones, seed y SDK
-              oficial de bots (pkg/botsdk). Módulo único con bounded contexts sin
-              imports cruzados (internal/{auth,ledger,sim,...}).
+              orquestador de bots (cmd/bots), harness de stress test (cmd/stress),
+              runner de migraciones, seed y SDK oficial de bots (pkg/botsdk). Módulo
+              único con bounded contexts sin imports cruzados (internal/{auth,ledger,sim,...}).
 /frontend     Cliente web autónomo: Nuxt 4 + Vue 3 + TypeScript estricto + Pinia +
               Sass propio (sin frameworks CSS) + Phaser. Cliente jugable en /play:
               mapa top-down cenital (ADR-019) + HUD de gestión (Incremento 5).
@@ -52,7 +52,8 @@ Stack completo en Docker: `make run` (perfil `full`, entra por Caddy en :80).
 | `make generate` | Codegen: sqlc (queries Go) + tipos TS del contrato |
 | `make migrate-up` / `migrate-down` / `migrate-status` / `migrate-create name=x` / `reset-db` | Migraciones manuales con runner propio (ADR-020) |
 | `make seed` | Datos mínimos de desarrollo (idempotente) |
-| `make bots` | Bot Orchestration Service (`cmd/bots`, ADR-024): aprovisiona y ejecuta la población de bots jugando por la API pública vía `pkg/botsdk` (densidad con `II_BOTS_*`; métricas en :8082) |
+| `make bots` | Bot Orchestration Service (`cmd/bots`, ADR-024): aprovisiona y ejecuta los **5 arquetipos** del GDD §13.2 —`coal_producer`, `iron_producer`, `trader`, `industrial_transformer`, `freighter`— jugando por la API pública vía `pkg/botsdk`, con **densidad dinámica** como válvula de carga (`II_BOTS_*` / `II_BOTS_DENSITY_*`; métricas en :8082) |
+| `make stress` / `make stress-docker` | Stress test contra un entorno de pruebas (`cmd/stress`, GDD §13.4/§15.4): carga masiva por las **mismas APIs públicas**, informe con los disparadores medidos y **salvaguarda que impide apuntar a producción** (`II_STRESS_API_URL` obligatoria, sin default; métricas en :8083) |
 | `make infra-core` / `infra-down` / `infra-logs` | Infraestructura local |
 | `npm run test:e2e` (en `/frontend`) | Smoke E2E Playwright del cliente jugable contra el stack vivo local (se salta limpiamente si el backend no responde; ver `docs/guias/desarrollo.md`) |
 

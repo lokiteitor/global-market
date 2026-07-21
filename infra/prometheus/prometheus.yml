@@ -27,3 +27,14 @@ scrape_configs:
     static_configs:
       - targets:
           - host.docker.internal:8082
+
+  # Harness de stress test (GDD §13.4 modo 3): EFÍMERO por naturaleza — solo
+  # existe mientras dura la corrida (`make stress` en el host, `make
+  # stress-docker` en el perfil compose "stress"), así que `up{job="stress"}=0`
+  # es el estado normal fuera de una corrida. Se listan los dos targets a
+  # propósito: el que no esté levantado falla sin ruido.
+  - job_name: stress
+    static_configs:
+      - targets:
+          - host.docker.internal:8083 # make stress (proceso en el host)
+          - stress:8083               # make stress-docker (perfil "stress")

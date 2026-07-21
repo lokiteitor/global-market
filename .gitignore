@@ -20,3 +20,8 @@ coverage/
 # Playwright (smoke E2E del frontend: screenshots y resultados, npm run test:e2e)
 frontend/tests/e2e-browser/artifacts/
 frontend/tests/e2e-browser/test-results/
+
+# Stress test (Incremento 9): el informe por defecto (II_STRESS_REPORT) se escribe
+# en el cwd, y `make stress` corre desde /backend
+backend/stress-report.json
+stress-report.json

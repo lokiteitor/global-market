@@ -109,6 +109,12 @@ func (m *Middleware) Wrap(next http.Handler) http.Handler {
 		// Hit: la clave ya tiene respuesta almacenada para esta cuenta.
 		resp, found, err := m.store.find(r.Context(), key, account)
 		if err != nil {
+			// Si el cliente ya se fue no hay nada que garantizar ni nadie a
+			// quien responder: no es un fallo del almacén y no debe contar
+			// como 5xx.
+			if httpx.WriteClientGone(w, r, m.logger, err, "consultando el almacén de idempotencia") {
+				return
+			}
 			// Sin lectura del almacén no se puede garantizar la no-ejecución
 			// doble: no ejecutar es lo único seguro.
 			m.logError(r, "error consultando el almacén de idempotencia", err)
@@ -168,9 +174,12 @@ func (m *Middleware) replay(w http.ResponseWriter, resp storedResponse) {
 	_, _ = w.Write(resp.Body)
 }
 
-// logError registra un fallo del almacén con el request id de la petición.
+// logError registra un fallo del almacén con el request id de la petición. Si
+// el error solo refleja que el cliente ya no está (estos sitios se alcanzan con
+// la operación YA ejecutada, cuando no queda respuesta que dar) baja a WARN:
+// el log de errores debe quedarse con los fallos reales del servicio.
 func (m *Middleware) logError(r *http.Request, msg string, err error) {
-	m.logger.LogAttrs(r.Context(), slog.LevelError, msg,
+	m.logger.LogAttrs(r.Context(), httpx.LogLevelFor(r, err), msg,
 		slog.String("request_id", httpx.RequestIDFromContext(r.Context())),
 		slog.String("method", r.Method),
 		slog.String("path", r.URL.Path),

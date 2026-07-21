@@ -312,6 +312,50 @@ func (q *Queries) GetFreightContract(ctx context.Context, id uuid.UUID) (LedgerF
 	return i, err
 }
 
+const getFreightContractForAcceptance = `-- name: GetFreightContractForAcceptance :one
+SELECT id, publication_id, channel, shipper_account_id, carrier_account_id, origin_node_id, destination_node_id, freight_price, declared_value, deadline_sim, status, fill_bp, escrow_account_id, carrier_guarantee_account_id, custody_account_id, confirmed_at_sim, settled_at_sim, created_at, updated_at FROM ledger.freight_contracts
+WHERE publication_id = $1
+  AND carrier_account_id = $2
+ORDER BY confirmed_at_sim, id
+LIMIT 1
+`
+
+type GetFreightContractForAcceptanceParams struct {
+	PublicationID     *uuid.UUID
+	AcceptorAccountID uuid.UUID
+}
+
+// GetFreightContractForAcceptance resuelve el contrato de FLETE resultante de una
+// aceptación servida (simétrico de GetContractForAcceptance): el esquema no liga
+// la aceptación al flete con una FK; el vínculo es publication_id + el aceptante
+// como TRANSPORTISTA.
+func (q *Queries) GetFreightContractForAcceptance(ctx context.Context, arg GetFreightContractForAcceptanceParams) (LedgerFreightContract, error) {
+	row := q.db.QueryRow(ctx, getFreightContractForAcceptance, arg.PublicationID, arg.AcceptorAccountID)
+	var i LedgerFreightContract
+	err := row.Scan(
+		&i.ID,
+		&i.PublicationID,
+		&i.Channel,
+		&i.ShipperAccountID,
+		&i.CarrierAccountID,
+		&i.OriginNodeID,
+		&i.DestinationNodeID,
+		&i.FreightPrice,
+		&i.DeclaredValue,
+		&i.DeadlineSim,
+		&i.Status,
+		&i.FillBp,
+		&i.EscrowAccountID,
+		&i.CarrierGuaranteeAccountID,
+		&i.CustodyAccountID,
+		&i.ConfirmedAtSim,
+		&i.SettledAtSim,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const getFreightContractForUpdate = `-- name: GetFreightContractForUpdate :one
 SELECT id, publication_id, channel, shipper_account_id, carrier_account_id, origin_node_id, destination_node_id, freight_price, declared_value, deadline_sim, status, fill_bp, escrow_account_id, carrier_guarantee_account_id, custody_account_id, confirmed_at_sim, settled_at_sim, created_at, updated_at FROM ledger.freight_contracts WHERE id = $1 FOR UPDATE
 `

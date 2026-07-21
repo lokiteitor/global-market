@@ -112,6 +112,11 @@ func (h *Handlers) getOhlc(w http.ResponseWriter, r *http.Request) {
 
 	candles, err := h.reader.ListCandles(r.Context(), filter)
 	if err != nil {
+		// Petición abortada por el cliente o plazo agotado: no es un fallo
+		// del servicio y no debe contarse como 5xx ni loguearse como ERROR.
+		if httpx.WriteClientGone(w, r, h.logger, err, "listando velas OHLC") {
+			return
+		}
 		logging.WithRequestID(h.logger, httpx.RequestIDFromContext(r.Context())).LogAttrs(
 			r.Context(), slog.LevelError, "error listando velas OHLC",
 			slog.String("error", err.Error()),

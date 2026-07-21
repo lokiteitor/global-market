@@ -18,10 +18,12 @@ import (
 	"github.com/lokiteitor/global-market/backend/internal/world/sqlcgen"
 )
 
-// SQLSTATE que este subpaquete traduce a errores tipados.
+// SQLSTATE y constraints que este subpaquete traduce a errores tipados.
 const (
 	sqlstateCheckViolation = "23514" // check_violation
 	sqlstateFKViolation    = "23503" // foreign_key_violation
+
+	constraintNonNegative = "ck_accounts_non_negative"
 )
 
 // SimSource entrega el sim-time actual del mundo. Producción: *clock.Reader (o
@@ -344,8 +346,13 @@ func validBatchStatus(s string) bool {
 func mapLedgerError(err error) error {
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) {
-		if pgErr.Code == sqlstateFKViolation {
+		switch {
+		case pgErr.Code == sqlstateFKViolation:
 			return fmt.Errorf("%w: referencia inexistente (%s)", ErrValidation, pgErr.ConstraintName)
+		// No-negatividad de las cuentas: el motor la trata como estancamiento
+		// esperado del lote, no como un fallo con SQLSTATE crudo.
+		case pgErr.Code == sqlstateCheckViolation && pgErr.ConstraintName == constraintNonNegative:
+			return fmt.Errorf("%w: %s", ErrInsufficientBalance, pgErr.Message)
 		}
 	}
 	return err

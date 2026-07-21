@@ -1,13 +1,17 @@
 # ══════════════════════════════════════════════════════════════════════════
-# Imperio Industrial — Backend (gateway | engine), multi-stage
+# Imperio Industrial — Backend (gateway | engine | stress), multi-stage
 #
 # Contexto de build: /backend (ver infra/docker-compose.yml).
 #   docker build -f infra/docker/backend.Dockerfile --build-arg CMD=gateway backend/
 #
-# ARG CMD  → binario a compilar: gateway | engine (cmd/<CMD>)
-# ARG PORT → puerto expuesto (8080 gateway, 8081 engine)
+# ARG CMD  → binario a compilar: gateway | engine | stress (cmd/<CMD>)
+# ARG PORT → puerto expuesto (8080 gateway, 8081 engine, 8083 stress)
+#
+# GO_IMAGE debe cubrir la directiva `go` de backend/go.mod: la imagen oficial
+# fija GOTOOLCHAIN=local, así que un tag por debajo NO descarga toolchain y el
+# build falla con "go.mod requires go >= X".
 # ══════════════════════════════════════════════════════════════════════════
-ARG GO_IMAGE=golang:1.24
+ARG GO_IMAGE=golang:1.25
 
 FROM ${GO_IMAGE} AS builder
 ARG CMD=gateway

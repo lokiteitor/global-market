@@ -165,6 +165,7 @@ func (s *Service) CreateBuilding(ctx context.Context, owner uuid.UUID, in Buildi
 	var nodeKind sqlcgen.WorldNodeKind
 	var nodeID uuid.UUID
 	var buildCost int64
+	var spur roadSpur
 	err := db.RunSerializable(ctx, s.pool, func(tx pgx.Tx) error {
 		r := s.repo.WithTx(tx)
 
@@ -259,6 +260,12 @@ func (s *Service) CreateBuilding(ctx context.Context, owner uuid.UUID, in Buildi
 		if err != nil {
 			return err
 		}
+		// El nodo nace CONECTADO: sin ramal road no hay entrega de vehículo ni
+		// ruta posible y el edificio queda inerte (ver connectToRoadNetwork).
+		spur, err = s.connectToRoadNetwork(ctx, r, conc.RegionID, nodeID)
+		if err != nil {
+			return err
+		}
 		return outbox.Emit(ctx, tx, int64(simNow), AggregateBuilding, out.ID, EventBuildingCreated, BuildingCreatedPayload{
 			BuildingID:     out.ID.String(),
 			OwnerAccountID: owner.String(),
@@ -275,13 +282,73 @@ func (s *Service) CreateBuilding(ctx context.Context, owner uuid.UUID, in Buildi
 		return Building{}, mapLedgerError(err)
 	}
 	s.created.Inc()
-	s.logger.Info("edificio en construcción",
+	attrs := []any{
 		slog.String("building_id", out.ID.String()),
 		slog.String("owner", owner.String()),
 		slog.String("node_id", nodeID.String()),
 		slog.String("node_kind", string(nodeKind)),
-		slog.Int64("build_cost", buildCost))
+		slog.Int64("build_cost", buildCost),
+		slog.Bool("road_spur", spur.Connected),
+	}
+	if spur.Connected {
+		attrs = append(attrs,
+			slog.String("road_spur_node_id", spur.AttachedNodeID.String()),
+			slog.Int("road_spur_length_m", int(spur.LengthM)))
+	}
+	s.logger.Info("edificio en construcción", attrs...)
 	return out, nil
+}
+
+// roadSpur describe el ramal de última milla tendido al dar de alta el edificio.
+type roadSpur struct {
+	Connected      bool
+	AttachedNodeID uuid.UUID
+	LengthM        int32
+}
+
+// connectToRoadNetwork tiende el ramal ROAD BIDIRECCIONAL (un enlace dirigido por
+// sentido, cada uno con su único link_segment) entre el nodo recién creado del
+// edificio y el nodo road-conectado más cercano de SU región.
+//
+// Sin este ramal el nodo nace AISLADO: `POST /world/vehicles` rechaza la entrega
+// (nodo inaccesible para el modo del vehículo) y el planificador no encuentra
+// ruta, de modo que el edificio no puede despachar ni recibir nada — el bucle
+// económico no arranca (GDD 7.2, ADR-009). La carretera es infraestructura del
+// mundo, igual que la que tienden el seed y el worldgen: se tiende sin coste
+// adicional para el dueño (el coste del edificio ya se asentó como sink) y con
+// los mismos parámetros de capacidad y velocidad base.
+//
+// Si la región todavía no tiene NINGÚN nodo con enlace road (p. ej. una región
+// oceánica sin red vial), el alta no falla: el edificio se crea sin ramal y se
+// registra un warn — la conectividad llegará cuando exista red del modo.
+func (s *Service) connectToRoadNetwork(ctx context.Context, r *Repo, regionID, nodeID uuid.UUID) (roadSpur, error) {
+	attachTo, err := r.NearestRoadNodeInRegion(ctx, regionID, nodeID)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		s.logger.Warn("edificio sin ramal road: la región no tiene red vial",
+			slog.String("node_id", nodeID.String()), slog.String("region_id", regionID.String()))
+		return roadSpur{}, nil
+	case err != nil:
+		return roadSpur{}, fmt.Errorf("world/buildings: buscando el nodo road más cercano en la región %s: %w", regionID, err)
+	}
+
+	var lengthM int32
+	for _, dir := range [2][2]uuid.UUID{{nodeID, attachTo}, {attachTo, nodeID}} {
+		linkID, err := newUUIDv7()
+		if err != nil {
+			return roadSpur{}, err
+		}
+		segmentID, err := newUUIDv7()
+		if err != nil {
+			return roadSpur{}, err
+		}
+		_, l, err := r.InsertRoadSpurLink(ctx, linkID, segmentID, regionID, dir[0], dir[1])
+		if err != nil {
+			return roadSpur{}, err
+		}
+		lengthM = l
+	}
+	return roadSpur{Connected: true, AttachedNodeID: attachTo, LengthM: lengthM}, nil
 }
 
 // checkPlacementRules evalúa las reglas near_resource y requires_node_kind; una

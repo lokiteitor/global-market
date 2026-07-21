@@ -790,6 +790,12 @@ type ShipmentDispatch struct {
 	RouteID   string `json:"route_id"`
 }
 
+// VehicleReposition es el cuerpo de POST /world/vehicles/{id}/reposition (viaje
+// en vacío por una ruta propia que empieza en el nodo actual del vehículo).
+type VehicleReposition struct {
+	RouteID string `json:"route_id"`
+}
+
 // Terminal es una terminal con dueño y cola de transbordo.
 type Terminal struct {
 	ID                   string  `json:"id"`

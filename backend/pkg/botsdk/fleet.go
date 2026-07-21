@@ -74,13 +74,28 @@ func (c *Client) UpdateVehicle(ctx context.Context, vehicleID string, in Vehicle
 	return mutate[Vehicle](ctx, c, http.MethodPatch, "/world/vehicles/"+pathID(vehicleID), in)
 }
 
+// RepositionVehicle pone en ruta EN VACÍO un vehículo propio idle por una ruta
+// propia que empieza en su nodo actual (POST /world/vehicles/{id}/reposition).
+// Es el viaje de reposicionamiento (deadhead) del transporte real: sin él un
+// vehículo se queda varado donde terminó su última entrega, porque la carga
+// nueva nace en OTROS nodos. El vehículo queda in_transit; la llegada al nodo
+// final lo devuelve a idle allí.
+func (c *Client) RepositionVehicle(ctx context.Context, vehicleID, routeID string) (Vehicle, error) {
+	in := VehicleReposition{RouteID: routeID}
+	return mutate[Vehicle](ctx, c, http.MethodPost, "/world/vehicles/"+pathID(vehicleID)+"/reposition", in)
+}
+
 // ── Cargamentos ──
 
 // ShipmentsQuery filtra GET /world/shipments.
 type ShipmentsQuery struct {
-	Status     ShipmentStatus
+	Status ShipmentStatus
+	// ContractID filtra por el CCRI de bienes del cargamento.
 	ContractID string
-	VehicleID  string
+	// FreightContractID filtra por el CCRI-Flete del cargamento (el que un
+	// transportista debe despachar).
+	FreightContractID string
+	VehicleID         string
 	PageQuery
 }
 
@@ -93,6 +108,9 @@ func (q ShipmentsQuery) values() url.Values {
 	if q.ContractID != "" {
 		v.Set("contract_id", q.ContractID)
 	}
+	if q.FreightContractID != "" {
+		v.Set("freight_contract_id", q.FreightContractID)
+	}
 	if q.VehicleID != "" {
 		v.Set("vehicle_id", q.VehicleID)
 	}
@@ -100,7 +118,9 @@ func (q ShipmentsQuery) values() url.Values {
 	return v
 }
 
-// ListShipments devuelve los cargamentos propios, etiquetados por contrato
+// ListShipments devuelve los cargamentos visibles, etiquetados por contrato: los
+// propios y los de un CCRI-Flete en el que la corporación es TRANSPORTISTA —el
+// dueño es el cargador, pero el despacho es del transportista, GDD 5.3.2
 // (GET /world/shipments).
 func (c *Client) ListShipments(ctx context.Context, q ShipmentsQuery) (Page[Shipment], error) {
 	return getList[Shipment](ctx, c, "/world/shipments", q.values())

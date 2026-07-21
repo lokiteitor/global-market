@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/lokiteitor/global-market/backend/internal/platform/db"
 	"github.com/lokiteitor/global-market/backend/internal/platform/httpx"
 	"github.com/lokiteitor/global-market/backend/internal/platform/logging"
 )
@@ -25,6 +27,7 @@ const (
 	codePublicationExhausted   = "PUBLICATION_EXHAUSTED"
 	codeCancelCooldownActive   = "CANCEL_COOLDOWN_ACTIVE"
 	codeBelowMinLot            = "BELOW_MIN_LOT"
+	codeSerializationConflict  = "SERIALIZATION_CONFLICT"
 )
 
 // maxMoneyStockDigits acota la longitud de un importe/cantidad de punto fijo
@@ -56,6 +59,7 @@ type API interface {
 	Accept(ctx context.Context, acceptor, publicationID uuid.UUID, in AcceptInput) (Acceptance, error)
 	GetAcceptance(ctx context.Context, viewer, id uuid.UUID) (Acceptance, error)
 	ResolveAcceptanceContract(ctx context.Context, a Acceptance) (*uuid.UUID, error)
+	ResolveAcceptanceFreightContract(ctx context.Context, a Acceptance) (*uuid.UUID, error)
 	ListContracts(ctx context.Context, account uuid.UUID, f ContractFilter) ([]Contract, string, error)
 	GetContract(ctx context.Context, viewer, id uuid.UUID) (Contract, error)
 	ListContractDeliveries(ctx context.Context, viewer, contractID uuid.UUID) ([]ContractDelivery, error)
@@ -65,7 +69,10 @@ type API interface {
 
 var _ API = (*Service)(nil)
 
-// Handlers sirve los endpoints /contracts/* del contrato OpenAPI v1.2.0.
+// Handlers sirve los endpoints /contracts/* del contrato OpenAPI v1.5.0
+// (freight del v1.4.0; v1.4.1 añade declared_value en las publicaciones
+// freight servidas, freight_contract_id en la aceptación y el 503
+// SERIALIZATION_CONFLICT reintentable en lugar de un INTERNAL opaco).
 type Handlers struct {
 	svc      API
 	identity Identity
@@ -250,7 +257,7 @@ func (h *Handlers) acceptPublication(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, r, err, "aceptando la publicación")
 		return
 	}
-	h.writeData(w, r, http.StatusCreated, toAcceptanceJSON(acc, nil), "")
+	h.writeData(w, r, http.StatusCreated, toAcceptanceJSON(acc, nil, nil), "")
 }
 
 // ─── GET /contracts/acceptances/{id} ─────────────────────────────────────────
@@ -276,7 +283,12 @@ func (h *Handlers) getAcceptance(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, r, err, "resolviendo el contrato de la aceptación")
 		return
 	}
-	h.writeData(w, r, http.StatusOK, toAcceptanceJSON(acc, contractID), "")
+	freightID, err := h.svc.ResolveAcceptanceFreightContract(r.Context(), acc)
+	if err != nil {
+		h.writeError(w, r, err, "resolviendo el flete de la aceptación")
+		return
+	}
+	h.writeData(w, r, http.StatusOK, toAcceptanceJSON(acc, contractID, freightID), "")
 }
 
 // ─── GET /contracts/contracts ────────────────────────────────────────────────
@@ -461,11 +473,46 @@ func (h *Handlers) writeError(w http.ResponseWriter, r *http.Request, err error,
 		errors.Is(err, ErrNotAcceptor), errors.Is(err, ErrNotNodeOwner),
 		errors.Is(err, ErrNotContractParty), errors.Is(err, ErrNotFreightParty):
 		httpx.WriteError(w, http.StatusForbidden, codeNotResourceOwner, err.Error(), nil)
+	case errors.Is(err, db.ErrSerializationExhausted):
+		// Contención, no avería: la transacción se revirtió ENTERA y el mismo
+		// comando vuelve a ser válido. Se responde reintentable con
+		// Retry-After en vez de un INTERNAL opaco que el cliente no sabe
+		// interpretar. Sigue en 5xx a propósito: es saturación del servicio y
+		// debe verse en los disparadores MEDIDOS (SAD §13), acompañada de
+		// ii_tx_serialization_exhausted_total.
+		h.writeSerializationConflict(w, r, err, doing)
 	default:
+		// Petición abortada por el cliente o plazo agotado: no es un fallo
+		// del servicio y no debe contarse como 5xx ni loguearse como ERROR.
+		if httpx.WriteClientGone(w, r, h.logger, err, doing) {
+			return
+		}
 		logging.WithRequestID(h.logger, httpx.RequestIDFromContext(r.Context())).LogAttrs(
 			r.Context(), slog.LevelError, "error "+doing, slog.String("error", err.Error()))
 		httpx.WriteError(w, http.StatusInternalServerError, httpx.CodeInternal, "error interno del servidor", nil)
 	}
+}
+
+// writeSerializationConflict responde el agotamiento del presupuesto de
+// reintentos de una transacción SERIALIZABLE: 503 + Retry-After con el código
+// SERIALIZATION_CONFLICT. Se registra como WARN (no ERROR): no hay nada roto
+// que arreglar en el código, hay contención que medir.
+func (h *Handlers) writeSerializationConflict(w http.ResponseWriter, r *http.Request, err error, doing string) {
+	retryAfter := 2 * time.Second
+	var serErr *db.SerializationError
+	if errors.As(err, &serErr) {
+		retryAfter = serErr.RetryAfter()
+	}
+	seconds := max(int(math.Ceil(retryAfter.Seconds())), 1)
+
+	logging.WithRequestID(h.logger, httpx.RequestIDFromContext(r.Context())).LogAttrs(
+		r.Context(), slog.LevelWarn, "conflicto de serialización "+doing,
+		slog.String("error", err.Error()), slog.Int("retry_after_seconds", seconds))
+
+	w.Header().Set("Retry-After", strconv.Itoa(seconds))
+	httpx.WriteError(w, http.StatusServiceUnavailable, codeSerializationConflict,
+		"la operación chocó con otras concurrentes y no se aplicó; reintenta la misma petición",
+		map[string]any{"retry_after_seconds": seconds})
 }
 
 func unauthorized(w http.ResponseWriter) {
@@ -570,11 +617,20 @@ type publicationJSON struct {
 	Status                string     `json:"status"`
 	WindowClosesAt        *time.Time `json:"window_closes_at,omitempty"`
 	CancelCooldownUntil   *time.Time `json:"cancel_cooldown_until,omitempty"`
-	PublishedAtSim        int64      `json:"published_at_sim"`
-	CreatedAt             time.Time  `json:"created_at"`
+	// DeclaredValue solo viaja en las solicitudes de flete: es la base de la
+	// garantía que el transportista bloqueará al aceptar, así que el tablón
+	// tiene que exponerla (schema Publication).
+	DeclaredValue  *string   `json:"declared_value,omitempty"`
+	PublishedAtSim int64     `json:"published_at_sim"`
+	CreatedAt      time.Time `json:"created_at"`
 }
 
 func toPublicationJSON(p Publication) publicationJSON {
+	var declared *string
+	if p.DeclaredValue != nil {
+		v := fixed(*p.DeclaredValue)
+		declared = &v
+	}
 	return publicationJSON{
 		ID:                    p.ID.String(),
 		Kind:                  string(p.Kind),
@@ -592,25 +648,30 @@ func toPublicationJSON(p Publication) publicationJSON {
 		Status:                string(p.Status),
 		WindowClosesAt:        p.WindowClosesAt,
 		CancelCooldownUntil:   p.CancelCooldownUntil,
+		DeclaredValue:         declared,
 		PublishedAtSim:        int64(p.PublishedAtSim),
 		CreatedAt:             p.CreatedAt,
 	}
 }
 
 type acceptanceJSON struct {
-	ID                string     `json:"id"`
-	PublicationID     string     `json:"publication_id"`
-	AcceptorAccountID string     `json:"acceptor_account_id"`
-	Quantity          string     `json:"quantity"`
-	QuantityServed    string     `json:"quantity_served"`
-	Status            string     `json:"status"`
-	DrawOrder         *int32     `json:"draw_order,omitempty"`
-	ContractID        string     `json:"contract_id,omitempty"`
+	ID                string `json:"id"`
+	PublicationID     string `json:"publication_id"`
+	AcceptorAccountID string `json:"acceptor_account_id"`
+	Quantity          string `json:"quantity"`
+	QuantityServed    string `json:"quantity_served"`
+	Status            string `json:"status"`
+	DrawOrder         *int32 `json:"draw_order,omitempty"`
+	ContractID        string `json:"contract_id,omitempty"`
+	// FreightContractID es el contrato resultante cuando la publicación era
+	// freight (schema Acceptance): sin él, el transportista que acepta no
+	// podría localizar el flete que acaba de ganar.
+	FreightContractID string     `json:"freight_contract_id,omitempty"`
 	AcceptedAt        time.Time  `json:"accepted_at"`
 	ResolvedAt        *time.Time `json:"resolved_at,omitempty"`
 }
 
-func toAcceptanceJSON(a Acceptance, contractID *uuid.UUID) acceptanceJSON {
+func toAcceptanceJSON(a Acceptance, contractID, freightContractID *uuid.UUID) acceptanceJSON {
 	return acceptanceJSON{
 		ID:                a.ID.String(),
 		PublicationID:     a.PublicationID.String(),
@@ -620,6 +681,7 @@ func toAcceptanceJSON(a Acceptance, contractID *uuid.UUID) acceptanceJSON {
 		Status:            string(a.Status),
 		DrawOrder:         a.DrawOrder,
 		ContractID:        uuidOrEmpty(contractID),
+		FreightContractID: uuidOrEmpty(freightContractID),
 		AcceptedAt:        a.AcceptedAt,
 		ResolvedAt:        a.ResolvedAt,
 	}

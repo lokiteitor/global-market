@@ -508,6 +508,17 @@ RETURNING *;
 -- name: GetFreightContract :one
 SELECT * FROM ledger.freight_contracts WHERE id = sqlc.arg(id);
 
+-- GetFreightContractForAcceptance resuelve el contrato de FLETE resultante de una
+-- aceptación servida (simétrico de GetContractForAcceptance): el esquema no liga
+-- la aceptación al flete con una FK; el vínculo es publication_id + el aceptante
+-- como TRANSPORTISTA.
+-- name: GetFreightContractForAcceptance :one
+SELECT * FROM ledger.freight_contracts
+WHERE publication_id = sqlc.arg(publication_id)
+  AND carrier_account_id = sqlc.arg(acceptor_account_id)
+ORDER BY confirmed_at_sim, id
+LIMIT 1;
+
 -- GetFreightContractForUpdate bloquea el contrato de flete (SELECT FOR UPDATE):
 -- el freight_settler fija estado/liquidación bajo el lock, serializándose con el
 -- barrido de vencimiento (que lo bloquea con SKIP LOCKED).

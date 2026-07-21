@@ -825,6 +825,43 @@ export interface paths {
         patch: operations["updateVehicle"];
         trace?: never;
     };
+    "/world/vehicles/{vehicleId}/reposition": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                vehicleId: components["schemas"]["VehicleId"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Reposicionar un vehículo (viaje EN VACÍO)
+         * @description Pone en ruta un vehículo propio `idle` **sin carga** por una ruta propia que
+         *     **empieza en su nodo actual**. Es el viaje en vacío (*deadhead*) del transporte
+         *     real: el vehículo llega al nodo final de la ruta y queda `idle` allí, listo para
+         *     cargar.
+         *
+         *     **Por qué existe.** Un cargamento se entrega en el nodo destino del contrato y el
+         *     vehículo se queda `idle` **ahí**; la carga siguiente, en cambio, nace donde está la
+         *     mercancía (el almacén del vendedor, el origen de un flete). Sin viaje en vacío un
+         *     vehículo solo podría moverse llevando carga y quedaría varado en el destino de su
+         *     última entrega para siempre, incapaz de servir ningún contrato posterior.
+         *
+         *     Valida **lo mismo** que el despacho, salvo lo relativo a la carga: propiedad del
+         *     vehículo y de la ruta, vehículo `idle` y **sin cargamento a bordo** (un vehículo
+         *     cargado se mueve despachando el cargamento, nunca por aquí), todos los tramos de la
+         *     ruta del **modo** del vehículo, la ruta empieza en el nodo donde está el vehículo y
+         *     el combustible cubre la distancia completa. Emite el hito `vehicle.repositioned`.
+         */
+        post: operations["repositionVehicle"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/world/shipments": {
         parameters: {
             query?: never;
@@ -833,10 +870,15 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Cargamentos propios
+         * Cargamentos visibles (propios y los que se transportan por flete)
          * @description Cargamentos etiquetados por contrato: el stock reservado viaja sin dejar de estar
          *     reservado. **Nada se teletransporta, tampoco en los fallos** — el stock de un
          *     contrato fallido se libera en su ubicación física actual (`released_in_situ`).
+         *
+         *     Devuelve los cargamentos **propios** y, en un **CCRI-Flete**, los que corresponden
+         *     a la corporación como **transportista**: el dueño del cargamento es el cargador,
+         *     pero quien lo despacha y lo lleva es el transportista (GDD 5.3.2), así que necesita
+         *     verlo. Misma regla de autorización que `POST /world/shipments/{shipmentId}/dispatch`.
          */
         get: operations["listShipments"];
         put?: never;
@@ -854,7 +896,11 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Detalle de un cargamento */
+        /**
+         * Detalle de un cargamento
+         * @description Visible para el dueño del cargamento y, en un CCRI-Flete, para su **transportista**
+         *     (misma visibilidad que `GET /world/shipments`).
+         */
         get: operations["getShipment"];
         put?: never;
         post?: never;
@@ -1340,8 +1386,9 @@ export interface components {
              *     `INSUFFICIENT_COLLATERAL`, `INSUFFICIENT_FUNDS`, `PUBLICATION_EXHAUSTED`,
              *     `CANCEL_COOLDOWN_ACTIVE`, `BELOW_MIN_LOT`, `STOCK_ALREADY_RESERVED`,
              *     `PLACEMENT_INVALID`, `NOT_RESOURCE_OWNER`, `VEHICLE_SEALED`,
-             *     `NO_ROUTE_FOUND`, `MAINTENANCE_WINDOW`, `RATE_LIMITED`,
-             *     `VALIDATION_ERROR`, `NOT_FOUND`, `UNAUTHORIZED`, `INTERNAL`.
+             *     `NO_ROUTE_FOUND`, `MAINTENANCE_WINDOW`, `SERIALIZATION_CONFLICT`,
+             *     `RATE_LIMITED`, `VALIDATION_ERROR`, `NOT_FOUND`, `UNAUTHORIZED`,
+             *     `INTERNAL`.
              * @example INSUFFICIENT_COLLATERAL
              */
             code: string;
@@ -1925,6 +1972,16 @@ export interface components {
             /** @description Ruta propia que empieza en el nodo del cargamento y termina en el nodo destino del contrato. */
             route_id: components["schemas"]["RouteId"];
         };
+        /**
+         * @description Orden de viaje EN VACÍO de un vehículo propio `idle`: lo pone en ruta **sin carga**
+         *     por una ruta propia que empieza en su nodo actual, para que quede disponible donde
+         *     hay carga que recoger. Sin él, un vehículo se queda varado en el destino de su
+         *     última entrega.
+         */
+        VehicleReposition: {
+            /** @description Ruta propia, toda ella del modo del vehículo, que empieza en el nodo donde está el vehículo. */
+            route_id: components["schemas"]["RouteId"];
+        };
         Terminal: {
             id: components["schemas"]["TerminalId"];
             node_id: components["schemas"]["NodeId"];
@@ -2106,10 +2163,19 @@ export interface components {
                 "application/json": components["schemas"]["ErrorEnvelope"];
             };
         };
-        /** @description Ventana de mantenimiento diaria (sim-time congelado de forma coordinada). */
+        /**
+         * @description Servicio temporalmente no disponible; SIEMPRE reintentable con la MISMA petición.
+         *     Dos causas, distinguibles por el `code`:
+         *
+         *     - `MAINTENANCE_WINDOW`: ventana de mantenimiento diaria (sim-time congelado de forma coordinada).
+         *     - `SERIALIZATION_CONFLICT`: la operación chocó con otras concurrentes sobre las mismas
+         *       cuentas del ledger y agotó su presupuesto de reintentos en el servidor. La transacción se
+         *       revirtió ENTERA —no queda ningún efecto parcial, ni garantías a medio bloquear— así que
+         *       reenviar la misma petición tras `Retry-After` es seguro y es lo esperado del cliente.
+         */
         Maintenance: {
             headers: {
-                /** @description Segundos estimados hasta el fin de la ventana. */
+                /** @description Segundos estimados hasta poder reintentar (fin de la ventana, o drenaje de la ráfaga de escrituras). */
                 "Retry-After"?: number;
                 [name: string]: unknown;
             };
@@ -3858,11 +3924,89 @@ export interface operations {
             503: components["responses"]["Maintenance"];
         };
     };
+    repositionVehicle: {
+        parameters: {
+            query?: never;
+            header?: {
+                /**
+                 * @description Clave de idempotencia para **reintentos seguros de comandos que mueven
+                 *     valor**: si el cliente reintenta con la misma clave, el servidor reproduce
+                 *     la misma respuesta del primer intento — nunca hay doble ejecución.
+                 */
+                "Idempotency-Key"?: components["parameters"]["idempotencyKey"];
+            };
+            path: {
+                vehicleId: components["schemas"]["VehicleId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["VehicleReposition"];
+            };
+        };
+        responses: {
+            /** @description Vehículo en tránsito hacia el nodo final de la ruta, en vacío. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        data: components["schemas"]["Vehicle"];
+                        meta: components["schemas"]["Meta"];
+                    };
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            /**
+             * @description El vehículo o la ruta pertenecen a otra corporación, o el vehículo está SELLADO
+             *     durante un handoff (`VEHICLE_SEALED`).
+             */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            404: components["responses"]["NotFound"];
+            /** @description El vehículo no está `idle` (`VEHICLE_NOT_IDLE`). */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /**
+             * @description `VALIDATION_ERROR`: la ruta no empieza en el nodo del vehículo, contiene tramos
+             *     de otro modo, el vehículo lleva carga a bordo, o el combustible no cubre la
+             *     distancia de la ruta.
+             */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            429: components["responses"]["TooManyRequests"];
+            500: components["responses"]["InternalError"];
+            503: components["responses"]["Maintenance"];
+        };
+    };
     listShipments: {
         parameters: {
             query?: {
                 status?: components["schemas"]["ShipmentStatus"];
                 contract_id?: components["schemas"]["ContractId"];
+                /** @description Filtra por el CCRI-Flete del cargamento (el que un transportista debe despachar). */
+                freight_contract_id?: components["schemas"]["FreightContractId"];
                 vehicle_id?: components["schemas"]["VehicleId"];
                 /** @description Cursor opaco de paginación devuelto en `meta.next_cursor`. */
                 cursor?: components["parameters"]["cursor"];

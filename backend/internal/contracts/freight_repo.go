@@ -68,6 +68,21 @@ func (r *Repo) GetFreightContract(ctx context.Context, id uuid.UUID) (FreightCon
 	return toFreightContract(row), nil
 }
 
+// GetFreightContractForAcceptance resuelve el flete resultante de una aceptación
+// servida (publicación + aceptante como transportista); pgx.ErrNoRows si aún no
+// existe.
+func (r *Repo) GetFreightContractForAcceptance(ctx context.Context, publicationID, acceptor uuid.UUID) (FreightContract, error) {
+	pubID := publicationID
+	row, err := r.q.GetFreightContractForAcceptance(ctx, sqlcgen.GetFreightContractForAcceptanceParams{
+		PublicationID:     &pubID,
+		AcceptorAccountID: acceptor,
+	})
+	if err != nil {
+		return FreightContract{}, err
+	}
+	return toFreightContract(row), nil
+}
+
 // GetFreightContractForUpdate bloquea el contrato de flete (SELECT FOR UPDATE);
 // pgx.ErrNoRows si no existe.
 func (r *Repo) GetFreightContractForUpdate(ctx context.Context, id uuid.UUID) (FreightContract, error) {

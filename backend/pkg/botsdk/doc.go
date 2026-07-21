@@ -1,7 +1,7 @@
 // Package botsdk es el SDK oficial de bots de Imperio Industrial (ADR-024)
 // y la ÚNICA forma soportada de construir bots. En runtime consume
 // exclusivamente la API pública REST del contrato OpenAPI
-// (docs/api/openapi.yaml, v1.3.0): mismos endpoints y mismos rate limits que
+// (docs/api/openapi.yaml, v1.5.0): mismos endpoints y mismos rate limits que
 // un jugador humano — igualdad de API literal (ADR-010).
 //
 // El cliente abstrae la fontanería del contrato:
