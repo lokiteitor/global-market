@@ -32,6 +32,7 @@ import HudSidebar from '~/components/play/HudSidebar.vue'
 import HudTopBar from '~/components/play/HudTopBar.vue'
 import IndustryPanel from '~/components/play/IndustryPanel.vue'
 import InspectorPanel from '~/components/play/InspectorPanel.vue'
+import MinimapPanel from '~/components/play/minimap/MinimapPanel.vue'
 import MarketPanel from '~/components/play/MarketPanel.vue'
 import { useAppError } from '~/composables/useAppError'
 import { useGameSync } from '~/composables/useGameSync'
@@ -105,6 +106,7 @@ function onRetry(): void {
       <HudTopBar :connection="sync.connection.value" :stale="sync.stale.value" />
       <HudSidebar />
       <InspectorPanel />
+      <MinimapPanel />
 
       <MarketPanel v-if="panels.activePanel === 'market'" />
       <IndustryPanel v-else-if="panels.activePanel === 'industry'" />

@@ -81,6 +81,9 @@ const COLOR_GHOST = 0x57b877
  * familia ámbar, montaña = $color-gray-500 literal, aguas desde $color-info-500
  * oscurecido. Lo consume el ChunkManager para el rectángulo de terreno.
  */
+// NOTA: MINIMAP_BIOME_COLORS (app/components/play/minimap/MinimapPanel.vue)
+// es un espejo consciente de esta paleta en hex CSS (ADR-026). Cambiar un
+// color aquí exige cambiarlo también allí.
 export const BIOME_COLORS: Readonly<Record<BiomeName, number>> = {
   plains: 0x3f5a3c,
   forest: 0x2c4430,

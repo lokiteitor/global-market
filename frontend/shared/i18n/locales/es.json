@@ -132,6 +132,10 @@
   "sidebar.regions": "Regiones",
   "sidebar.regions.jump": "Ir a {name}",
   "sidebar.panels": "Paneles",
+
+  "minimap.title": "Minimapa",
+  "minimap.hide": "Ocultar minimapa",
+  "minimap.show": "Mostrar minimapa",
   "tool.select": "Seleccionar",
   "tool.pan": "Mover mapa",
   "tool.build": "Construir",

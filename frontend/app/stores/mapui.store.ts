@@ -31,6 +31,9 @@ export const useMapUiStore = defineStore('mapui', () => {
   const followedVehicleId = ref<string | null>(null)
   const cameraCommand = ref<CameraCommand | null>(null)
   let cameraCommandSeq = 0
+  /** Vista de cámara reportada por el motor (throttled ~5 Hz; para el minimapa). */
+  const cameraViewM = ref<WorldRectM | null>(null)
+  const minimapVisible = ref(true)
 
   const hasSelection = computed(() => selection.value !== null)
 
@@ -70,6 +73,15 @@ export const useMapUiStore = defineStore('mapui', () => {
     cameraCommand.value = { seq: cameraCommandSeq, kind: 'fit', rectM }
   }
 
+  /** Vista de cámara del motor (bindWorldLive la escribe desde el evento camera). */
+  function setCameraView(viewM: WorldRectM): void {
+    cameraViewM.value = viewM
+  }
+
+  function toggleMinimap(): void {
+    minimapVisible.value = !minimapVisible.value
+  }
+
   /** Vuelta al estado inicial (salir de /play, logout). */
   function reset(): void {
     mode.value = 'select'
@@ -77,6 +89,8 @@ export const useMapUiStore = defineStore('mapui', () => {
     selection.value = null
     followedVehicleId.value = null
     cameraCommand.value = null
+    cameraViewM.value = null
+    minimapVisible.value = true
   }
 
   return {
@@ -85,6 +99,8 @@ export const useMapUiStore = defineStore('mapui', () => {
     selection,
     followedVehicleId,
     cameraCommand,
+    cameraViewM,
+    minimapVisible,
     hasSelection,
     setMode,
     setOverlay,
@@ -93,6 +109,8 @@ export const useMapUiStore = defineStore('mapui', () => {
     setFollow,
     requestCenterOn,
     requestFitRect,
+    setCameraView,
+    toggleMinimap,
     reset,
   }
 })

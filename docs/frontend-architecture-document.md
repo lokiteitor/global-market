@@ -1757,6 +1757,8 @@ Información siempre visible, densidad alta:
 - **Interacción**: clic/arrastre para saltar la cámara (jump/pan); overlays conmutable (congestión, propiedad) a escala.
 - **Rendimiento**: se re-renderiza a baja frecuencia (no cada frame), solo cuando cambia el estado relevante o el viewport (§21.7).
 
+> **Estado implementado (Incremento 15 — [ADR-026](../adr/ADR-026-minimapa-canvas-vue.md)).** Desviación consciente del mecanismo (no del contenido): el contenido es un **Canvas 2D propio** en `app/components/play/minimap/MinimapPanel.vue` en lugar de MinimapScene/`RenderTexture` — el modelo agregado por región que exige §16.9 (coropleta de biomas, ciudades, edificios propios, rect de viewport) ya vive íntegro en las stores y no necesita el pipeline GL. La posición de cámara llega por el evento `camera` del mundo vivo (throttle puro ~5 Hz, `game/camera-throttle.ts`) a `mapui.cameraViewM`; clic/arrastre emiten `mapui.requestCenterOn` (comando de cámara). Transformación mundo↔canvas pura y testeada (`minimap-math.ts`, aspect-fit con bounds negativos). Rutas activas y overlays del minimapa quedan diferidos; si exigieran render real, el criterio de reversión del ADR-026 recupera la MinimapScene sin cambiar el contrato Vue.
+
 ### 15.12 Inspector contextual
 
 - Panel que refleja la **selección actual** (single o múltiple, §11.10).
@@ -1891,6 +1893,8 @@ flowchart TD
 
 - El minimapa (§15.11) es una **vista agregada del mundo entero** a LOD máximo (coropleta por región + puntos de interés propios), renderizada por MinimapScene a una `RenderTexture` de baja resolución.
 - **No** carga todos los chunks reales: usa un **modelo agregado** (por región) que el cliente mantiene barato (nº de entidades, propiedad, congestión media) a partir de datos de bajo detalle (catálogo de regiones + resúmenes). Esto evita que "ver el minimapa" implique cargar el mundo.
+
+> **Estado implementado (Incremento 15):** el modelo agregado se cumple; el mecanismo de render es Canvas 2D en la capa Vue por [ADR-026](../adr/ADR-026-minimapa-canvas-vue.md) (ver nota en §15.11).
 
 ### 16.10 Vehículos y entidades móviles en el mapa
 

@@ -46,6 +46,7 @@ export type {
 } from './bridge/vm'
 export type {
   BuildIntent,
+  CameraView,
   InputMode,
   ParcelIntent,
   SelectableType,

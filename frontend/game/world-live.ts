@@ -13,6 +13,7 @@
  */
 
 import type { WorldApi } from './index'
+import { createCameraEventGate } from './camera-throttle'
 import { WorldStateBridge } from './bridge/bridge'
 import type { BridgeStats } from './bridge/bridge'
 import type { WorldStateSource } from './bridge/source'
@@ -174,11 +175,19 @@ export function createWorldLive(deps: WorldLiveDeps): WorldLive {
     camera.centerOnM(focus[0], focus[1])
   }
 
+  // Evento camera para el minimapa (FAD §15.11): throttled y solo si cambió.
+  const cameraGate = createCameraEventGate()
+
   const onUpdate = (): void => {
     bridge.tick()
     frameInitialView()
     labels.setZoom(camera.zoom())
     input.tick()
+    const viewM = camera.viewRectM()
+    const zoom = camera.zoom()
+    if (cameraGate(performance.now(), viewM, zoom)) {
+      input.events.emit('camera', { viewM, zoom })
+    }
   }
   scene.events.on(SCENE_UPDATE_EVENT, onUpdate)
   // Primer poblado sin esperar al siguiente frame (la escena ya corre).

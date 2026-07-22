@@ -42,6 +42,12 @@ export interface ParcelIntent {
 
 export type WorldIntent = BuildIntent | ParcelIntent
 
+/** Vista de cámara para la app (minimapa): viewport en metros + zoom. */
+export interface CameraView {
+  readonly viewM: WorldRectM
+  readonly zoom: number
+}
+
 /** Eventos del mundo vivo hacia la app (consumidos vía `WorldLive.on`). */
 export type WorldLiveEvents = {
   /** Cambio de selección (clic con/sin hit, o `select()` programático). */
@@ -52,4 +58,6 @@ export type WorldLiveEvents = {
   follow: string | null
   /** Cambio de modo de interacción. */
   mode: InputMode
+  /** Vista de cámara, throttled (~5 Hz) y solo si cambió (minimapa, FAD §15.11). */
+  camera: CameraView
 }

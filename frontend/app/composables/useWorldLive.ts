@@ -174,6 +174,9 @@ export function bindWorldLive(live: WorldLive): () => void {
     live.on('mode', (mode) => {
       ui.setMode(mode)
     }),
+    live.on('camera', (view) => {
+      ui.setCameraView(view.viewM)
+    }),
     live.on('selection', (selection) => {
       ui.setSelection(selection)
     }),
