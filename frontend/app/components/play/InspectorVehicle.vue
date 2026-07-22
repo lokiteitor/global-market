@@ -4,17 +4,19 @@
  *
  * Estado, combustible, desgaste, ruta asignada y posición observada (nodo o
  * segmento con progreso). El seguimiento de cámara escribe en mapui.store.
+ * Un vehículo propio `idle` en nodo ofrece REPOSICIONAR en vacío (v1.5.0).
  * Un vehículo ajeno (o `sealed`) es solo lectura con nota (OwnershipPolicy).
  */
 
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { t } from '~shared/i18n'
 import { formatQuantity } from '~domain/quantity'
 import type { VehicleId } from '~domain/fleet'
-import { isCommandable } from '~domain/ownership'
+import { isCommandable, isVehicleCommandable } from '~domain/ownership'
 import { vehicleStatusPresentation } from '~domain/status'
 import BaseButton from '~/components/base/BaseButton.vue'
 import { NODE_KIND_LABEL } from '~/components/play/labels'
+import RepositionDialog from '~/components/play/RepositionDialog.vue'
 import StatusBadge from '~/components/play/StatusBadge.vue'
 import { useFleetStore } from '~/stores/fleet.store'
 import { useLogisticsStore } from '~/stores/logistics.store'
@@ -61,6 +63,25 @@ const following = computed(() => mapui.followedVehicleId === props.vehicleId)
 function onFollow(): void {
   mapui.setFollow(following.value ? null : props.vehicleId)
 }
+
+// ── Reposicionamiento en vacío (solo propio, no sellado) ─────────────────────
+const repositioning = ref(false)
+
+const commandable = computed(() => {
+  const current = vehicle.value
+  return current !== null && isVehicleCommandable(current, session.account?.id ?? null)
+})
+
+/** El servidor exige idle + detenido en nodo; deshabilitado con tooltip si no. */
+const repositionReady = computed(() => {
+  const current = vehicle.value
+  return (
+    commandable.value &&
+    current !== null &&
+    current.status === 'idle' &&
+    current.position.kind === 'at-node'
+  )
+})
 </script>
 
 <template>
@@ -94,6 +115,23 @@ function onFollow(): void {
     <BaseButton variant="ghost" @click="onFollow">
       {{ following ? t('inspector.vehicle.unfollow') : t('inspector.vehicle.follow') }}
     </BaseButton>
+
+    <BaseButton
+      v-if="own"
+      variant="ghost"
+      :disabled="!repositionReady"
+      :title="repositionReady ? undefined : t('fleet.reposition.notIdle')"
+      data-testid="vehicle-reposition"
+      @click="repositioning = true"
+    >
+      {{ t('fleet.reposition.open') }}
+    </BaseButton>
+
+    <RepositionDialog
+      v-if="repositioning"
+      :vehicle-id="props.vehicleId"
+      @close="repositioning = false"
+    />
   </div>
 </template>
 

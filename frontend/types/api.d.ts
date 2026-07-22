@@ -4462,7 +4462,7 @@ export interface operations {
             };
             401: components["responses"]["Unauthorized"];
             404: components["responses"]["NotFound"];
-            /** @description El slot ya tiene titular vigente. */
+            /** @description El slot ya tiene titular vigente (`SLOT_HELD`). */
             409: {
                 headers: {
                     [name: string]: unknown;

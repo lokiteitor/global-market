@@ -124,10 +124,12 @@ describe('network/rest/errors — fallos de transporte y de protocolo', () => {
 })
 
 describe('network/rest/errors — taxonomía', () => {
-  it('la unión cubre exactamente los 16 códigos documentados del contrato', () => {
-    expect(API_ERROR_CODES).toHaveLength(16)
+  it('la unión cubre exactamente los 18 códigos documentados del contrato', () => {
+    expect(API_ERROR_CODES).toHaveLength(18)
     expect(isApiErrorCode('INSUFFICIENT_COLLATERAL')).toBe(true)
     expect(isApiErrorCode('NO_ROUTE_FOUND')).toBe(true)
+    expect(isApiErrorCode('VEHICLE_NOT_IDLE')).toBe(true)
+    expect(isApiErrorCode('SLOT_HELD')).toBe(true)
     expect(isApiErrorCode('SOME_FUTURE_CODE')).toBe(false)
   })
 

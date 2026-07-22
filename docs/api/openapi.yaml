@@ -2309,7 +2309,7 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
         '409':
-          description: El slot ya tiene titular vigente.
+          description: 'El slot ya tiene titular vigente (`SLOT_HELD`).'
           content:
             application/json:
               schema:

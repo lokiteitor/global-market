@@ -23,7 +23,7 @@ import type {
   Terminal,
   TerminalSlot,
 } from '~domain/logistics'
-import type { Shipment, Vehicle } from '~domain/fleet'
+import type { Shipment, Vehicle, VehicleType } from '~domain/fleet'
 import type {
   Acceptance,
   Contract,
@@ -306,6 +306,23 @@ export function route(over: Partial<Route> = {}): Route {
     kind: 'fixed_line',
     active: true,
     legs: [{ legIndex: 0, linkId: uid(120) }],
+    ...over,
+  }
+}
+
+export function vehicleType(over: Partial<VehicleType> = {}): VehicleType {
+  return {
+    id: uid(141),
+    code: 'truck_s',
+    name: 'Camión ligero',
+    mode: 'road',
+    cargoCapacity: qty('500'),
+    speedKmh: 60,
+    fuelProductId: uid(11),
+    fuelPer100km: qty('10'),
+    autonomyKm: 1_000,
+    purchasePrice: mon('50000'),
+    operatingCostPerDay: mon('100'),
     ...over,
   }
 }

@@ -8,7 +8,15 @@ import DispatchDialog from '~/components/play/DispatchDialog.vue'
 import { useFleetStore } from '~/stores/fleet.store'
 import { useMarketStore } from '~/stores/market.store'
 import { useWorldStore } from '~/stores/world.store'
-import { MY_ACCOUNT, contract, product, shipment, uid, vehicle } from '~/stores/testing/fixtures'
+import {
+  MY_ACCOUNT,
+  contract,
+  freightContract,
+  product,
+  shipment,
+  uid,
+  vehicle,
+} from '~/stores/testing/fixtures'
 import type { StubbedNuxtApp } from './game-fakes'
 import { stubNuxtApp } from './game-fakes'
 
@@ -137,5 +145,43 @@ describe('components/play/DispatchDialog', () => {
 
     expect(wrapper.get('[data-testid="dispatch-submit"]').attributes('disabled')).toBeDefined()
     expect(stub.apis.fleet.dispatchShipment).not.toHaveBeenCalled()
+  })
+
+  it('cargamento de FLETE: resuelve el destino desde el freight contract', async () => {
+    const FREIGHT_ID = uid<'FreightContract'>(185)
+    const pinia = createPinia()
+    setActivePinia(pinia)
+
+    useWorldStore().applyProductsSnapshot([product()])
+    const fleet = useFleetStore()
+    const freightCargo = shipment({
+      id: SHIPMENT_ID,
+      contractId: null,
+      freightContractId: FREIGHT_ID,
+      atNodeId: ORIGIN_NODE,
+    })
+    fleet.applyShipmentsSnapshot([freightCargo])
+    fleet.applyVehiclesSnapshot([vehicle({ id: VEHICLE_ID })])
+    useMarketStore().applyFreightsSnapshot([
+      freightContract({ id: FREIGHT_ID, originNodeId: ORIGIN_NODE, destinationNodeId: DEST_NODE }),
+    ])
+    vi.mocked(stub.apis.logistics.planRoute).mockResolvedValue(PLAN)
+
+    const wrapper = mount(DispatchDialog, {
+      props: { shipment: freightCargo },
+      global: { plugins: [pinia] },
+    })
+    await flushPromises()
+
+    await wrapper.get('[data-testid="dispatch-vehicle"]').setValue(VEHICLE_ID)
+    await wrapper.get('[data-testid="dispatch-plan"]').trigger('click')
+    await flushPromises()
+
+    expect(stub.apis.logistics.planRoute).toHaveBeenCalledWith(
+      expect.objectContaining({
+        origin_node_id: ORIGIN_NODE,
+        destination_node_id: DEST_NODE,
+      }),
+    )
   })
 })
