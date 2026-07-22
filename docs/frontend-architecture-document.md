@@ -1864,6 +1864,8 @@ El nivel de zoom (§17.2) selecciona un **perfil de detalle**:
 - Los **overlays** viven en OverlayScene (§11.5) y se activan/desactivan sin tocar el pipeline del mundo: alternar el overlay de congestión no repinta el terreno ni las entidades, solo la capa de overlay.
 - Los **móviles** se redibujan cada frame (interpolación), pero son pocos comparados con lo estático y están pooled.
 
+> **Estado implementado (Incremento 14 — modo de enlace y nodos intermodales).** Con el mundo multi-región los enlaces distinguen su **modo** visualmente, como identidad permanente y NO como overlay (el modo no es una lente analítica sino la naturaleza del enlace): el **color** sigue expresando la congestión (overlay `congestion` conmutable) y el **patrón del trazo** expresa el modo — `road` continuo (3 px), `rail` con travesaños perpendiculares (2 px + ticks cada 24 px), `sea` discontinuo (dash 10/8, alpha 0.75). Phaser Graphics no tiene dash nativo: la geometría de patrones es pura y testeada (`game/entities/link-geometry.ts`, recorrido por longitud acumulada; patrones en px de render — escalan con el zoom, decisión documentada en el propio módulo). Los **nodos** llevan textura distintiva por clase (puerto/estación/centro de distribución) y los que tienen **terminal intermodal** (`NetworkNode.terminal_id`, v1.7.0) un anillo ámbar horneado en la textura (`nodeTextureKey`, variantes `-terminal` — una textura por combinación, sin sprites hijos, pool-friendly). `LinkVM.mode` y `NodeVM.kind/intermodal` viajan por el bridge (`vm.ts`/`derive.ts`); `LINK_MODE_LABEL` (i18n `link.mode.*`) ya da los textos en la UI.
+
 ### 16.8 Streaming del mundo
 
 El **ChunkManager** decide qué cargar/descargar según cámara y red:

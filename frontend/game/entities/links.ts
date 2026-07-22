@@ -1,21 +1,26 @@
 /**
- * game/entities/links — renderer de enlaces logísticos (FAD §11.9, capa links).
+ * game/entities/links — renderer de enlaces logísticos (FAD §11.9/§16.7, capa links).
  *
- * Polilínea `Graphics` por enlace (pool), coloreada por tier de congestión
- * (mandato: verde < 1.2, ámbar < 2, rojo ≥ 2). El overlay de congestión
- * alterna entre color por tier y color neutro SIN re-derivar VMs: retraza los
- * Graphics activos (tinte de capa, no re-render del mundo).
+ * Polilínea `Graphics` por enlace (pool). El COLOR expresa la congestión
+ * (mandato: verde < 1.2, ámbar < 2, rojo ≥ 2; neutro con el overlay apagado);
+ * el PATRÓN del trazo expresa el MODO — identidad permanente del enlace, sin
+ * overlay propio: road continuo, rail con travesaños (vía férrea), sea
+ * discontinuo. El overlay de congestión alterna el color SIN re-derivar VMs:
+ * retraza los Graphics activos.
  */
 
 import type Phaser from 'phaser'
 
 import { mToPx } from '~shared/geometry/grid'
+import type { LinkMode } from '~domain/logistics'
 
 import type { EntitySink } from '../bridge/bridge'
 import type { VmDiff } from '../bridge/diff'
 import type { CongestionTier, LinkVM } from '../bridge/vm'
 import { ObjectPool } from '../pools'
 import type { RenderParent } from './parent'
+import type { PointPx2 } from './link-geometry'
+import { crossTicksPx, dashSegmentsPx } from './link-geometry'
 
 /** Colores por tier (tokens Sass): success-400 / accent-500 / danger-500. */
 const TIER_COLORS: Readonly<Record<CongestionTier, number>> = {
@@ -27,8 +32,19 @@ const TIER_COLORS: Readonly<Record<CongestionTier, number>> = {
 /** $color-gray-600 — trazo neutro con el overlay de congestión apagado. */
 const NEUTRAL_COLOR = 0x45536b
 
-const LINK_WIDTH_PX = 3
 const LINK_ALPHA = 0.9
+
+/** Grosor del trazo por modo (px de render). */
+const WIDTH_BY_MODE: Readonly<Record<LinkMode, number>> = { road: 3, rail: 2, sea: 3 }
+
+/** Rail: travesaños perpendiculares cada 24 px, de 12 px de largo. */
+const RAIL_TICK_SPACING_PX = 24
+const RAIL_TICK_HALF_PX = 6
+
+/** Sea: trazo discontinuo 10/8 px, más tenue (rutas sobre agua). */
+const SEA_DASH_PX = 10
+const SEA_GAP_PX = 8
+const SEA_ALPHA = 0.75
 
 export class LinksRenderer implements EntitySink<LinkVM> {
   private readonly pool: ObjectPool<Phaser.GameObjects.Graphics>
@@ -95,22 +111,59 @@ export class LinksRenderer implements EntitySink<LinkVM> {
 
   private draw(gfx: Phaser.GameObjects.Graphics, vm: LinkVM): void {
     gfx.clear()
-    const first = vm.points[0]
-    if (!first || vm.points.length < 2) {
+    if (vm.points.length < 2) {
       return
     }
     const color = this.congestionColoring ? TIER_COLORS[vm.congestionTier] : NEUTRAL_COLOR
-    gfx.lineStyle(LINK_WIDTH_PX, color, LINK_ALPHA)
-    gfx.beginPath()
-    const start = mToPx(first[0], first[1])
-    gfx.moveTo(start.xPx, start.yPx)
-    for (let i = 1; i < vm.points.length; i += 1) {
-      const point = vm.points[i]
-      if (!point) {
-        continue
+    const width = WIDTH_BY_MODE[vm.mode]
+    const pointsPx: PointPx2[] = vm.points.map(([xM, yM]) => {
+      const p = mToPx(xM, yM)
+      return [p.xPx, p.yPx]
+    })
+
+    switch (vm.mode) {
+      case 'sea': {
+        gfx.lineStyle(width, color, SEA_ALPHA)
+        this.strokeSegments(gfx, dashSegmentsPx(pointsPx, SEA_DASH_PX, SEA_GAP_PX))
+        return
       }
-      const p = mToPx(point[0], point[1])
-      gfx.lineTo(p.xPx, p.yPx)
+      case 'rail': {
+        gfx.lineStyle(width, color, LINK_ALPHA)
+        this.strokePolyline(gfx, pointsPx)
+        this.strokeSegments(gfx, crossTicksPx(pointsPx, RAIL_TICK_SPACING_PX, RAIL_TICK_HALF_PX))
+        return
+      }
+      case 'road': {
+        gfx.lineStyle(width, color, LINK_ALPHA)
+        this.strokePolyline(gfx, pointsPx)
+      }
+    }
+  }
+
+  private strokePolyline(gfx: Phaser.GameObjects.Graphics, pointsPx: readonly PointPx2[]): void {
+    const first = pointsPx[0]
+    if (!first) {
+      return
+    }
+    gfx.beginPath()
+    gfx.moveTo(first[0], first[1])
+    for (let i = 1; i < pointsPx.length; i += 1) {
+      const p = pointsPx[i]
+      if (p) {
+        gfx.lineTo(p[0], p[1])
+      }
+    }
+    gfx.strokePath()
+  }
+
+  private strokeSegments(
+    gfx: Phaser.GameObjects.Graphics,
+    segments: readonly (readonly [number, number, number, number])[],
+  ): void {
+    gfx.beginPath()
+    for (const [x1, y1, x2, y2] of segments) {
+      gfx.moveTo(x1, y1)
+      gfx.lineTo(x2, y2)
     }
     gfx.strokePath()
   }

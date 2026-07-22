@@ -47,6 +47,8 @@ const nodeVM = (over: Partial<NodeVM> = {}): NodeVM => ({
   id: 'n1',
   xM: 1_000,
   yM: 1_000,
+  kind: 'warehouse',
+  intermodal: false,
   ...over,
 })
 

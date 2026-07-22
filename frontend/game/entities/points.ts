@@ -23,7 +23,16 @@ interface PointVM {
 export class PointSpritesRenderer<VM extends PointVM> implements EntitySink<VM> {
   private readonly set: KeyedSet<VM, Phaser.GameObjects.Sprite>
 
-  constructor(scene: Phaser.Scene, parent: RenderParent, textureKey: string) {
+  /**
+   * `textureFor` (opcional) elige la textura POR VM (p. ej. nodos por clase
+   * y badge de terminal horneado en la textura); sin él, `textureKey` fija.
+   */
+  constructor(
+    scene: Phaser.Scene,
+    parent: RenderParent,
+    textureKey: string,
+    textureFor?: (vm: VM) => string,
+  ) {
     this.set = new KeyedSet<VM, Phaser.GameObjects.Sprite>({
       create: () => {
         const sprite = scene.add.sprite(0, 0, textureKey)
@@ -38,6 +47,12 @@ export class PointSpritesRenderer<VM extends PointVM> implements EntitySink<VM> 
       update: (sprite, vm) => {
         const p = mToPx(vm.xM, vm.yM)
         sprite.setPosition(p.xPx, p.yPx)
+        if (textureFor) {
+          const key = textureFor(vm)
+          if (sprite.texture.key !== key) {
+            sprite.setTexture(key)
+          }
+        }
       },
     })
   }

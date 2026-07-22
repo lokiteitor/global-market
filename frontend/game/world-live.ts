@@ -22,7 +22,7 @@ import { CityLabelsRenderer } from './entities/labels'
 import { LinksRenderer } from './entities/links'
 import type { RenderParent } from './entities/parent'
 import { PointSpritesRenderer } from './entities/points'
-import { makeExtraTextures } from './entities/textures-extra'
+import { makeExtraTextures, nodeTextureKey } from './entities/textures-extra'
 import { VehiclesRenderer } from './entities/vehicles'
 import { InputController } from './input/controller'
 import type { InputMode, SelectionRef, WorldLiveEvents } from './input/types'
@@ -104,7 +104,9 @@ export function createWorldLive(deps: WorldLiveDeps): WorldLive {
 
   // Renderers por capa (consumen diffs de VMs, reconcilian contra pools).
   const links = new LinksRenderer(scene, linksParent)
-  const nodes = new PointSpritesRenderer<NodeVM>(scene, nodesParent, TEXTURES.node)
+  const nodes = new PointSpritesRenderer<NodeVM>(scene, nodesParent, TEXTURES.node, (vm) =>
+    nodeTextureKey(vm.kind, vm.intermodal),
+  )
   const deposits = new PointSpritesRenderer<DepositVM>(scene, resourcesParent, TEXTURES.deposit)
   const buildings = new BuildingsRenderer(scene, buildingsParent, bordersParent)
   const cities = new CitiesRenderer(scene, citiesParent)

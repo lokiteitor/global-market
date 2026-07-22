@@ -267,7 +267,13 @@ export function deriveStatics(
     if (!rectContainsM(view, node.locationM[0], node.locationM[1])) {
       continue
     }
-    nodes.set(node.id, { id: node.id, xM: node.locationM[0], yM: node.locationM[1] })
+    nodes.set(node.id, {
+      id: node.id,
+      xM: node.locationM[0],
+      yM: node.locationM[1],
+      kind: node.kind,
+      intermodal: node.terminalId !== null,
+    })
   }
 
   const links = new Map<string, LinkVM>()
@@ -280,7 +286,12 @@ export function deriveStatics(
     if (!bounds || !rectsIntersectM(view, bounds)) {
       continue
     }
-    links.set(link.id, { id: link.id, points, congestionTier: linkCongestionTier(link) })
+    links.set(link.id, {
+      id: link.id,
+      points,
+      mode: link.mode,
+      congestionTier: linkCongestionTier(link),
+    })
   }
 
   const regions = new Map<string, RegionVM>()

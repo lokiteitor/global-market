@@ -86,4 +86,10 @@ describe('game/bridge/diff — diffVms (dado prev+next ⇒ upserts/removes)', ()
     expect(diff.upserts.map((v) => v.id)).toEqual(['b'])
     expect(diff.removes).toEqual(['c'])
   })
+
+  it('un cambio SOLO en un campo string nuevo (p. ej. mode) también es upsert', () => {
+    const prev = toMap([{ id: 'l1', xM: 1, mode: 'road' }])
+    const next = toMap([{ id: 'l1', xM: 1, mode: 'rail' }])
+    expect(diffVms(prev, next).upserts.map((v) => v.id)).toEqual(['l1'])
+  })
 })

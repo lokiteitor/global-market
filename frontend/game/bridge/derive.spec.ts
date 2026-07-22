@@ -103,6 +103,19 @@ describe('game/bridge/derive — culling por rect en metros', () => {
     expect([...vms.regions.keys()]).toEqual([region().id])
     expect(vms.regions.get(region().id)).toMatchObject({ xM: 0, yM: 0, wM: 10_000, hM: 10_000 })
   })
+
+  it('el NodeVM lleva la clase y el flag de terminal intermodal (v1.7.0)', () => {
+    const plain = node()
+    const port = node({
+      id: uid<'Node'>(103),
+      kind: 'port',
+      terminalId: uid<'Terminal'>(120),
+      locationM: [2_000, 2_000],
+    })
+    const vms = deriveStatics(staticsInput({ nodes: [plain, port] }), VIEW)
+    expect(vms.nodes.get(plain.id)).toMatchObject({ kind: 'warehouse', intermodal: false })
+    expect(vms.nodes.get(port.id)).toMatchObject({ kind: 'port', intermodal: true })
+  })
 })
 
 describe('game/bridge/derive — enlaces', () => {
@@ -131,6 +144,12 @@ describe('game/bridge/derive — enlaces', () => {
 
     const withoutNodes = deriveStatics(staticsInput({ links: [link({ pathM: null })] }), VIEW)
     expect(withoutNodes.links.size).toBe(0)
+  })
+
+  it('el LinkVM lleva el modo del enlace (identidad visual: road/rail/sea)', () => {
+    const rail = link({ mode: 'rail' })
+    const vms = deriveStatics(staticsInput({ links: [rail] }), VIEW)
+    expect(vms.links.get(rail.id)?.mode).toBe('rail')
   })
 })
 

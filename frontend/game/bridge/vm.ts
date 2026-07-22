@@ -15,6 +15,7 @@ import { PX_PER_M } from '~shared/geometry/grid'
 import type { BuildingStatus } from '~domain/buildings'
 import type { VehicleStatus } from '~domain/fleet'
 import type { WorldPathM } from '~domain/geo'
+import type { LinkMode, NodeKind } from '~domain/logistics'
 
 /** Rectángulo en metros de mundo (mismo shape que RectM de game/camera). */
 export interface WorldRectM {
@@ -69,12 +70,22 @@ export interface NodeVM {
   readonly id: string
   readonly xM: number
   readonly yM: number
+  /** Clase del nodo (elige textura distintiva: puerto, estación, CD…). */
+  readonly kind: NodeKind
+  /** Nodo con terminal intermodal (badge de terminal; v1.7.0 del contrato). */
+  readonly intermodal: boolean
 }
 
-/** Enlace logístico: trazado en metros + tier de congestión (peor segmento). */
+/**
+ * Enlace logístico: trazado en metros + modo + tier de congestión (peor
+ * segmento). El COLOR expresa congestión; el PATRÓN del trazo expresa el modo
+ * (road continuo, rail con travesaños, sea discontinuo) — ortogonales y
+ * legibles a la vez, sin overlay propio (el modo es identidad del enlace).
+ */
 export interface LinkVM {
   readonly id: string
   readonly points: WorldPathM
+  readonly mode: LinkMode
   readonly congestionTier: CongestionTier
 }
 
