@@ -15,8 +15,12 @@ import { simTime } from '~shared/simtime'
 import { formatQuantity } from '~domain/quantity'
 import type { Shipment } from '~domain/fleet'
 import type { NodeId } from '~domain/logistics'
-import type { RoutePlanDto } from '~network/logistics.api'
-import { mapContract, mapRoute, mapShipment, mapVehicle } from '~network/mappers/domain.mapper'
+import {
+  mapContract,
+  mapFreightContract,
+  mapShipment,
+  mapVehicle,
+} from '~network/mappers/domain.mapper'
 import type { SimClock } from '~domain/simclock'
 import BaseBanner from '~/components/base/BaseBanner.vue'
 import BaseButton from '~/components/base/BaseButton.vue'
@@ -24,8 +28,8 @@ import GameDialog from '~/components/play/GameDialog.vue'
 import { LINK_MODE_LABEL } from '~/components/play/labels'
 import { useAppError } from '~/composables/useAppError'
 import { useGameApis } from '~/composables/useGameApis'
+import { legEtaText, totalEtaText, useRoutePlanning } from '~/composables/useRoutePlanning'
 import { useFleetStore } from '~/stores/fleet.store'
-import { useLogisticsStore } from '~/stores/logistics.store'
 import { useMarketStore } from '~/stores/market.store'
 import { useWorldStore } from '~/stores/world.store'
 
@@ -39,15 +43,14 @@ const emit = defineEmits<{ close: [] }>()
 const apis = useGameApis()
 const fleet = useFleetStore()
 const market = useMarketStore()
-const logistics = useLogisticsStore()
 const world = useWorldStore()
 const { messageFor } = useAppError()
+const { plan, planning, planError, planBetween, createOnDemandRoute } = useRoutePlanning()
 
 const vehicleId = ref('')
-const plan = ref<RoutePlanDto | null>(null)
-const planning = ref(false)
 const dispatching = ref(false)
 const actionError = ref<unknown>(null)
+const anyError = computed(() => actionError.value ?? planError.value)
 
 /** Vehículos propios `idle` estacionados en el nodo del cargamento. */
 const candidateVehicles = computed(() =>
@@ -58,16 +61,31 @@ const candidateVehicles = computed(() =>
 )
 
 const contract = computed(() => market.getContract(props.shipment.contractId))
-const destinationNodeId = computed<NodeId | null>(() => contract.value?.destinationNodeId ?? null)
+const freight = computed(() => market.getFreightContract(props.shipment.freightContractId))
+/** Destino: del contrato de bienes o, en un cargamento de flete, del CCRI-Flete. */
+const destinationNodeId = computed<NodeId | null>(
+  () => contract.value?.destinationNodeId ?? freight.value?.destinationNodeId ?? null,
+)
 
 onMounted(() => {
-  // El contrato del cargamento puede no estar replicado aún: pull puntual.
+  // El contrato/flete del cargamento puede no estar replicado aún: pull puntual.
   const contractId = props.shipment.contractId
   if (contractId !== null && contract.value === null) {
     apis.market
       .getContract(contractId)
       .then((dto) => {
         market.applyContract(mapContract(dto))
+      })
+      .catch((error: unknown) => {
+        actionError.value = error
+      })
+  }
+  const freightContractId = props.shipment.freightContractId
+  if (freightContractId !== null && freight.value === null) {
+    apis.market
+      .getFreightContract(freightContractId)
+      .then((dto) => {
+        market.applyFreightContract(mapFreightContract(dto))
       })
       .catch((error: unknown) => {
         actionError.value = error
@@ -86,37 +104,18 @@ async function onPlan(): Promise<void> {
   if (origin === null || destination === null) {
     return
   }
-  planning.value = true
   actionError.value = null
-  plan.value = null
-  try {
-    plan.value = await apis.logistics.planRoute({
-      origin_node_id: origin,
-      destination_node_id: destination,
-      optimize: 'time',
-      cargo_volume: props.shipment.quantity,
-    })
-  } catch (error) {
-    actionError.value = error
-  } finally {
-    planning.value = false
-  }
+  await planBetween(origin, destination, { cargoVolume: props.shipment.quantity })
 }
 
 async function onDispatch(): Promise<void> {
-  const currentPlan = plan.value
-  if (currentPlan === null || vehicleId.value === '') {
+  if (plan.value === null || vehicleId.value === '') {
     return
   }
   dispatching.value = true
   actionError.value = null
   try {
-    const routeDto = await apis.logistics.createRoute({
-      name: t('fleet.dispatch.routeName'),
-      kind: 'on_demand',
-      legs: currentPlan.legs.map((leg) => leg.link_id),
-    })
-    logistics.applyRoute(mapRoute(routeDto))
+    const routeDto = await createOnDemandRoute(t('fleet.dispatch.routeName'))
     const shipmentDto = await apis.fleet.dispatchShipment(
       props.shipment.id,
       vehicleId.value,
@@ -140,21 +139,9 @@ const productName = computed(
 )
 
 /** ETA total del plan como duración sim legible (días/horas de juego). */
-const etaText = computed<string | null>(() => {
-  const currentPlan = plan.value
-  if (currentPlan === null) {
-    return null
-  }
-  const totalSeconds = currentPlan.total_eta_sim_seconds
-  const days = Math.floor(totalSeconds / 86_400)
-  const hours = Math.floor((totalSeconds % 86_400) / 3_600)
-  return t('simtime.remaining', { days, hours })
-})
-
-/** Duración estimada de un tramo, en horas de juego (presentación). */
-function legEta(seconds: number): string {
-  return t('market.col.deliveryHours', { hours: Math.max(1, Math.round(seconds / 3_600)) })
-}
+const etaText = computed<string | null>(() =>
+  plan.value === null ? null : totalEtaText(plan.value),
+)
 </script>
 
 <template>
@@ -198,7 +185,7 @@ function legEta(seconds: number): string {
           <h4 class="dispatch__subtitle">{{ t('fleet.dispatch.plan.title') }}</h4>
           <ol class="dispatch__legs">
             <li v-for="leg of plan.legs" :key="leg.seq" class="u-numeric">
-              {{ t(LINK_MODE_LABEL[leg.mode]) }} · {{ legEta(leg.eta_sim_seconds) }}
+              {{ t(LINK_MODE_LABEL[leg.mode]) }} · {{ legEtaText(leg.eta_sim_seconds) }}
             </li>
           </ol>
           <p v-if="etaText !== null" class="dispatch__muted">
@@ -206,8 +193,8 @@ function legEta(seconds: number): string {
           </p>
         </section>
 
-        <BaseBanner v-if="actionError !== null" variant="error">
-          {{ messageFor(actionError) }}
+        <BaseBanner v-if="anyError !== null" variant="error">
+          {{ messageFor(anyError) }}
         </BaseBanner>
 
         <div class="dispatch__actions">

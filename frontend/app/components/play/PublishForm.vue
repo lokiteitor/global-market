@@ -4,6 +4,11 @@
  *
  * `sell`: exige nodo ORIGEN propio (el stock queda congelado allí).
  * `buy`: exige nodo DESTINO propio (la entrega exigirá transporte físico).
+ * `freight` (GDD §5.3.2): solicitud de TRANSPORTE del cargador — origen
+ *   propio (la carga sale de un almacén con stock), destino CUALQUIER nodo,
+ *   tarifa por unidad y valor declarado (base de la garantía del carrier);
+ *   antes de confirmar se previsualiza el escrow (cantidad × tarifa) que el
+ *   servidor bloqueará.
  * Validación de FORMA en cliente (C7 — requeridos y patrones de punto fijo);
  * la validación real y el bloqueo de garantías son del servidor: los errores
  * tipados (INSUFFICIENT_COLLATERAL con detalles) se muestran tal cual.
@@ -11,9 +16,10 @@
 
 import { computed, ref } from 'vue'
 import { t } from '~shared/i18n'
-import { format, isMoney } from '~shared/money'
+import { format, isMoney, multiplyByUnits } from '~shared/money'
 import { isQuantity } from '~domain/quantity'
 import { SIM_SECONDS_PER_HOUR } from '~shared/simtime'
+import type { PublicationKind } from '~domain/market'
 import type { PublicationCreateDto } from '~network/market.api'
 import { mapPublication } from '~network/mappers/domain.mapper'
 import { AppError } from '~network/rest'
@@ -24,21 +30,25 @@ import BaseInput from '~/components/base/BaseInput.vue'
 import { useAppError } from '~/composables/useAppError'
 import { useGameApis } from '~/composables/useGameApis'
 import { useMyNodes } from '~/composables/useMyNodes'
+import { useLogisticsStore } from '~/stores/logistics.store'
 import { useMarketStore } from '~/stores/market.store'
 import { useWorldStore } from '~/stores/world.store'
 
 const apis = useGameApis()
 const world = useWorldStore()
 const market = useMarketStore()
-const { myNodes, describeNode } = useMyNodes()
+const logistics = useLogisticsStore()
+const { myNodes, describeNode, describeAnyNode } = useMyNodes()
 const { messageFor } = useAppError()
 
-const kind = ref<'sell' | 'buy'>('sell')
+const kind = ref<PublicationKind>('sell')
 const productId = ref('')
 const quantity = ref('')
 const unitPrice = ref('')
 const minLot = ref('1')
 const nodeId = ref('')
+const destinationNodeId = ref('')
+const declaredValue = ref('')
 const deliveryHours = ref('48')
 
 const submitted = ref(false)
@@ -80,14 +90,55 @@ const deliveryError = computed<string | null>(() => {
   return Number.isSafeInteger(parsed) && parsed > 0 ? null : t('validation.hours')
 })
 
-const nodeLabel = computed(() =>
-  kind.value === 'sell' ? t('market.publish.originNode') : t('market.publish.destinationNode'),
+/** Un flete pide origen (propio) Y destino (cualquiera); sell/buy solo uno. */
+const isFreight = computed(() => kind.value === 'freight')
+
+const destinationError = computed<string | null>(() =>
+  isFreight.value ? requiredError(destinationNodeId.value) : null,
 )
+
+const declaredValueError = computed<string | null>(() => {
+  if (!isFreight.value) {
+    return null
+  }
+  const required = requiredError(declaredValue.value)
+  if (required !== null) {
+    return required
+  }
+  if (declaredValue.value !== '' && !isMoney(declaredValue.value)) {
+    return t('validation.money')
+  }
+  return null
+})
+
+const nodeLabel = computed(() => {
+  if (kind.value === 'buy') {
+    return t('market.publish.destinationNode')
+  }
+  return t('market.publish.originNode')
+})
+
+const priceLabel = computed(() =>
+  isFreight.value ? t('market.publish.freightRate') : t('market.publish.unitPrice'),
+)
+
+/**
+ * Escrow que el servidor bloqueará al publicar el flete: cantidad × tarifa
+ * (misma fórmula del ledger; preview de forma, la verdad es del servidor).
+ */
+const escrowPreview = computed<string | null>(() => {
+  if (!isFreight.value || !isQuantity(quantity.value) || !isMoney(unitPrice.value)) {
+    return null
+  }
+  return format(multiplyByUnits(unitPrice.value, quantity.value))
+})
 
 const hasErrors = computed(
   () =>
     productError.value !== null ||
     nodeError.value !== null ||
+    destinationError.value !== null ||
+    declaredValueError.value !== null ||
     quantityError.value !== null ||
     priceError.value !== null ||
     minLotError.value !== null ||
@@ -128,9 +179,15 @@ async function onSubmit(): Promise<void> {
       unit_price: unitPrice.value,
       min_lot: minLot.value === '' ? '1' : minLot.value,
       delivery_sim_seconds: Number.parseInt(deliveryHours.value, 10) * SIM_SECONDS_PER_HOUR,
-      ...(kind.value === 'sell'
-        ? { origin_node_id: nodeId.value }
-        : { destination_node_id: nodeId.value }),
+      ...(kind.value === 'sell' ? { origin_node_id: nodeId.value } : {}),
+      ...(kind.value === 'buy' ? { destination_node_id: nodeId.value } : {}),
+      ...(kind.value === 'freight'
+        ? {
+            origin_node_id: nodeId.value,
+            destination_node_id: destinationNodeId.value,
+            declared_value: declaredValue.value,
+          }
+        : {}),
     }
     const dto = await apis.market.createPublication(body)
     market.applyPublication(mapPublication(dto))
@@ -138,6 +195,7 @@ async function onSubmit(): Promise<void> {
     submitted.value = false
     quantity.value = ''
     unitPrice.value = ''
+    declaredValue.value = ''
   } catch (error) {
     submitError.value = error
   } finally {
@@ -153,6 +211,7 @@ async function onSubmit(): Promise<void> {
         <select :id="id" v-model="kind" class="publish__select" data-testid="publish-kind">
           <option value="sell">{{ t('market.kind.sell') }}</option>
           <option value="buy">{{ t('market.kind.buy') }}</option>
+          <option value="freight">{{ t('market.kind.freight') }}</option>
         </select>
       </template>
     </BaseFormField>
@@ -181,7 +240,7 @@ async function onSubmit(): Promise<void> {
       </template>
     </BaseFormField>
 
-    <BaseFormField :label="t('market.publish.unitPrice')" :error="priceError" required>
+    <BaseFormField :label="priceLabel" :error="priceError" required>
       <template #default="{ id, describedBy, invalid }">
         <BaseInput
           :id="id"
@@ -190,6 +249,25 @@ async function onSubmit(): Promise<void> {
           :invalid="invalid"
           inputmode="numeric"
           data-testid="publish-price"
+        />
+      </template>
+    </BaseFormField>
+
+    <BaseFormField
+      v-if="isFreight"
+      :label="t('market.publish.declaredValue')"
+      :hint="t('market.publish.declaredValue.hint')"
+      :error="declaredValueError"
+      required
+    >
+      <template #default="{ id, describedBy, invalid }">
+        <BaseInput
+          :id="id"
+          v-model="declaredValue"
+          :aria-describedby="describedBy"
+          :invalid="invalid"
+          inputmode="numeric"
+          data-testid="publish-declared-value"
         />
       </template>
     </BaseFormField>
@@ -211,12 +289,39 @@ async function onSubmit(): Promise<void> {
       </template>
     </BaseFormField>
 
-    <BaseFormField :label="nodeLabel" :error="nodeError" required>
+    <BaseFormField
+      :label="nodeLabel"
+      :hint="isFreight ? t('market.publish.freightOrigin.hint') : undefined"
+      :error="nodeError"
+      required
+    >
       <template #default="{ id }">
         <select :id="id" v-model="nodeId" class="publish__select" data-testid="publish-node">
           <option value="">{{ t('market.publish.node.placeholder') }}</option>
           <option v-for="node of myNodes" :key="node.id" :value="node.id">
             {{ describeNode(node) }}
+          </option>
+        </select>
+      </template>
+    </BaseFormField>
+
+    <BaseFormField
+      v-if="isFreight"
+      :label="t('market.publish.destinationNode')"
+      :hint="t('market.publish.destinationNodeAny.hint')"
+      :error="destinationError"
+      required
+    >
+      <template #default="{ id }">
+        <select
+          :id="id"
+          v-model="destinationNodeId"
+          class="publish__select"
+          data-testid="publish-destination"
+        >
+          <option value="">{{ t('market.publish.node.placeholder') }}</option>
+          <option v-for="node of logistics.nodeList" :key="node.id" :value="node.id">
+            {{ describeAnyNode(node) }}
           </option>
         </select>
       </template>
@@ -239,6 +344,10 @@ async function onSubmit(): Promise<void> {
         />
       </template>
     </BaseFormField>
+
+    <p v-if="escrowPreview !== null" class="publish__escrow" data-testid="publish-escrow-preview">
+      {{ t('market.publish.escrowPreview', { amount: escrowPreview }) }}
+    </p>
 
     <BaseBanner v-if="submitError !== null" variant="error">
       {{ messageFor(submitError) }}
@@ -270,5 +379,10 @@ async function onSubmit(): Promise<void> {
 .publish__actions {
   display: flex;
   justify-content: flex-end;
+}
+
+.publish__escrow {
+  color: var(--color-warning);
+  font-size: s.$font-size-200;
 }
 </style>

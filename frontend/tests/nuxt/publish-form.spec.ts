@@ -113,6 +113,58 @@ describe('components/play/PublishForm', () => {
     expect(call).not.toHaveProperty('origin_node_id')
   })
 
+  it('freight: previsualiza el escrow (cantidad × tarifa) y envía origen+destino+valor declarado', async () => {
+    const OTHER_NODE = uid<'Node'>(101)
+    const wrapper = await mountForm()
+    // Un nodo AJENO más en el grafo: destino válido de flete.
+    useLogisticsStore().applyNode(node({ id: OTHER_NODE, kind: 'port' }))
+    await flushPromises()
+
+    await wrapper.get('[data-testid="publish-kind"]').setValue('freight')
+    await wrapper.get('[data-testid="publish-product"]').setValue(PRODUCT_ID)
+    await wrapper.get('[data-testid="publish-quantity"]').setValue('500')
+    await wrapper.get('[data-testid="publish-price"]').setValue('120')
+    await flushPromises()
+
+    // Preview de escrow con la MISMA aritmética del ledger: 500 × 120 = 60 000.
+    expect(wrapper.get('[data-testid="publish-escrow-preview"]').text()).toContain('60.000')
+
+    await wrapper.get('[data-testid="publish-declared-value"]').setValue('90000')
+    await wrapper.get('[data-testid="publish-node"]').setValue(NODE_ID)
+    await wrapper.get('[data-testid="publish-destination"]').setValue(OTHER_NODE)
+    await wrapper.get('[data-testid="publish-delivery"]').setValue('72')
+    await wrapper.get('form').trigger('submit')
+    await flushPromises()
+
+    expect(stub.apis.market.createPublication).toHaveBeenCalledWith({
+      kind: 'freight',
+      channel: 'board',
+      product_id: PRODUCT_ID,
+      quantity_total: '500',
+      unit_price: '120',
+      min_lot: '1',
+      origin_node_id: NODE_ID,
+      destination_node_id: OTHER_NODE,
+      declared_value: '90000',
+      delivery_sim_seconds: 72 * 3_600,
+    })
+  })
+
+  it('freight: sin valor declarado o sin destino no llama a la API', async () => {
+    const wrapper = await mountForm()
+
+    await wrapper.get('[data-testid="publish-kind"]').setValue('freight')
+    await wrapper.get('[data-testid="publish-product"]').setValue(PRODUCT_ID)
+    await wrapper.get('[data-testid="publish-quantity"]').setValue('500')
+    await wrapper.get('[data-testid="publish-price"]').setValue('120')
+    await wrapper.get('[data-testid="publish-node"]').setValue(NODE_ID)
+    await wrapper.get('form').trigger('submit')
+    await flushPromises()
+
+    expect(stub.apis.market.createPublication).not.toHaveBeenCalled()
+    expect(wrapper.text()).toContain(t('validation.required'))
+  })
+
   it('cantidad con decimales = error de forma, sin llamada', async () => {
     const wrapper = await mountForm()
 

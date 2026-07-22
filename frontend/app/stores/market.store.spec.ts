@@ -8,6 +8,7 @@ import {
   acceptance,
   candle,
   contract,
+  freightContract,
   publication,
   st,
   uid,
@@ -108,6 +109,53 @@ describe('app/stores/market.store — aceptaciones y contratos propios', () => {
     expect(store.contractsAsSeller(MY_ACCOUNT)).toEqual([selling, settled])
     expect(store.contractsAsBuyer(MY_ACCOUNT)).toEqual([buying])
     expect(store.contractIdsByStatus['settled']).toEqual([settled.id])
+  })
+})
+
+describe('app/stores/market.store — fletes propios (CCRI-Flete)', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+  })
+
+  it('tríada idempotente: aplicar dos veces = una entidad', () => {
+    const store = useMarketStore()
+    const freight = freightContract()
+
+    store.applyFreightsSnapshot([freight])
+    store.applyFreightContract(freight)
+
+    expect(store.freightList).toHaveLength(1)
+    expect(store.getFreightContract(freight.id)?.declaredValue).toBe('60000')
+
+    store.removeFreightContract(freight.id)
+    expect(store.freightList).toHaveLength(0)
+    store.removeFreightContract(freight.id) // no-op
+  })
+
+  it('índice por status y getters de rol (shipper/carrier)', () => {
+    const store = useMarketStore()
+    const active = freightContract()
+    const settled = freightContract({
+      id: uid(186),
+      shipperAccountId: OTHER_ACCOUNT,
+      carrierAccountId: MY_ACCOUNT,
+      status: 'settled',
+      fillBp: 10_000,
+      settledAtSim: st(250_000),
+    })
+    store.applyFreightsSnapshot([active, settled])
+
+    expect(store.freightIdsByStatus['active']).toEqual([active.id])
+    expect(store.activeFreightContracts).toEqual([active])
+    expect(store.freightsAsShipper(MY_ACCOUNT)).toEqual([active])
+    expect(store.freightsAsCarrier(MY_ACCOUNT)).toEqual([settled])
+  })
+
+  it('clear() también vacía los fletes', () => {
+    const store = useMarketStore()
+    store.applyFreightsSnapshot([freightContract()])
+    store.clear()
+    expect(store.freightList).toHaveLength(0)
   })
 })
 

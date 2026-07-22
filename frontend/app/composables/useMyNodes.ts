@@ -19,6 +19,12 @@ import { useWorldStore } from '~/stores/world.store'
 export interface MyNodesApi {
   readonly myNodes: ComputedRef<readonly NetworkNode[]>
   describeNode(node: NetworkNode): string
+  /**
+   * Descriptor de CUALQUIER nodo del grafo (no solo propios): clase + región
+   * (+ ciudad si la tiene). Para selects de destino de flete/reposicionamiento,
+   * donde el destino puede ser ajeno.
+   */
+  describeAnyNode(node: NetworkNode): string
 }
 
 export function useMyNodes(): MyNodesApi {
@@ -39,5 +45,13 @@ export function useMyNodes(): MyNodesApi {
     return typeName === undefined ? kindLabel : `${kindLabel} — ${typeName}`
   }
 
-  return { myNodes, describeNode }
+  function describeAnyNode(node: NetworkNode): string {
+    const kindLabel = t(NODE_KIND_LABEL[node.kind])
+    const cityName = node.cityId === null ? undefined : world.getCity(node.cityId)?.name
+    const regionName = world.getRegion(node.regionId)?.name
+    const place = cityName ?? regionName
+    return place === undefined ? kindLabel : `${kindLabel} — ${place}`
+  }
+
+  return { myNodes, describeNode, describeAnyNode }
 }

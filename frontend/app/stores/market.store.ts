@@ -20,6 +20,8 @@ import type {
   AcceptanceId,
   Contract,
   ContractId,
+  FreightContract,
+  FreightContractId,
   OhlcCandle,
   Publication,
   PublicationId,
@@ -53,12 +55,14 @@ export const useMarketStore = defineStore('market', () => {
   const publications = createEntityCollection<PublicationId, Publication>((p) => p.id)
   const acceptances = createEntityCollection<AcceptanceId, Acceptance>((a) => a.id)
   const contracts = createEntityCollection<ContractId, Contract>((c) => c.id)
+  const freightContracts = createEntityCollection<FreightContractId, FreightContract>((f) => f.id)
 
   const publicationIdsByStatus = indexBy(publications, (p) => p.status)
   const publicationIdsByKind = indexBy(publications, (p) => p.kind)
   const acceptanceIdsByPublication = indexBy(acceptances, (a) => a.publicationId)
   const contractIdsByStatus = indexBy(contracts, (c) => c.status)
   const contractIdsByProduct = indexBy(contracts, (c) => c.productId)
+  const freightIdsByStatus = indexBy(freightContracts, (f) => f.status)
 
   /** Publicaciones propias aún "vivas" en el tablón (sorteo, abierta o micro-ventana). */
   const livePublications = computed(() =>
@@ -86,6 +90,19 @@ export const useMarketStore = defineStore('market', () => {
 
   function contractsAsSeller(accountId: AccountId): readonly Contract[] {
     return contracts.list.value.filter((c) => c.sellerAccountId === accountId)
+  }
+
+  /** Fletes propios en ejecución (como cargador o transportista). */
+  const activeFreightContracts = computed(() =>
+    freightContracts.list.value.filter((f) => f.status === 'active'),
+  )
+
+  function freightsAsShipper(accountId: AccountId): readonly FreightContract[] {
+    return freightContracts.list.value.filter((f) => f.shipperAccountId === accountId)
+  }
+
+  function freightsAsCarrier(accountId: AccountId): readonly FreightContract[] {
+    return freightContracts.list.value.filter((f) => f.carrierAccountId === accountId)
   }
 
   // ——— Velas OHLC por producto ———
@@ -121,6 +138,7 @@ export const useMarketStore = defineStore('market', () => {
     publications.clear()
     acceptances.clear()
     contracts.clear()
+    freightContracts.clear()
     ohlcByProduct.value = {}
   }
 
@@ -161,6 +179,17 @@ export const useMarketStore = defineStore('market', () => {
     activeContracts,
     contractsAsBuyer,
     contractsAsSeller,
+    // Fletes propios (CCRI-Flete, como cargador o transportista)
+    freightById: freightContracts.byId,
+    freightList: freightContracts.list,
+    getFreightContract: freightContracts.get,
+    applyFreightsSnapshot: freightContracts.applySnapshot,
+    applyFreightContract: freightContracts.applyOne,
+    removeFreightContract: freightContracts.remove,
+    freightIdsByStatus,
+    activeFreightContracts,
+    freightsAsShipper,
+    freightsAsCarrier,
     // OHLC
     ohlcByProduct,
     applyOhlcSnapshot,
