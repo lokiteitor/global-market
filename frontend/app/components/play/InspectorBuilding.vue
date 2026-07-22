@@ -13,9 +13,10 @@ import { computed, ref, watch } from 'vue'
 import { t } from '~shared/i18n'
 import { format } from '~shared/money'
 import { formatQuantity } from '~domain/quantity'
-import type { BuildingId } from '~domain/buildings'
+import type { MessageKey } from '~shared/i18n'
+import type { BatchStatus, BuildingId } from '~domain/buildings'
 import { isCommandable } from '~domain/ownership'
-import { batchStatusPresentation, buildingStatusPresentation } from '~domain/status'
+import { batchStatusPresentation, buildingStatusPresentation, conditionSeverity } from '~domain/status'
 import type { ProductId } from '~domain/world'
 import {
   mapBuilding,
@@ -24,6 +25,7 @@ import {
 } from '~network/mappers/domain.mapper'
 import BaseBanner from '~/components/base/BaseBanner.vue'
 import BaseButton from '~/components/base/BaseButton.vue'
+import { BATCH_STATUS_EXPLANATION, BUILDING_STATUS_EXPLANATION } from '~/components/play/labels'
 import StatusBadge from '~/components/play/StatusBadge.vue'
 import { useAppError } from '~/composables/useAppError'
 import { batchProgressPct } from '~/composables/useBatchProgress'
@@ -62,6 +64,17 @@ const queue = computed(() => buildings.batchesOfBuilding(props.buildingId))
 
 /** Tooltip de acción deshabilitada por titularidad (OwnershipPolicy). */
 const foreignTitle = computed(() => (own.value ? undefined : t('ownership.foreign')))
+
+/** Explicación causa+remedio del estado del edificio (GDD §11.2), si la tiene. */
+const statusExplanation = computed<MessageKey | null>(() => {
+  const current = building.value
+  return current === null ? null : (BUILDING_STATUS_EXPLANATION[current.status] ?? null)
+})
+
+/** Ídem para un lote pausado (cascada de insolvencia, GDD §5.9). */
+function batchExplanation(status: BatchStatus): MessageKey | null {
+  return BATCH_STATUS_EXPLANATION[status] ?? null
+}
 
 const busy = ref(false)
 const actionError = ref<unknown>(null)
@@ -150,6 +163,15 @@ function productName(productId: ProductId): string {
       {{ t('ownership.foreign') }}
     </p>
 
+    <!-- Estado de insolvencia/embargo explicado: causa + remedio, no badge mudo. -->
+    <p
+      v-if="statusExplanation !== null"
+      class="inspector-building__explain"
+      data-testid="building-status-explain"
+    >
+      {{ t(statusExplanation) }}
+    </p>
+
     <dl class="inspector-building__facts">
       <div>
         <dt>{{ t('inspector.building.level') }}</dt>
@@ -157,7 +179,13 @@ function productName(productId: ProductId): string {
       </div>
       <div>
         <dt>{{ t('inspector.building.condition') }}</dt>
-        <dd class="u-numeric">{{ building.conditionPct }}%</dd>
+        <dd
+          class="u-numeric"
+          :class="`inspector-building__condition--${conditionSeverity(building.conditionPct)}`"
+          data-testid="building-condition"
+        >
+          {{ building.conditionPct }}%
+        </dd>
       </div>
       <div>
         <dt>{{ t('inspector.building.fuel') }}</dt>
@@ -215,16 +243,25 @@ function productName(productId: ProductId): string {
         {{ t('inspector.building.queue.empty') }}
       </p>
       <ul v-else class="inspector-building__list">
-        <li v-for="batch of queue" :key="batch.id" class="inspector-building__row">
-          <span>{{ world.getRecipe(batch.recipeId)?.name ?? batch.recipeId }}</span>
-          <span class="u-numeric">{{ batch.batchesDone }}/{{ batch.batchesQueued }}</span>
-          <StatusBadge :presentation="batchStatusPresentation(batch.status)" />
-          <span
-            v-if="batchProgressPct(batch, world.getRecipe(batch.recipeId), simNow) !== null"
-            class="u-numeric inspector-building__muted"
+        <li v-for="batch of queue" :key="batch.id" class="inspector-building__item">
+          <div class="inspector-building__row">
+            <span>{{ world.getRecipe(batch.recipeId)?.name ?? batch.recipeId }}</span>
+            <span class="u-numeric">{{ batch.batchesDone }}/{{ batch.batchesQueued }}</span>
+            <StatusBadge :presentation="batchStatusPresentation(batch.status)" />
+            <span
+              v-if="batchProgressPct(batch, world.getRecipe(batch.recipeId), simNow) !== null"
+              class="u-numeric inspector-building__muted"
+            >
+              {{ batchProgressPct(batch, world.getRecipe(batch.recipeId), simNow) }}%
+            </span>
+          </div>
+          <p
+            v-if="batchExplanation(batch.status) !== null"
+            class="inspector-building__explain"
+            data-testid="batch-status-explain"
           >
-            {{ batchProgressPct(batch, world.getRecipe(batch.recipeId), simNow) }}%
-          </span>
+            {{ t(batchExplanation(batch.status)!) }}
+          </p>
         </li>
       </ul>
       <div class="inspector-building__controls">
@@ -283,6 +320,26 @@ function productName(productId: ProductId): string {
 .inspector-building__foreign {
   color: var(--color-warning);
   font-size: s.$font-size-200;
+}
+
+.inspector-building__explain {
+  color: var(--color-text-muted);
+  font-size: s.$font-size-200;
+  font-style: italic;
+}
+
+.inspector-building__item {
+  display: flex;
+  flex-direction: column;
+  gap: s.$space-1;
+}
+
+.inspector-building__condition--warn {
+  color: var(--color-warning);
+}
+
+.inspector-building__condition--danger {
+  color: var(--color-danger);
 }
 
 .inspector-building__facts {

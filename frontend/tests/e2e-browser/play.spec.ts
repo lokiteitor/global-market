@@ -115,6 +115,21 @@ test('smoke /play: login → lobby → mundo listo → HUD → tablón → overl
 
   await page.screenshot({ path: 'tests/e2e-browser/artifacts/play.png', fullPage: true })
 
+  // ── Pestaña "Mis fletes" (incremento 17): renderiza filas o vacío, no error ─
+  await page.getByTestId('market-tab-freights').click()
+  const freightRows = page.getByTestId('freight-row')
+  const freightEmpty = page.getByText('No tienes contratos de flete', { exact: false })
+  await expect(freightRows.first().or(freightEmpty)).toBeVisible({ timeout: 15_000 })
+
+  // ── Pestaña "Precios" (incremento 20): velas de contratos liquidados ───────
+  // Con los bots liquidando contratos lo normal es ver el canvas; sin velas
+  // para el primer producto, el estado vacío también es válido (nunca error).
+  await page.getByTestId('market-tab-prices').click()
+  const ohlcCanvas = page.getByTestId('ohlc-chart')
+  const ohlcEmpty = page.getByText('Sin velas para esta selección', { exact: false })
+  await expect(ohlcCanvas.or(ohlcEmpty)).toBeVisible({ timeout: 15_000 })
+  await page.screenshot({ path: 'tests/e2e-browser/artifacts/play-prices.png', fullPage: true })
+
   // ── Overlay de red logística (toggle de UI, sin mutación) ──────────────────
   // Cierra el panel (segundo click = toggle) para que el mapa quede a la vista
   // y activa el overlay de red desde la sidebar.
@@ -123,4 +138,24 @@ test('smoke /play: login → lobby → mundo listo → HUD → tablón → overl
   // Margen para que el motor pinte la capa del overlay antes de capturar.
   await page.waitForTimeout(1_000)
   await page.screenshot({ path: 'tests/e2e-browser/artifacts/play-network.png', fullPage: true })
+
+  // ── Minimapa (incremento 15): visible, toggle oculta el canvas ─────────────
+  await expect(page.getByTestId('minimap-panel')).toBeVisible()
+  await expect(page.getByTestId('minimap-canvas')).toBeVisible()
+  await page.getByTestId('minimap-toggle').click()
+  await expect(page.getByTestId('minimap-canvas')).toBeHidden()
+  await page.getByTestId('minimap-toggle').click()
+
+  // ── Salto de región (incremento 13): con el mundo multi-región hay lista ───
+  // Solo si el worldgen generó más de una región (la sección se oculta con 1).
+  const regionJump = page.locator('[data-testid^="region-jump-"]')
+  if ((await regionJump.count()) > 1) {
+    await regionJump.last().click()
+    // El salto es un comando de cámara; margen para el encuadre y captura.
+    await page.waitForTimeout(1_000)
+    await page.screenshot({
+      path: 'tests/e2e-browser/artifacts/play-region-jump.png',
+      fullPage: true,
+    })
+  }
 })

@@ -94,4 +94,37 @@ describe('components/play/InspectorBuilding', () => {
     expect(wrapper.text()).toContain('Mineral de hierro')
     expect(wrapper.text()).toContain('27%')
   })
+
+  it('lote paused_no_fuel: badge + explicación causa/remedio (no badge mudo)', async () => {
+    const wrapper = await mountInspector(MY_ACCOUNT)
+    useBuildingsStore().applyBuildingBatchesSnapshot(BUILDING_ID, [
+      productionBatch({ buildingId: BUILDING_ID, status: 'paused_no_fuel' }),
+    ])
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="batch-status-explain"]').text()).toBe(
+      t('status.explain.paused_no_fuel'),
+    )
+  })
+
+  it('condición baja: clase de severidad + explicación del estado damaged', async () => {
+    const wrapper = await mountInspector(MY_ACCOUNT)
+    useBuildingsStore().applyBuilding(
+      building({
+        id: BUILDING_ID,
+        ownerAccountId: MY_ACCOUNT,
+        activeRecipeId: uid(30),
+        status: 'damaged',
+        conditionPct: 20,
+      }),
+    )
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="building-condition"]').classes()).toContain(
+      'inspector-building__condition--danger',
+    )
+    expect(wrapper.get('[data-testid="building-status-explain"]').text()).toBe(
+      t('status.explain.damaged'),
+    )
+  })
 })

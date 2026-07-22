@@ -35,3 +35,11 @@ export interface Concession {
 export function isConcessionStatus(value: string): value is ConcessionStatus {
   return (CONCESSION_STATUSES as readonly string[]).includes(value)
 }
+
+/**
+ * Antelación del AVISO de vencimiento de canon (presentación): 7 días-sim.
+ * El servidor no publica un umbral normativo; su gracia post-impago
+ * (II_SEIZE_GRACE_SIM_SECONDS) es de 14 días-sim, así que avisar con media
+ * gracia de antelación da margen real de reacción. Decisión de cliente.
+ */
+export const CONCESSION_EXPIRY_WARNING_SIM_SECONDS = 7 * 86_400

@@ -18,6 +18,7 @@ import type { Region } from '~domain/world'
 import { polygonBoundsM } from '~domain/world'
 import type { InputMode, OverlayName } from '~~/game'
 import type { GamePanelName } from '~/stores/panels.store'
+import { useConcessionAlerts } from '~/composables/useConcessionAlerts'
 import { useMapUiStore } from '~/stores/mapui.store'
 import { usePanelsStore } from '~/stores/panels.store'
 import { useWorldStore } from '~/stores/world.store'
@@ -25,6 +26,7 @@ import { useWorldStore } from '~/stores/world.store'
 const mapui = useMapUiStore()
 const panels = usePanelsStore()
 const world = useWorldStore()
+const concessionAlerts = useConcessionAlerts()
 
 /** Regiones con bounds (saltables), en orden de rejilla (filas, columnas). */
 const jumpableRegions = computed(() =>
@@ -142,6 +144,14 @@ function onTool(mode: InputMode): void {
         @click="panels.toggle(entry.panel)"
       >
         {{ t(entry.label) }}
+        <span
+          v-if="entry.panel === 'concessions' && concessionAlerts.count.value > 0"
+          class="sidebar__badge"
+          :class="`sidebar__badge--${concessionAlerts.severity.value}`"
+          data-testid="sidebar-concessions-badge"
+        >
+          {{ concessionAlerts.count.value }}
+        </span>
       </button>
     </section>
   </aside>
@@ -203,6 +213,22 @@ function onTool(mode: InputMode): void {
   border-color: var(--color-accent);
   color: var(--color-text-strong);
   background-color: var(--color-surface-active);
+}
+
+.sidebar__badge {
+  display: inline-block;
+  min-width: 1.25rem;
+  margin-left: s.$space-2;
+  padding: 0 s.$space-1;
+  border-radius: 999px;
+  background-color: var(--color-warning);
+  color: var(--color-surface);
+  font-size: s.$font-size-100;
+  text-align: center;
+}
+
+.sidebar__badge--danger {
+  background-color: var(--color-danger);
 }
 
 .sidebar__toggle {

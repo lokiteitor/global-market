@@ -16,10 +16,12 @@ import { format } from '~shared/money'
 import { formatSimTime } from '~shared/simtime'
 import type { ConnectionState } from '~network/transport'
 import BaseButton from '~/components/base/BaseButton.vue'
+import { useConcessionAlerts } from '~/composables/useConcessionAlerts'
 import { useSimFrozen } from '~/composables/useSimFrozen'
 import { useSimNow } from '~/composables/useSimNow'
 import { useWallClock } from '~/composables/useWallClock'
 import { useFinanceStore } from '~/stores/finance.store'
+import { usePanelsStore } from '~/stores/panels.store'
 import { useSessionStore } from '~/stores/session.store'
 
 interface Props {
@@ -54,6 +56,17 @@ const CONNECTION_LABEL: Record<ConnectionState, MessageKey> = {
 
 const connectionLabel = computed(() => t(CONNECTION_LABEL[props.connection]))
 
+// ── Aviso de concesiones (vencimiento próximo o cascada de embargo) ──────────
+const panels = usePanelsStore()
+const concessionAlerts = useConcessionAlerts()
+
+const concessionAlertText = computed(() => {
+  if (concessionAlerts.severity.value === 'danger') {
+    return t('hud.concessions.danger', { count: concessionAlerts.atRisk.value.length })
+  }
+  return t('hud.concessions.warning', { count: concessionAlerts.expiringSoon.value.length })
+})
+
 const loggingOut = ref(false)
 
 async function onLogout(): Promise<void> {
@@ -85,6 +98,17 @@ async function onLogout(): Promise<void> {
       <span class="topbar__wall u-numeric" data-testid="hud-wall-time">{{ wallClock ?? '—' }}</span>
       <span v-if="frozen" class="topbar__frozen">{{ t('lobby.worldStatus.maintenance') }}</span>
     </div>
+
+    <button
+      v-if="concessionAlerts.severity.value !== 'none'"
+      type="button"
+      class="topbar__alert"
+      :class="`topbar__alert--${concessionAlerts.severity.value}`"
+      data-testid="hud-concession-alert"
+      @click="panels.open('concessions')"
+    >
+      {{ concessionAlertText }}
+    </button>
 
     <div class="topbar__group">
       <span
@@ -167,6 +191,23 @@ async function onLogout(): Promise<void> {
 .topbar__stale {
   color: var(--color-warning);
   font-size: s.$font-size-200;
+}
+
+.topbar__alert {
+  padding: s.$space-1 s.$space-3;
+  border: 1px solid var(--color-warning);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--color-warning);
+  font-size: s.$font-size-200;
+  cursor: pointer;
+
+  @include t.focus-ring;
+}
+
+.topbar__alert--danger {
+  border-color: var(--color-danger);
+  color: var(--color-danger);
 }
 
 .topbar__dot {

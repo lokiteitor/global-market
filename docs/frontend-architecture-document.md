@@ -1705,6 +1705,8 @@ El layout `game.vue` compone el mundo y la UI en capas z:
 | **Toast/Notificación** | Aviso no bloqueante | No | Esquina | "Contrato liquidado", "Avería en vehículo V" |
 | **Popover/Menú** | Acciones contextuales | No | Anclado | Menú contextual espacial, dropdowns |
 
+> **Estado implementado (Incrementos 16–21).** El panel Mercado suma las pestañas **Mis fletes** (réplica del CCRI-Flete en ambos roles) y **Precios** (OHLC); el formulario Publicar cubre `kind: freight` (con preview del escrow) y el canal `private` (contraparte por UUID con sugerencias de contrapartes conocidas); el tablón filtra por regiones de origen/destino. El inspector de nodo incorpora la sección de **terminal intermodal** (cola + slots comprables) y el de ciudad la curva de demanda con saturación y nivel de desbloqueo. La flota ofrece el **despacho del transportista** (regla del servidor vía `canDispatchShipment`) y el **reposicionamiento en vacío**; el HUD añade el **chip de aviso de concesiones** (vencimiento próximo / cascada de embargo, umbral de cliente en `domain/cadastre.ts`), el badge en la sidebar, el **minimapa** (§15.11/ADR-026) y el **salto de región**.
+
 ### 15.5 Gestión de ventanas y paneles (window manager)
 
 Un **WindowManager** (composable + slice de UI store) gestiona el estado de paneles/ventanas: abiertos, posición, tamaño, z-order, acoplado/flotante, colapsado.
@@ -1732,8 +1734,10 @@ Dos mecanismos según densidad:
 - **DataTable virtualizada** (§21.9): base del tablón, historial de contratos, lista de flota, inventarios. Ordenación, filtrado, columnas configurables, selección múltiple. Virtualiza filas para listas de miles.
 - **MoneyCell / QuantityCell**: renderizan `Money`/`Quantity` (punto fijo) con formateo localizado, números tabulares, signo y color; **nunca** hacen aritmética de float (P10, C11).
 - **SimTimeCell / DeadlineCell**: muestran plazos en sim-time + wall-clock + countdown vivo (suscrito al `SimClock`).
-- **OHLC/Candlestick chart** (§15.13): historial de precios por producto/región (GDD §5.2), Canvas/SVG propio.
+- **OHLC/Candlestick chart**: historial de precios por producto/región (GDD §5.2), Canvas/SVG propio.
 - **StatusBadge**: pinta estados de dominio (contrato: aceptado/en ejecución/liquidado; edificio: operativa/embargo; etc.) con la máquina de estados de UI (§20.9).
+
+> **Estado implementado (Incremento 20).** El chart OHLC existe en `app/components/play/charts/`: `ohlc-layout.ts` (geometría PURA testeada — min/max/ticks con la aritmética BigInt de `shared/money`, etiquetas exactas con `format()`; `toApproxNumber` SOLO para posiciones en píxeles, la única escotilla a `number`, documentada en el kernel) + `OhlcChart.vue` (**Canvas 2D**, elegido frente a SVG: cientos de velas + volumen repintan mejor como raster único; DPR-aware con ResizeObserver, colores de las custom properties del tema, dirección del precio por color **y por forma** — alcista hueca, bajista rellena). Lo consume la pestaña **Precios** del panel Mercado (`MarketPrices.vue`): pull bajo demanda al abrir/cambiar selección (producto/región/bucket) + refresco manual, sin timers (C10/§13.3). `SimTimeCell`, `StatusBadge` y las celdas Money/Quantity (vía `format`/`formatQuantity` en celdas de tabla) están operativos desde el Incremento 5; la DataTable virtualizada sigue pendiente (las listas actuales no alcanzan los miles de filas).
 
 ### 15.9 HUD — barra superior (top bar)
 
@@ -2666,6 +2670,8 @@ flowchart TB
 Estas son **fases de construcción del frontend** (entregables internos del equipo cliente), distintas de las fases de producto del GDD (§21: Fase 0 prototipo → Fase 4 meta-juego). Se alinean así: las Fases FE 1–5 sostienen el **vertical slice jugable** del GDD (su Fase 1); las Fases FE 6–7 acompañan el multi-región y gameplay ampliado (GDD Fase 2); las FE 8–10 escalan y pulen (GDD Fases 3–4). El orden es incremental y cada fase deja algo **verificable**.
 
 > **Estado (Incremento 5 — cliente jugable v1).** Sobre la base ya entregada de FE 1–2 (kernel probado, tipos del contrato, login/lobby reales, SimClock), el Incremento 5 cubre **FE 3 en lo esencial**, **FE 4 parcial**, el **núcleo de FE 5** (loop completo jugable, su entregable) y **FE 6 parcial**. El detalle por fase está marcado abajo; las simplificaciones conscientes remiten a las notas de §11.9, §12.5, §13.6, §14 y §16.3.
+
+> **Estado (Incrementos 11–21 — cliente al día con el backend v1.7.0).** Cubren el grueso de **FE 6–7**: mundo **multi-región** navegable (bounds dinámicos del catálogo, §16.3/§17.6), enlaces por **modo** road/rail/sea y nodos intermodales (§16.7), **minimapa** (§15.11, ADR-026), **CCRI-Flete** completo (publicar/aceptar con previews de escrow/garantía, réplica en ambos roles, despacho del transportista), **reposicionamiento en vacío**, **terminales y slots**, **OHLC** en Canvas propio (§15.8), canal **privado**, filtros de región del tablón y la **insolvencia legible** (explicaciones causa/remedio, condición con umbral visual, avisos de concesión). Prerrequisito de contrato: v1.7.0 (`NetworkNode.terminal_id` + enrutado WS de `freight.*`, incremento 11).
 
 > **Nota de secuencia sobre Networking (Fase FE 4).** Aunque Networking es la Fase FE 4, la **validación con el equipo de backend de ADR-FE-004** (§4.4) debe ocurrir *antes*, idealmente durante la Fase FE 1: es la dependencia inter-equipo de mayor riesgo. Las Fases FE 3–4 pueden desarrollarse contra el **mock server** (§23.8) en paralelo, pero no se consideran "hechas" hasta pasar los contract-tests (§22.6) contra el protocolo real.
 

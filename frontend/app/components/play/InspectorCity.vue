@@ -96,13 +96,28 @@ watch(
           <tr>
             <th>{{ t('inspector.city.demand.product') }}</th>
             <th>{{ t('inspector.city.demand.d0') }}</th>
+            <th :title="t('inspector.city.demand.saturation.hint')">
+              {{ t('inspector.city.demand.saturation') }}
+            </th>
             <th>{{ t('inspector.city.demand.price') }}</th>
           </tr>
         </thead>
         <tbody>
           <tr v-for="row of demand" :key="row.productId">
-            <td>{{ world.getProduct(row.productId)?.name ?? row.productId }}</td>
+            <td>
+              {{ world.getProduct(row.productId)?.name ?? row.productId }}
+              <!-- Producto aún no desbloqueado por el nivel de la ciudad. -->
+              <span
+                v-if="city.level < row.unlockedAtLevel"
+                class="inspector-city__locked"
+                :title="t('inspector.city.demand.locked.hint', { level: row.unlockedAtLevel })"
+                data-testid="demand-locked"
+              >
+                {{ t('inspector.city.demand.locked', { level: row.unlockedAtLevel }) }}
+              </span>
+            </td>
             <td class="u-numeric">{{ formatQuantity(row.d0PerSimDay) }}</td>
+            <td class="u-numeric">{{ row.saturationFactor.toFixed(2) }}</td>
             <td class="u-numeric">{{ format(row.currentPrice) }}</td>
           </tr>
         </tbody>
@@ -146,6 +161,13 @@ watch(
 .inspector-city__muted {
   color: var(--color-text-muted);
   font-size: s.$font-size-200;
+}
+
+.inspector-city__locked {
+  margin-left: s.$space-1;
+  color: var(--color-text-muted);
+  font-size: s.$font-size-100;
+  text-transform: uppercase;
 }
 
 .inspector-city__table {

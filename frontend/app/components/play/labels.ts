@@ -5,6 +5,7 @@
  */
 
 import type { MessageKey } from '~shared/i18n'
+import type { BatchStatus, BuildingStatus } from '~domain/buildings'
 import type { LedgerAccountKind, LedgerTransactionKind } from '~domain/finance'
 import type { LinkMode, NodeKind } from '~domain/logistics'
 import type { PublicationKind } from '~domain/market'
@@ -30,6 +31,24 @@ export const PUBLICATION_KIND_LABEL: Readonly<Record<PublicationKind, MessageKey
   sell: 'market.kind.sell',
   buy: 'market.kind.buy',
   freight: 'market.kind.freight',
+}
+
+/**
+ * Explicación CAUSA + REMEDIO de los estados de pausa de un lote (cascada de
+ * insolvencia, GDD §5.9): el badge dice QUÉ pasa; estos textos dicen POR QUÉ
+ * y cómo salir. Solo los estados que necesitan explicación.
+ */
+export const BATCH_STATUS_EXPLANATION: Readonly<Partial<Record<BatchStatus, MessageKey>>> = {
+  paused_no_fuel: 'status.explain.paused_no_fuel',
+  paused_no_workers: 'status.explain.paused_no_workers',
+  paused_no_power: 'status.explain.paused_no_power',
+}
+
+/** Ídem para los estados de deterioro/embargo del edificio (GDD §11.2). */
+export const BUILDING_STATUS_EXPLANATION: Readonly<Partial<Record<BuildingStatus, MessageKey>>> = {
+  damaged: 'status.explain.damaged',
+  abandoned: 'status.explain.abandoned',
+  seized: 'status.explain.seized',
 }
 
 export const LEDGER_ACCOUNT_KIND_LABEL: Readonly<Record<LedgerAccountKind, MessageKey>> = {

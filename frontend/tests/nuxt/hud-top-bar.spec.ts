@@ -6,9 +6,11 @@ import { beforeEach, describe, expect, it } from 'vitest'
 import { asEntityId } from '~shared/ids'
 import { t } from '~shared/i18n'
 import HudTopBar from '~/components/play/HudTopBar.vue'
+import { useCadastreStore } from '~/stores/cadastre.store'
 import { useFinanceStore } from '~/stores/finance.store'
+import { usePanelsStore } from '~/stores/panels.store'
 import { useSessionStore } from '~/stores/session.store'
-import { ledgerAccount, mon } from '~/stores/testing/fixtures'
+import { concession, ledgerAccount, mon } from '~/stores/testing/fixtures'
 import { stubNuxtApp } from './game-fakes'
 
 /** Año 2, día 5, 07:05 de juego → "002-005-07:05". */
@@ -93,5 +95,19 @@ describe('components/play/HudTopBar', () => {
     })
 
     expect(wrapper.text()).toContain(t('common.stale'))
+  })
+
+  it('chip de aviso de concesiones: danger con impago, clic abre el panel', async () => {
+    const wrapper = await mountTopBar('open')
+    const cadastre = useCadastreStore()
+    cadastre.applyConcessionsSnapshot([concession({ status: 'delinquent' })])
+    await flushPromises()
+
+    const chip = wrapper.get('[data-testid="hud-concession-alert"]')
+    expect(chip.text()).toBe(t('hud.concessions.danger', { count: 1 }))
+    expect(chip.classes()).toContain('topbar__alert--danger')
+
+    await chip.trigger('click')
+    expect(usePanelsStore().activePanel).toBe('concessions')
   })
 })
