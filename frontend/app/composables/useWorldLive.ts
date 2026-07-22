@@ -154,6 +154,20 @@ export function bindWorldLive(live: WorldLive): () => void {
         }
       },
     ),
+    // Comandos de cámara (one-shot con seq): la UI pide, el motor ejecuta.
+    watch(
+      () => ui.cameraCommand,
+      (command) => {
+        if (command === null) {
+          return
+        }
+        if (command.kind === 'center') {
+          live.centerOnM(command.xM, command.yM)
+        } else {
+          live.fitRectM(command.rectM)
+        }
+      },
+    ),
   ]
 
   const offs = [

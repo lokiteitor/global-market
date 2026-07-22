@@ -13,8 +13,8 @@
 
 import Phaser from 'phaser'
 
-import type { TileCoord } from '~shared/geometry/grid'
-import { mToTile } from '~shared/geometry/grid'
+import type { TileCoord, WorldBoundsM } from '~shared/geometry/grid'
+import { boundsMToPx, mToTile } from '~shared/geometry/grid'
 
 import { CameraController } from '../camera'
 import { TypedEmitter } from '../events'
@@ -117,6 +117,17 @@ export class WorldScene extends Phaser.Scene {
   /** Culling por capa (FAD §16.5): una capa oculta no consume draw calls. */
   setLayerVisible(name: LayerName, visible: boolean): void {
     this.layer(name).setVisible(visible)
+  }
+
+  /**
+   * Límites del mundo derivados del catálogo de regiones (fase UI, FAD §17.6):
+   * primero el terreno (para que el re-clamp de cámara repueble con los bounds
+   * nuevos), después la cámara, cuyo `onViewChanged` dispara el re-chunking.
+   */
+  setWorldBoundsM(bounds: WorldBoundsM): void {
+    this.chunkManager.setWorldBounds(boundsMToPx(bounds))
+    this.cameraController.setWorldBoundsM(bounds)
+    this.chunkManager.update(this.cameraController.viewRectPx())
   }
 
   chunkStats(): ChunkStats {

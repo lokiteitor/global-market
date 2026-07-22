@@ -15,6 +15,8 @@
  *   exactOptionalPropertyTypes).
  */
 
+import type { WorldBoundsM } from '~shared/geometry/grid'
+import { unionBoundsM } from '~shared/geometry/grid'
 import type { EntityId } from '~shared/ids'
 import type { Money } from '~shared/money'
 import type { SimTime } from '~shared/simtime'
@@ -150,6 +152,45 @@ export interface CityDemand {
 
 export function isBiome(value: string): value is Biome {
   return (BIOMES as readonly string[]).includes(value)
+}
+
+/** Bounding box de un polígono en metros; `null` si no tiene vértices. */
+export function polygonBoundsM(polygon: WorldPolygonM): WorldBoundsM | null {
+  let bounds: WorldBoundsM | null = null
+  for (const ring of polygon) {
+    for (const [xM, yM] of ring) {
+      bounds =
+        bounds === null
+          ? { minXM: xM, minYM: yM, maxXM: xM, maxYM: yM }
+          : {
+              minXM: Math.min(bounds.minXM, xM),
+              minYM: Math.min(bounds.minYM, yM),
+              maxXM: Math.max(bounds.maxXM, xM),
+              maxYM: Math.max(bounds.maxYM, yM),
+            }
+    }
+  }
+  return bounds
+}
+
+/**
+ * Límites del mundo = unión de los bounds de las regiones del catálogo (GDD
+ * §9: el grid y el tamaño de región son configuración del servidor — el
+ * cliente jamás los asume). Regiones sin bounds se ignoran; `null` si ninguna
+ * los tiene (el llamante conserva su fallback).
+ */
+export function regionsBoundsM(regions: readonly Region[]): WorldBoundsM | null {
+  const boxes: WorldBoundsM[] = []
+  for (const region of regions) {
+    if (region.boundsM === null) {
+      continue
+    }
+    const box = polygonBoundsM(region.boundsM)
+    if (box !== null) {
+      boxes.push(box)
+    }
+  }
+  return unionBoundsM(boxes)
 }
 
 export function isProductClass(value: string): value is ProductClass {

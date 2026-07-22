@@ -12,7 +12,16 @@
 
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
-import type { InputMode, OverlayName, SelectionRef } from '~~/game'
+import type { InputMode, OverlayName, SelectionRef, WorldRectM } from '~~/game'
+
+/**
+ * Comando de cámara de la UI hacia el motor (salto de región, minimapa). El
+ * `seq` monótono distingue dos peticiones idénticas consecutivas (el watcher
+ * de `bindWorldLive` reacciona por identidad del objeto).
+ */
+export type CameraCommand =
+  | { readonly seq: number; readonly kind: 'center'; readonly xM: number; readonly yM: number }
+  | { readonly seq: number; readonly kind: 'fit'; readonly rectM: WorldRectM }
 
 export const useMapUiStore = defineStore('mapui', () => {
   const mode = ref<InputMode>('select')
@@ -20,6 +29,8 @@ export const useMapUiStore = defineStore('mapui', () => {
   const overlays = ref<Readonly<Partial<Record<OverlayName, boolean>>>>({})
   const selection = ref<SelectionRef | null>(null)
   const followedVehicleId = ref<string | null>(null)
+  const cameraCommand = ref<CameraCommand | null>(null)
+  let cameraCommandSeq = 0
 
   const hasSelection = computed(() => selection.value !== null)
 
@@ -47,12 +58,25 @@ export const useMapUiStore = defineStore('mapui', () => {
     followedVehicleId.value = vehicleId
   }
 
+  /** Pide al motor centrar la cámara en un punto del mundo (metros). */
+  function requestCenterOn(xM: number, yM: number): void {
+    cameraCommandSeq += 1
+    cameraCommand.value = { seq: cameraCommandSeq, kind: 'center', xM, yM }
+  }
+
+  /** Pide al motor encuadrar un rectángulo del mundo (salto de región). */
+  function requestFitRect(rectM: WorldRectM): void {
+    cameraCommandSeq += 1
+    cameraCommand.value = { seq: cameraCommandSeq, kind: 'fit', rectM }
+  }
+
   /** Vuelta al estado inicial (salir de /play, logout). */
   function reset(): void {
     mode.value = 'select'
     overlays.value = {}
     selection.value = null
     followedVehicleId.value = null
+    cameraCommand.value = null
   }
 
   return {
@@ -60,12 +84,15 @@ export const useMapUiStore = defineStore('mapui', () => {
     overlays,
     selection,
     followedVehicleId,
+    cameraCommand,
     hasSelection,
     setMode,
     setOverlay,
     applyOverlays,
     setSelection,
     setFollow,
+    requestCenterOn,
+    requestFitRect,
     reset,
   }
 })

@@ -12,10 +12,12 @@
  * página, que los convierte en diálogos de confirmación → comandos REST.
  */
 
-import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import type { WorldBoundsM } from '~shared/geometry/grid'
 import { t } from '~shared/i18n'
 import { polygonContainsPointM } from '~domain/geo'
 import type { Biome } from '~domain/world'
+import { regionsBoundsM } from '~domain/world'
 import type { WorldIntent } from '~~/game'
 import BaseSpinner from '~/components/base/BaseSpinner.vue'
 import { bindWorldLive, createWorldStateSource } from '~/composables/useWorldLive'
@@ -43,6 +45,16 @@ function biomeAtM(xM: number, yM: number): Biome | null {
   return only === undefined ? null : only.biome
 }
 
+function boundsEqual(a: WorldBoundsM, b: WorldBoundsM | null): boolean {
+  return (
+    b !== null &&
+    a.minXM === b.minXM &&
+    a.minYM === b.minYM &&
+    a.maxXM === b.maxXM &&
+    a.maxYM === b.maxYM
+  )
+}
+
 let cleanup: (() => void) | null = null
 
 onMounted(async () => {
@@ -58,7 +70,24 @@ onMounted(async () => {
     const offIntent = live.on('intent', (intent) => {
       emit('intent', intent)
     })
+    // Límites del mundo derivados del catálogo de regiones (FAD §17.6). El
+    // juego monta en paralelo al bootstrap REST: el watcher inmediato cubre
+    // tanto el catálogo ya presente como su llegada/refresco posterior.
+    let appliedBounds: WorldBoundsM | null = null
+    const stopBounds = watch(
+      () => world.regionById,
+      () => {
+        const bounds = regionsBoundsM(world.regionList)
+        if (bounds === null || boundsEqual(bounds, appliedBounds)) {
+          return
+        }
+        appliedBounds = bounds
+        created.worldApi.setWorldBoundsM(bounds)
+      },
+      { immediate: true },
+    )
     cleanup = () => {
+      stopBounds()
       offIntent()
       unbind()
       live.destroy()

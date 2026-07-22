@@ -16,8 +16,15 @@
 
 import type Phaser from 'phaser'
 
-import type { ChunkCoord, RectPx } from '~shared/geometry/grid'
-import { chunkBoundsClamped, chunkKey, pxToM, visibleChunks } from '~shared/geometry/grid'
+import type { ChunkCoord, RectPx, WorldBoundsPx } from '~shared/geometry/grid'
+import {
+  DEFAULT_WORLD_BOUNDS_M,
+  boundsMToPx,
+  chunkBoundsClamped,
+  chunkKey,
+  pxToM,
+  visibleChunks,
+} from '~shared/geometry/grid'
 
 import type { BiomeName } from '../textures'
 import { BIOME_COLORS, COLOR_WORLD_BG } from '../textures'
@@ -46,13 +53,19 @@ export interface ChunkStats {
 }
 
 const DEFAULT_MARGIN = 1
-const DEFAULT_MAX_CACHED = 128
+// Con el mundo multi-región 3×3 la rejilla completa ronda los ~360 chunks; el
+// tope debe superar los visibles a zoom mínimo (los visibles nunca se
+// desalojan) y son rects planos baratos: 512 acota memoria sin thrashing.
+const DEFAULT_MAX_CACHED = 512
 
 export class ChunkManager {
   private readonly objects = new Map<string, Phaser.GameObjects.Rectangle>()
   private visible = new Set<string>()
   private readonly lru: ChunkLru
   private readonly marginChunks: number
+  /** Bounds del mundo (fallback Askadia hasta que llegue el catálogo). */
+  private worldPx: WorldBoundsPx = boundsMToPx(DEFAULT_WORLD_BOUNDS_M)
+  private lastViewPx: RectPx | null = null
 
   constructor(private readonly options: ChunkManagerOptions) {
     this.marginChunks = options.marginChunks ?? DEFAULT_MARGIN
@@ -61,7 +74,8 @@ export class ChunkManager {
 
   /** Recalcula chunks visibles para el viewport (px de render) y reconcilia. */
   update(viewRectPx: RectPx): void {
-    const next = visibleChunks(viewRectPx, this.marginChunks)
+    this.lastViewPx = viewRectPx
+    const next = visibleChunks(viewRectPx, this.worldPx, this.marginChunks)
     const diff = diffChunks(this.visible, next)
 
     for (const coord of diff.shown) {
@@ -73,6 +87,33 @@ export class ChunkManager {
 
     this.visible = new Set(next.map((c) => chunkKey(c.cx, c.cy)))
     this.evict()
+  }
+
+  /**
+   * Actualiza los límites del mundo e invalida todo el terreno materializado:
+   * los bounds cambian qué chunks existen y el color con que se pintaron (el
+   * catálogo de regiones pudo no estar al materializarlos).
+   */
+  setWorldBounds(worldPx: WorldBoundsPx): void {
+    this.worldPx = worldPx
+    this.invalidate()
+  }
+
+  /**
+   * Destruye todos los chunks materializados y repuebla el viewport vigente.
+   * También corrige el caso de arranque: chunks pintados con el color de fondo
+   * antes de que el bootstrap REST trajera las regiones.
+   */
+  invalidate(): void {
+    for (const [key, rect] of this.objects) {
+      rect.destroy()
+      this.lru.delete(key)
+    }
+    this.objects.clear()
+    this.visible.clear()
+    if (this.lastViewPx !== null) {
+      this.update(this.lastViewPx)
+    }
   }
 
   stats(): ChunkStats {
@@ -120,7 +161,7 @@ export class ChunkManager {
   }
 
   private materialize(coord: ChunkCoord): Phaser.GameObjects.Rectangle | null {
-    const bounds = chunkBoundsClamped(coord.cx, coord.cy)
+    const bounds = chunkBoundsClamped(coord.cx, coord.cy, this.worldPx)
     if (!bounds) {
       // visibleChunks ya recorta al mundo; guarda defensiva.
       return null

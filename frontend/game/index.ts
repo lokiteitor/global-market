@@ -12,6 +12,7 @@
 
 import Phaser from 'phaser'
 
+import type { WorldBoundsM } from '~shared/geometry/grid'
 import type { ChunkStats } from './map/chunks'
 import type { CameraController } from './camera'
 import type { GameDeps } from './deps'
@@ -63,6 +64,12 @@ export type { OverlayName } from './overlays/controller'
 export interface WorldApi {
   /** Cámara: pan/zoom/bounds/viewport (alimenta chunking, culling y bridge). */
   readonly camera: CameraController
+  /**
+   * Límites del mundo derivados del catálogo de regiones (unión de sus bounds,
+   * FAD §17.6). La fase UI los empuja al llegar/cambiar el catálogo; hasta
+   * entonces rige el fallback Askadia.
+   */
+  setWorldBoundsM(bounds: WorldBoundsM): void
   /** Culling por capa: mostrar/ocultar una capa completa (overlays, etiquetas…). */
   setLayerVisible(layer: LayerName, visible: boolean): void
   /** Suscripción a eventos espaciales; devuelve la función de baja. */
@@ -118,6 +125,9 @@ export async function createGame(canvasParent: HTMLElement, deps: GameDeps): Pro
 
   const worldApi: WorldApi = {
     camera: world.cameraController,
+    setWorldBoundsM: (bounds) => {
+      world.setWorldBoundsM(bounds)
+    },
     setLayerVisible: (layer, visible) => {
       world.setLayerVisible(layer, visible)
     },

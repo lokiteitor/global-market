@@ -1818,6 +1818,8 @@ stateDiagram-v2
 
 > **Estado implementado (Incremento 5).** Chunks de **32×32 tiles** (constantes en `shared/geometry/grid.ts`: 250 m/tile, 32 px/tile ⇒ mundo Askadia 200×200 tiles, rejilla 7×7 de chunks con borde parcial). Como el backend **no expone terreno por tile todavía**, cada chunk se materializa como **un rectángulo del color del bioma** de la región que contiene su centro (lookup por bounds de región inyectado desde la app: suelo plano por bioma). El resto del sistema es real y queda ejercitado: `ChunkManager` (`game/map/chunks.ts` + lógica pura testeada en `chunk-logic.ts`) calcula visibles + anillo de histéresis desde el viewport, hace diffing, cachea ocultos y desaloja por **LRU** — listo para sustituir el rectángulo por tiles reales sin cambiar el ciclo de vida. *Plan:* datos por tile del backend → materializar capas de tilemap por chunk (§14.3/§16.4) sobre este mismo manager.
 
+> **Estado implementado (Incremento 13 — mundo multi-región, GDD §9).** La **escala** (250 m/tile, 32 px/tile) sigue siendo fija, pero los **límites del mundo dejan de ser constantes**: `shared/geometry/grid.ts` define `WorldBoundsM`/`WorldBoundsPx` y las funciones de chunking/clamping los reciben como parámetro; `WORLD_SIZE_*` queda como base del **fallback Askadia** (`DEFAULT_WORLD_BOUNDS_M`, `[0, 50 000)²`) vigente hasta que llega el catálogo. La fase UI deriva los bounds reales con `regionsBoundsM(world.regionList)` (unión de los `Region.boundsM`, `domain/world.ts`) y los empuja al motor por `WorldApi.setWorldBoundsM` (`GameCanvasHost`, watcher sobre el catálogo): la cámara re-clampea y el `ChunkManager` **invalida** el terreno materializado (lo que además corrige los chunks pintados antes del bootstrap). Los índices de tile/chunk **negativos** (regiones al oeste/norte de Askadia) son válidos en toda la cadena; el LRU sube a 512 (la rejilla 3×3 ronda 360 chunks y los visibles nunca se desalojan). El **salto de región** es un comando de cámara de la UI (`mapui.requestFitRect` → `bindWorldLive` → `WorldLive.fitRectM`), expuesto como lista de regiones en el HUD (accesible por teclado) además del minimapa (§15.11).
+
 ### 16.4 Capas del mapa (layers)
 
 Cada chunk se compone de capas con orden de dibujo fijo (§16.2) y culling independientes:
@@ -1938,6 +1940,8 @@ La cámara es el instrumento principal de navegación de un mundo enorme. Se con
 - **Bounds del mundo**: la cámara no se sale del rectángulo del mundo (o del área generada). Al alejar al máximo, se encuadra el mundo/región.
 - **Clamping**: pan y zoom se *clampean* a los bounds; el follow respeta los bounds (no persigue fuera del mundo).
 - **Bounds dinámicos**: si el mundo se expande (nuevas regiones, GDD §10/Fase 4), los bounds se actualizan con el catálogo de regiones sin recompilar.
+
+> **Estado implementado (Incremento 13).** Bounds dinámicos operativos: la cámara guarda `WorldBoundsM` (fallback Askadia), `setWorldBoundsM` re-clampea y renotifica, y el **zoom mínimo es dinámico** (`zoomRange` en `camera-math.ts`: ver el mundo entero con 5% de aire, suelo absoluto `ZOOM_FLOOR_ABS`). `fitRectM` encuadra un rectángulo arbitrario (salto de región del HUD/minimapa).
 
 ### 17.7 Relación cámara ↔ interest management (cierre del bucle)
 

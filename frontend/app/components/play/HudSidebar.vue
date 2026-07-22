@@ -5,18 +5,49 @@
  * - Herramientas de interacción del mapa (select/pan/build/parcel): escriben
  *   el modo en mapui.store; `bindWorldLive` lo aplica al motor.
  * - Toggles de overlays (red, recursos, regiones, influencia, congestión).
+ * - Salto de región (mundo multi-región, GDD §9): lista del catálogo ordenada
+ *   por rejilla; clic = comando de cámara `requestFitRect` (acceso rápido
+ *   accesible por teclado, complementario al minimapa).
  * - Botones de paneles flotantes (uno visible a la vez, panels.store).
  */
 
+import { computed } from 'vue'
 import { t } from '~shared/i18n'
 import type { MessageKey } from '~shared/i18n'
+import type { Region } from '~domain/world'
+import { polygonBoundsM } from '~domain/world'
 import type { InputMode, OverlayName } from '~~/game'
 import type { GamePanelName } from '~/stores/panels.store'
 import { useMapUiStore } from '~/stores/mapui.store'
 import { usePanelsStore } from '~/stores/panels.store'
+import { useWorldStore } from '~/stores/world.store'
 
 const mapui = useMapUiStore()
 const panels = usePanelsStore()
+const world = useWorldStore()
+
+/** Regiones con bounds (saltables), en orden de rejilla (filas, columnas). */
+const jumpableRegions = computed(() =>
+  world.regionList
+    .filter((region) => region.boundsM !== null)
+    .toSorted((a, b) => a.gridY - b.gridY || a.gridX - b.gridX),
+)
+
+function onJumpToRegion(region: Region): void {
+  if (region.boundsM === null) {
+    return
+  }
+  const box = polygonBoundsM(region.boundsM)
+  if (box === null) {
+    return
+  }
+  mapui.requestFitRect({
+    xM: box.minXM,
+    yM: box.minYM,
+    widthM: box.maxXM - box.minXM,
+    heightM: box.maxYM - box.minYM,
+  })
+}
 
 const TOOLS: readonly { mode: InputMode; label: MessageKey }[] = [
   { mode: 'select', label: 'tool.select' },
@@ -82,6 +113,21 @@ function onTool(mode: InputMode): void {
         />
         <span>{{ t(overlay.label) }}</span>
       </label>
+    </section>
+
+    <section v-if="jumpableRegions.length > 1" class="sidebar__section">
+      <h3 class="sidebar__title">{{ t('sidebar.regions') }}</h3>
+      <button
+        v-for="region of jumpableRegions"
+        :key="region.id"
+        type="button"
+        class="sidebar__item"
+        :data-testid="`region-jump-${region.gridX}-${region.gridY}`"
+        :title="t('sidebar.regions.jump', { name: region.name })"
+        @click="onJumpToRegion(region)"
+      >
+        {{ region.name }}
+      </button>
     </section>
 
     <section class="sidebar__section">

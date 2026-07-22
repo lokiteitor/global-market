@@ -13,7 +13,7 @@
 
 import type Phaser from 'phaser'
 
-import { PX_PER_M, WORLD_M_PER_TILE, WORLD_SIZE_TILES, mToPx, mToTile } from '~shared/geometry/grid'
+import { PX_PER_M, WORLD_M_PER_TILE, isInsideWorldM, mToPx, mToTile } from '~shared/geometry/grid'
 
 import type { VisibleVms, WorldStateBridge } from '../bridge/bridge'
 import { CITY_TEXTURE_PX, cityScale } from '../bridge/vm'
@@ -192,7 +192,7 @@ export class InputController {
 
   private emitBuildIntent(xM: number, yM: number): void {
     const tile = mToTile(xM, yM)
-    if (!tileInsideWorld(tile.tx, tile.ty)) {
+    if (!this.tileInsideWorld(tile.tx, tile.ty)) {
       return
     }
     // Ancla a la rejilla ortogonal (ADR-019): esquina del tile en metros.
@@ -255,10 +255,15 @@ export class InputController {
     this.rubber.clear()
   }
 
+  /** ¿El tile cae dentro del mundo vigente? (bounds dinámicos de la cámara). */
+  private tileInsideWorld(tx: number, ty: number): boolean {
+    return isInsideWorldM(tx * WORLD_M_PER_TILE, ty * WORLD_M_PER_TILE, this.camera.worldBoundsM())
+  }
+
   private updateGhost(pointer: Phaser.Input.Pointer): void {
     const { xM, yM } = this.camera.screenToM(pointer.x, pointer.y)
     const tile = mToTile(xM, yM)
-    const valid = tileInsideWorld(tile.tx, tile.ty)
+    const valid = this.tileInsideWorld(tile.tx, tile.ty)
     const center = mToPx((tile.tx + 0.5) * WORLD_M_PER_TILE, (tile.ty + 0.5) * WORLD_M_PER_TILE)
     this.ghost.setTexture(valid ? TEXTURES.ghost : EXTRA_TEXTURES.ghostInvalid)
     this.ghost.setPosition(center.xPx, center.yPx)
@@ -300,9 +305,6 @@ export class InputController {
   }
 }
 
-function tileInsideWorld(tx: number, ty: number): boolean {
-  return tx >= 0 && tx < WORLD_SIZE_TILES && ty >= 0 && ty < WORLD_SIZE_TILES
-}
 
 interface MarkerTarget {
   readonly xPx: number

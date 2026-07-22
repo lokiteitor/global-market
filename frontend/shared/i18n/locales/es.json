@@ -129,6 +129,8 @@
 
   "sidebar.tools": "Herramientas",
   "sidebar.overlays": "Capas",
+  "sidebar.regions": "Regiones",
+  "sidebar.regions.jump": "Ir a {name}",
   "sidebar.panels": "Paneles",
   "tool.select": "Seleccionar",
   "tool.pan": "Mover mapa",

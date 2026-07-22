@@ -15,8 +15,8 @@
 
 import type Phaser from 'phaser'
 
-import type { PointM, RectPx } from '~shared/geometry/grid'
-import { PX_PER_M, WORLD_SIZE_PX, mToPx, pxToM } from '~shared/geometry/grid'
+import type { PointM, RectPx, WorldBoundsM, WorldBoundsPx } from '~shared/geometry/grid'
+import { DEFAULT_WORLD_BOUNDS_M, PX_PER_M, boundsMToPx, mToPx, pxToM } from '~shared/geometry/grid'
 
 import type { CameraState } from './camera-math'
 import {
@@ -27,6 +27,7 @@ import {
   viewRect,
   wheelZoomFactor,
   zoomAtCursor,
+  zoomRange,
 } from './camera-math'
 
 /** Rectángulo del viewport en METROS de mundo (para bridge/consultas de dominio). */
@@ -58,14 +59,22 @@ export class CameraController {
   private lastPointer = { x: 0, y: 0 }
   private lastMoveAtMs = 0
   private velocity = { x: 0, y: 0 }
+  /** Bounds del mundo (fallback Askadia hasta que llegue el catálogo de regiones). */
+  private worldM: WorldBoundsM = DEFAULT_WORLD_BOUNDS_M
+  private worldPx: WorldBoundsPx = boundsMToPx(DEFAULT_WORLD_BOUNDS_M)
   private readonly camera: Phaser.Cameras.Scene2D.Camera
   private readonly detach: () => void
 
   constructor(private readonly options: CameraControllerOptions) {
     this.camera = options.scene.cameras.main
     this.state = clampCenter(
-      { centerX: WORLD_SIZE_PX / 2, centerY: WORLD_SIZE_PX / 2, zoom: 1 },
+      {
+        centerX: (this.worldPx.minXPx + this.worldPx.maxXPx) / 2,
+        centerY: (this.worldPx.minYPx + this.worldPx.maxYPx) / 2,
+        zoom: 1,
+      },
       this.viewport(),
+      this.worldPx,
     )
     this.apply()
 
@@ -120,7 +129,53 @@ export class CameraController {
 
   /** Zoom absoluto manteniendo el centro (botones +/− del HUD). */
   setZoom(zoom: number): void {
-    this.setState({ ...this.state, zoom: clampZoom(zoom) })
+    const range = zoomRange(this.worldPx, this.viewport())
+    this.setState({ ...this.state, zoom: clampZoom(zoom, range.min, range.max) })
+  }
+
+  /**
+   * Actualiza los límites del mundo (derivados del catálogo de regiones por la
+   * fase UI, FAD §17.6): re-clampea el estado y renotifica la vista (lo que
+   * dispara el re-chunking del terreno).
+   */
+  setWorldBoundsM(bounds: WorldBoundsM): void {
+    this.worldM = bounds
+    this.worldPx = boundsMToPx(bounds)
+    this.setState(this.state)
+  }
+
+  /** Límites vigentes del mundo en metros (input, minimapa, encuadres). */
+  worldBoundsM(): WorldBoundsM {
+    return this.worldM
+  }
+
+  /**
+   * Encuadra un rectángulo del mundo (metros): lo centra y ajusta el zoom para
+   * abarcarlo con un 10% de aire (salto de región del HUD/minimapa).
+   */
+  fitRectM(xM: number, yM: number, widthM: number, heightM: number): void {
+    if (widthM <= 0 || heightM <= 0) {
+      return
+    }
+    const topLeft = mToPx(xM, yM)
+    const rectPx: WorldBoundsPx = {
+      minXPx: topLeft.xPx,
+      minYPx: topLeft.yPx,
+      maxXPx: topLeft.xPx + widthM * PX_PER_M,
+      maxYPx: topLeft.yPx + heightM * PX_PER_M,
+    }
+    const viewport = this.viewport()
+    const fit =
+      Math.min(
+        viewport.width / (rectPx.maxXPx - rectPx.minXPx),
+        viewport.height / (rectPx.maxYPx - rectPx.minYPx),
+      ) * 0.9
+    const range = zoomRange(this.worldPx, viewport)
+    this.setState({
+      centerX: (rectPx.minXPx + rectPx.maxXPx) / 2,
+      centerY: (rectPx.minYPx + rectPx.maxYPx) / 2,
+      zoom: clampZoom(fit, range.min, range.max),
+    })
   }
 
   /** Viewport actual en píxeles de render (para chunking/culling). */
@@ -174,7 +229,7 @@ export class CameraController {
   }
 
   private setState(next: CameraState): void {
-    this.state = clampCenter(next, this.viewport())
+    this.state = clampCenter(next, this.viewport(), this.worldPx)
     this.apply()
     this.options.onViewChanged?.(this.viewRectPx())
   }
@@ -226,8 +281,18 @@ export class CameraController {
   private onWheel(pointer: Phaser.Input.Pointer, deltaY: number): void {
     this.velocity = { x: 0, y: 0 }
     const factor = wheelZoomFactor(deltaY)
+    const viewport = this.viewport()
+    const range = zoomRange(this.worldPx, viewport)
     this.setState(
-      zoomAtCursor(this.state, pointer.x, pointer.y, this.viewport(), this.state.zoom * factor),
+      zoomAtCursor(
+        this.state,
+        pointer.x,
+        pointer.y,
+        viewport,
+        this.state.zoom * factor,
+        range.min,
+        range.max,
+      ),
     )
   }
 }

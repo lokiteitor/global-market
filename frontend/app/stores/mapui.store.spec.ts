@@ -47,16 +47,36 @@ describe('app/stores/mapui.store — estado de UI del mapa', () => {
     expect(store.hasSelection).toBe(false)
   })
 
+  it('comandos de cámara: seq monótono distingue peticiones idénticas', () => {
+    const store = useMapUiStore()
+    expect(store.cameraCommand).toBeNull()
+
+    store.requestCenterOn(100, 200)
+    expect(store.cameraCommand).toEqual({ seq: 1, kind: 'center', xM: 100, yM: 200 })
+
+    store.requestCenterOn(100, 200)
+    expect(store.cameraCommand).toEqual({ seq: 2, kind: 'center', xM: 100, yM: 200 })
+
+    store.requestFitRect({ xM: 0, yM: 0, widthM: 50_000, heightM: 50_000 })
+    expect(store.cameraCommand).toEqual({
+      seq: 3,
+      kind: 'fit',
+      rectM: { xM: 0, yM: 0, widthM: 50_000, heightM: 50_000 },
+    })
+  })
+
   it('reset vuelve al estado inicial', () => {
     const store = useMapUiStore()
     store.setMode('build')
     store.setOverlay('influence', true)
     store.setSelection({ type: 'city', id: 'c1' })
     store.setFollow('v1')
+    store.requestCenterOn(1, 2)
     store.reset()
     expect(store.mode).toBe('select')
     expect(store.overlays).toEqual({})
     expect(store.selection).toBeNull()
     expect(store.followedVehicleId).toBeNull()
+    expect(store.cameraCommand).toBeNull()
   })
 })

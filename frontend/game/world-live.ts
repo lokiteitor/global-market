@@ -31,7 +31,7 @@ import { InfluenceOverlay } from './overlays/influence'
 import { OverlayController } from './overlays/controller'
 import type { OverlayName } from './overlays/controller'
 import { RegionsOverlay } from './overlays/regions'
-import type { DepositVM, NodeVM } from './bridge/vm'
+import type { DepositVM, NodeVM, WorldRectM } from './bridge/vm'
 import { TEXTURES } from './textures'
 
 /** Evento de step de escena de Phaser (Phaser.Scenes.Events.UPDATE). */
@@ -48,6 +48,10 @@ export interface WorldLiveStats {
 export interface WorldLive {
   setMode(mode: InputMode): void
   mode(): InputMode
+  /** Centra la cámara en un punto del mundo (metros; clampeado a bounds). */
+  centerOnM(xM: number, yM: number): void
+  /** Encuadra un rectángulo del mundo (salto de región del HUD/minimapa). */
+  fitRectM(rect: WorldRectM): void
   setOverlay(name: OverlayName, on: boolean): void
   overlays(): Readonly<Record<OverlayName, boolean>>
   selection(): SelectionRef | null
@@ -183,6 +187,12 @@ export function createWorldLive(deps: WorldLiveDeps): WorldLive {
       input.setMode(mode)
     },
     mode: () => input.mode(),
+    centerOnM: (xM, yM) => {
+      camera.centerOnM(xM, yM)
+    },
+    fitRectM: (rect) => {
+      camera.fitRectM(rect.xM, rect.yM, rect.widthM, rect.heightM)
+    },
     setOverlay: (name, on) => {
       overlays.set(name, on)
     },

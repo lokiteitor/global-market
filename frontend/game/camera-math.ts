@@ -7,12 +7,19 @@
  * (espacio de `shared/geometry`): zoom 1 ⇒ 1 px de mundo = 1 px de pantalla.
  */
 
-import type { RectPx } from '~shared/geometry/grid'
-import { WORLD_SIZE_PX } from '~shared/geometry/grid'
+import type { RectPx, WorldBoundsPx } from '~shared/geometry/grid'
 
-/** Límites de zoom del mandato: mundo entero legible ↔ detalle de edificio. */
+/**
+ * Límites de zoom del mandato: mundo entero legible ↔ detalle de edificio.
+ * `ZOOM_MIN` es el mínimo del fallback (Askadia sola); con el mundo
+ * multi-región el mínimo REAL es dinámico (`zoomRange`: ver el mundo entero),
+ * acotado por `ZOOM_FLOOR_ABS` para que un mundo enorme no degenere a 0.
+ */
 export const ZOOM_MIN = 0.15
 export const ZOOM_MAX = 3
+
+/** Suelo absoluto del zoom dinámico (mundos arbitrariamente grandes). */
+export const ZOOM_FLOOR_ABS = 0.02
 
 /** Estado de cámara: centro en píxeles de render del mundo + zoom. */
 export interface CameraState {
@@ -54,8 +61,10 @@ export function zoomAtCursor(
   cursorY: number,
   viewport: ViewportSize,
   nextZoomRaw: number,
+  zoomMin = ZOOM_MIN,
+  zoomMax = ZOOM_MAX,
 ): CameraState {
-  const zoom = clampZoom(nextZoomRaw)
+  const zoom = clampZoom(nextZoomRaw, zoomMin, zoomMax)
   const offsetX = cursorX - viewport.width / 2
   const offsetY = cursorY - viewport.height / 2
   const worldX = state.centerX + offsetX / state.zoom
@@ -81,26 +90,54 @@ export function panBy(state: CameraState, deltaScreenX: number, deltaScreenY: nu
 
 /**
  * Clampea el centro a los bounds del mundo (FAD §17.6): el viewport no se sale
- * del rectángulo [0, worldPx]². Si a este zoom el viewport es más ancho/alto
- * que el mundo, se centra el mundo en ese eje (encuadre al alejar al máximo).
+ * del rectángulo del mundo (que puede tener mínimos negativos, mundo
+ * multi-región). Si a este zoom el viewport es más ancho/alto que el mundo, se
+ * centra el mundo en ese eje (encuadre al alejar al máximo).
  */
 export function clampCenter(
   state: CameraState,
   viewport: ViewportSize,
-  worldPx = WORLD_SIZE_PX,
+  worldPx: WorldBoundsPx,
 ): CameraState {
   const halfW = viewport.width / (2 * state.zoom)
   const halfH = viewport.height / (2 * state.zoom)
-  const clampAxis = (center: number, half: number): number => {
-    if (half * 2 >= worldPx) {
-      return worldPx / 2
+  const clampAxis = (center: number, half: number, min: number, max: number): number => {
+    if (half * 2 >= max - min) {
+      return (min + max) / 2
     }
-    return Math.min(worldPx - half, Math.max(half, center))
+    return Math.min(max - half, Math.max(min + half, center))
   }
   return {
-    centerX: clampAxis(state.centerX, halfW),
-    centerY: clampAxis(state.centerY, halfH),
+    centerX: clampAxis(state.centerX, halfW, worldPx.minXPx, worldPx.maxXPx),
+    centerY: clampAxis(state.centerY, halfH, worldPx.minYPx, worldPx.maxYPx),
     zoom: state.zoom,
+  }
+}
+
+/** Zoom que encaja el rectángulo del mundo entero en el viewport (aspect-fit). */
+export function fitZoom(worldPx: WorldBoundsPx, viewport: ViewportSize): number {
+  const width = worldPx.maxXPx - worldPx.minXPx
+  const height = worldPx.maxYPx - worldPx.minYPx
+  if (width <= 0 || height <= 0) {
+    return ZOOM_MIN
+  }
+  return Math.min(viewport.width / width, viewport.height / height)
+}
+
+/**
+ * Rango de zoom dinámico para unos bounds de mundo: el mínimo permite ver el
+ * mundo entero (con un 5% de aire), nunca por debajo de `ZOOM_FLOOR_ABS` ni
+ * por encima de `ZOOM_MIN` (con el fallback Askadia se conserva el mínimo
+ * histórico); el máximo es fijo.
+ */
+export function zoomRange(
+  worldPx: WorldBoundsPx,
+  viewport: ViewportSize,
+): { readonly min: number; readonly max: number } {
+  const fit = fitZoom(worldPx, viewport) * 0.95
+  return {
+    min: Math.min(ZOOM_MIN, Math.max(ZOOM_FLOOR_ABS, fit)),
+    max: ZOOM_MAX,
   }
 }
 
