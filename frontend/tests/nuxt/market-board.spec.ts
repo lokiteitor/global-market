@@ -7,7 +7,7 @@ import type { PublicationDto } from '~network/market.api'
 import MarketBoard from '~/components/play/MarketBoard.vue'
 import { useSessionStore } from '~/stores/session.store'
 import { useWorldStore } from '~/stores/world.store'
-import { MY_ACCOUNT, OTHER_ACCOUNT, product, uid } from '~/stores/testing/fixtures'
+import { MY_ACCOUNT, OTHER_ACCOUNT, product, region, uid } from '~/stores/testing/fixtures'
 import type { StubbedNuxtApp } from './game-fakes'
 import { stubNuxtApp } from './game-fakes'
 
@@ -89,6 +89,26 @@ describe('components/play/MarketBoard', () => {
       kind: 'sell',
       product_id: PRODUCT_ID,
       max_unit_price: '150',
+    })
+  })
+
+  it('filtra por regiones de origen/destino y por kind freight', async () => {
+    const REGION_ID = uid<'Region'>(1)
+    const wrapper = await mountBoard()
+    useWorldStore().applyRegionsSnapshot([region({ id: REGION_ID })])
+    await flushPromises()
+
+    await wrapper.get('[data-testid="filter-kind"]').setValue('freight')
+    await wrapper.get('[data-testid="filter-origin-region"]').setValue(REGION_ID)
+    await wrapper.get('[data-testid="filter-destination-region"]').setValue(REGION_ID)
+    await wrapper.get('form').trigger('submit')
+    await flushPromises()
+
+    expect(stub.apis.market.queryBoard).toHaveBeenLastCalledWith({
+      limit: 100,
+      kind: 'freight',
+      origin_region_id: REGION_ID,
+      destination_region_id: REGION_ID,
     })
   })
 

@@ -165,6 +165,34 @@ describe('components/play/PublishForm', () => {
     expect(wrapper.text()).toContain(t('validation.required'))
   })
 
+  it('canal privado: exige counterparty UUID válido y lo envía en el body', async () => {
+    const COUNTERPARTY = '01981c5e-84b6-7c2a-8d3f-5b7a9c1e3f99'
+    const wrapper = await mountForm()
+
+    await wrapper.get('[data-testid="publish-kind"]').setValue('sell')
+    await wrapper.get('[data-testid="publish-channel"]').setValue('private')
+    await wrapper.get('[data-testid="publish-product"]').setValue(PRODUCT_ID)
+    await wrapper.get('[data-testid="publish-quantity"]').setValue('500')
+    await wrapper.get('[data-testid="publish-price"]').setValue('120')
+    await wrapper.get('[data-testid="publish-node"]').setValue(NODE_ID)
+    await wrapper.get('[data-testid="publish-delivery"]').setValue('48')
+
+    // UUID inválido: error de forma, sin llamada.
+    await wrapper.get('[data-testid="publish-counterparty"]').setValue('no-es-un-uuid')
+    await wrapper.get('form').trigger('submit')
+    await flushPromises()
+    expect(stub.apis.market.createPublication).not.toHaveBeenCalled()
+    expect(wrapper.text()).toContain(t('validation.uuid'))
+
+    await wrapper.get('[data-testid="publish-counterparty"]').setValue(COUNTERPARTY)
+    await wrapper.get('form').trigger('submit')
+    await flushPromises()
+
+    expect(stub.apis.market.createPublication).toHaveBeenCalledWith(
+      expect.objectContaining({ channel: 'private', counterparty_account_id: COUNTERPARTY }),
+    )
+  })
+
   it('cantidad con decimales = error de forma, sin llamada', async () => {
     const wrapper = await mountForm()
 

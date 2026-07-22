@@ -41,6 +41,8 @@ const { messageFor } = useAppError()
 const filterProductId = ref('')
 const filterKind = ref('')
 const filterMaxPrice = ref('')
+const filterOriginRegionId = ref('')
+const filterDestinationRegionId = ref('')
 
 const loading = ref(false)
 const fetchError = ref<unknown>(null)
@@ -67,6 +69,12 @@ async function refresh(): Promise<void> {
       ...(kind !== '' && isPublicationKind(kind) ? { kind } : {}),
       ...(filterProductId.value === '' ? {} : { product_id: filterProductId.value }),
       ...(maxPrice !== '' && isMoney(maxPrice) ? { max_unit_price: maxPrice } : {}),
+      ...(filterOriginRegionId.value === ''
+        ? {}
+        : { origin_region_id: filterOriginRegionId.value }),
+      ...(filterDestinationRegionId.value === ''
+        ? {}
+        : { destination_region_id: filterDestinationRegionId.value }),
     }
     const page = await apis.market.queryBoard(query)
     market.applyBoardSnapshot(page.items.map(mapPublication), nowSim() ?? simTime(0))
@@ -123,6 +131,27 @@ function deliveryHours(publication: Publication): number {
         <option value="">{{ t('market.filter.kind.all') }}</option>
         <option value="sell">{{ t('market.kind.sell') }}</option>
         <option value="buy">{{ t('market.kind.buy') }}</option>
+        <option value="freight">{{ t('market.kind.freight') }}</option>
+      </select>
+      <select
+        v-model="filterOriginRegionId"
+        :aria-label="t('market.filter.originRegion')"
+        data-testid="filter-origin-region"
+      >
+        <option value="">{{ t('market.filter.originRegion.all') }}</option>
+        <option v-for="region of world.regionList" :key="region.id" :value="region.id">
+          {{ region.name }}
+        </option>
+      </select>
+      <select
+        v-model="filterDestinationRegionId"
+        :aria-label="t('market.filter.destinationRegion')"
+        data-testid="filter-destination-region"
+      >
+        <option value="">{{ t('market.filter.destinationRegion.all') }}</option>
+        <option v-for="region of world.regionList" :key="region.id" :value="region.id">
+          {{ region.name }}
+        </option>
       </select>
       <input
         v-model="filterMaxPrice"

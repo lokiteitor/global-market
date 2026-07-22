@@ -19,7 +19,8 @@ import { t } from '~shared/i18n'
 import { format, isMoney, multiplyByUnits } from '~shared/money'
 import { isQuantity } from '~domain/quantity'
 import { SIM_SECONDS_PER_HOUR } from '~shared/simtime'
-import type { PublicationKind } from '~domain/market'
+import { parseEntityId } from '~shared/ids'
+import type { ContractChannel, PublicationKind } from '~domain/market'
 import type { PublicationCreateDto } from '~network/market.api'
 import { mapPublication } from '~network/mappers/domain.mapper'
 import { AppError } from '~network/rest'
@@ -32,16 +33,20 @@ import { useGameApis } from '~/composables/useGameApis'
 import { useMyNodes } from '~/composables/useMyNodes'
 import { useLogisticsStore } from '~/stores/logistics.store'
 import { useMarketStore } from '~/stores/market.store'
+import { useSessionStore } from '~/stores/session.store'
 import { useWorldStore } from '~/stores/world.store'
 
 const apis = useGameApis()
 const world = useWorldStore()
 const market = useMarketStore()
+const session = useSessionStore()
 const logistics = useLogisticsStore()
 const { myNodes, describeNode, describeAnyNode } = useMyNodes()
 const { messageFor } = useAppError()
 
 const kind = ref<PublicationKind>('sell')
+const channel = ref<ContractChannel>('board')
+const counterpartyId = ref('')
 const productId = ref('')
 const quantity = ref('')
 const unitPrice = ref('')
@@ -93,6 +98,45 @@ const deliveryError = computed<string | null>(() => {
 /** Un flete pide origen (propio) Y destino (cualquiera); sell/buy solo uno. */
 const isFreight = computed(() => kind.value === 'freight')
 
+/** Canal privado: exige la cuenta contraparte (UUID). */
+const isPrivate = computed(() => channel.value === 'private')
+
+const counterpartyError = computed<string | null>(() => {
+  if (!isPrivate.value) {
+    return null
+  }
+  const required = requiredError(counterpartyId.value)
+  if (required !== null) {
+    return required
+  }
+  if (counterpartyId.value !== '' && !parseEntityId(counterpartyId.value).ok) {
+    return t('validation.uuid')
+  }
+  return null
+})
+
+/**
+ * Sugerencias de contraparte: cuentas ya conocidas por contratos/fletes
+ * previos (no existe directorio de cuentas en el contrato — UX honesta:
+ * input de UUID con datalist de lo que la sesión ya vio).
+ */
+const knownCounterparties = computed<readonly string[]>(() => {
+  const mine = session.account?.id ?? null
+  const ids = new Set<string>()
+  for (const contract of market.contractList) {
+    ids.add(contract.buyerAccountId)
+    ids.add(contract.sellerAccountId)
+  }
+  for (const freight of market.freightList) {
+    ids.add(freight.shipperAccountId)
+    ids.add(freight.carrierAccountId)
+  }
+  if (mine !== null) {
+    ids.delete(mine)
+  }
+  return [...ids]
+})
+
 const destinationError = computed<string | null>(() =>
   isFreight.value ? requiredError(destinationNodeId.value) : null,
 )
@@ -139,6 +183,7 @@ const hasErrors = computed(
     nodeError.value !== null ||
     destinationError.value !== null ||
     declaredValueError.value !== null ||
+    counterpartyError.value !== null ||
     quantityError.value !== null ||
     priceError.value !== null ||
     minLotError.value !== null ||
@@ -173,7 +218,8 @@ async function onSubmit(): Promise<void> {
   try {
     const body: PublicationCreateDto = {
       kind: kind.value,
-      channel: 'board',
+      channel: channel.value,
+      ...(channel.value === 'private' ? { counterparty_account_id: counterpartyId.value } : {}),
       product_id: productId.value,
       quantity_total: quantity.value,
       unit_price: unitPrice.value,
@@ -213,6 +259,37 @@ async function onSubmit(): Promise<void> {
           <option value="buy">{{ t('market.kind.buy') }}</option>
           <option value="freight">{{ t('market.kind.freight') }}</option>
         </select>
+      </template>
+    </BaseFormField>
+
+    <BaseFormField :label="t('market.publish.channel')" required>
+      <template #default="{ id }">
+        <select :id="id" v-model="channel" class="publish__select" data-testid="publish-channel">
+          <option value="board">{{ t('market.publish.channel.board') }}</option>
+          <option value="private">{{ t('market.publish.channel.private') }}</option>
+        </select>
+      </template>
+    </BaseFormField>
+
+    <BaseFormField
+      v-if="isPrivate"
+      :label="t('market.publish.counterparty')"
+      :hint="t('market.publish.counterparty.hint')"
+      :error="counterpartyError"
+      required
+    >
+      <template #default="{ id, describedBy, invalid }">
+        <BaseInput
+          :id="id"
+          v-model="counterpartyId"
+          :aria-describedby="describedBy"
+          :invalid="invalid"
+          list="publish-counterparty-suggestions"
+          data-testid="publish-counterparty"
+        />
+        <datalist id="publish-counterparty-suggestions">
+          <option v-for="accountId of knownCounterparties" :key="accountId" :value="accountId" />
+        </datalist>
       </template>
     </BaseFormField>
 

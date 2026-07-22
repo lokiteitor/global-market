@@ -15,6 +15,7 @@ import AcceptDialog from '~/components/play/AcceptDialog.vue'
 import FloatingPanel from '~/components/play/FloatingPanel.vue'
 import MarketBoard from '~/components/play/MarketBoard.vue'
 import MyContracts from '~/components/play/MyContracts.vue'
+import MarketPrices from '~/components/play/MarketPrices.vue'
 import MyFreights from '~/components/play/MyFreights.vue'
 import MyPublications from '~/components/play/MyPublications.vue'
 import PublishForm from '~/components/play/PublishForm.vue'
@@ -22,7 +23,7 @@ import { usePanelsStore } from '~/stores/panels.store'
 
 const panels = usePanelsStore()
 
-type MarketTab = 'board' | 'publish' | 'mine' | 'contracts' | 'freights'
+type MarketTab = 'board' | 'publish' | 'mine' | 'contracts' | 'freights' | 'prices'
 
 const TABS: readonly { tab: MarketTab; label: MessageKey }[] = [
   { tab: 'board', label: 'market.tab.board' },
@@ -30,6 +31,7 @@ const TABS: readonly { tab: MarketTab; label: MessageKey }[] = [
   { tab: 'mine', label: 'market.tab.mine' },
   { tab: 'contracts', label: 'market.tab.contracts' },
   { tab: 'freights', label: 'market.tab.freights' },
+  { tab: 'prices', label: 'market.tab.prices' },
 ]
 
 const activeTab = ref<MarketTab>('board')
@@ -56,7 +58,8 @@ const accepting = ref<Publication | null>(null)
     <PublishForm v-else-if="activeTab === 'publish'" />
     <MyPublications v-else-if="activeTab === 'mine'" />
     <MyContracts v-else-if="activeTab === 'contracts'" />
-    <MyFreights v-else />
+    <MyFreights v-else-if="activeTab === 'freights'" />
+    <MarketPrices v-else />
 
     <AcceptDialog v-if="accepting !== null" :publication="accepting" @close="accepting = null" />
   </FloatingPanel>
