@@ -2,8 +2,9 @@
 /**
  * MarketPanel — panel MERCADO con pestañas (FAD §15.4 "Panel", v1).
  *
- * Tablón (pull con filtros) | Publicar | Mis publicaciones | Mis contratos.
- * El diálogo de aceptación se abre desde el tablón (evento `accept`).
+ * Tablón (pull con filtros) | Publicar | Mis publicaciones | Mis contratos |
+ * Mis fletes. El diálogo de aceptación se abre desde el tablón (evento
+ * `accept`).
  */
 
 import { ref } from 'vue'
@@ -14,19 +15,21 @@ import AcceptDialog from '~/components/play/AcceptDialog.vue'
 import FloatingPanel from '~/components/play/FloatingPanel.vue'
 import MarketBoard from '~/components/play/MarketBoard.vue'
 import MyContracts from '~/components/play/MyContracts.vue'
+import MyFreights from '~/components/play/MyFreights.vue'
 import MyPublications from '~/components/play/MyPublications.vue'
 import PublishForm from '~/components/play/PublishForm.vue'
 import { usePanelsStore } from '~/stores/panels.store'
 
 const panels = usePanelsStore()
 
-type MarketTab = 'board' | 'publish' | 'mine' | 'contracts'
+type MarketTab = 'board' | 'publish' | 'mine' | 'contracts' | 'freights'
 
 const TABS: readonly { tab: MarketTab; label: MessageKey }[] = [
   { tab: 'board', label: 'market.tab.board' },
   { tab: 'publish', label: 'market.tab.publish' },
   { tab: 'mine', label: 'market.tab.mine' },
   { tab: 'contracts', label: 'market.tab.contracts' },
+  { tab: 'freights', label: 'market.tab.freights' },
 ]
 
 const activeTab = ref<MarketTab>('board')
@@ -52,7 +55,8 @@ const accepting = ref<Publication | null>(null)
     <MarketBoard v-if="activeTab === 'board'" @accept="accepting = $event" />
     <PublishForm v-else-if="activeTab === 'publish'" />
     <MyPublications v-else-if="activeTab === 'mine'" />
-    <MyContracts v-else />
+    <MyContracts v-else-if="activeTab === 'contracts'" />
+    <MyFreights v-else />
 
     <AcceptDialog v-if="accepting !== null" :publication="accepting" @close="accepting = null" />
   </FloatingPanel>

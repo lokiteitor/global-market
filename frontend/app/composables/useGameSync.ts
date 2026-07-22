@@ -26,6 +26,12 @@
  * como listado; se reconstruyen desde el tablón (las vivas, filtrando por
  * publisher) + respuestas de comandos + eventos WS. Documentado como hueco
  * de contrato conocido.
+ *
+ * Nota fletes: los eventos `freight.*` se enrutan por WS desde v1.7.0
+ * (incremento 11 del backend); antes no llegaban. Como defensa en
+ * profundidad, los appliers de `acceptance.` y `shipment.` también refrescan
+ * el freight contract ligado (mantiene fill/status frescos aunque un push se
+ * pierda), y el bootstrap consulta ambos roles (shipper y carrier).
  */
 
 import { readonly, ref } from 'vue'
@@ -43,6 +49,7 @@ import {
   mapConcession,
   mapContract,
   mapDeposit,
+  mapFreightContract,
   mapInventoryItem,
   mapLedgerAccount,
   mapLink,
@@ -266,8 +273,18 @@ export function useGameSync(): GameSync {
   // ── Bootstrap: estado propio (repetible en cada resync) ────────────────────
 
   async function bootstrapOwn(): Promise<void> {
-    const [concessions, ownBuildings, vehicles, shipments, routes, contracts, accounts, board] =
-      await Promise.all([
+    const [
+      concessions,
+      ownBuildings,
+      vehicles,
+      shipments,
+      routes,
+      contracts,
+      freightsAsShipper,
+      freightsAsCarrier,
+      accounts,
+      board,
+    ] = await Promise.all([
         fetchAll((cursor) =>
           apis.world.listConcessions({
             limit: PAGE_LIMIT,
@@ -305,6 +322,20 @@ export function useGameSync(): GameSync {
           }),
         ),
         fetchAll((cursor) =>
+          apis.market.listFreightContracts({
+            role: 'shipper',
+            limit: PAGE_LIMIT,
+            ...(cursor === undefined ? {} : { cursor }),
+          }),
+        ),
+        fetchAll((cursor) =>
+          apis.market.listFreightContracts({
+            role: 'carrier',
+            limit: PAGE_LIMIT,
+            ...(cursor === undefined ? {} : { cursor }),
+          }),
+        ),
+        fetchAll((cursor) =>
           apis.ledger.listLedgerAccounts({
             limit: PAGE_LIMIT,
             ...(cursor === undefined ? {} : { cursor }),
@@ -321,6 +352,12 @@ export function useGameSync(): GameSync {
     fleet.applyShipmentsSnapshot(shipments.map(mapShipment))
     logistics.applyRoutesSnapshot(routes.map(mapRoute))
     market.applyContractsSnapshot(contracts.map(mapContract))
+    // Ambos roles del CCRI-Flete (dedupe por id: una corp puede ser cargador
+    // de unos fletes y transportista de otros; jamás ambos del mismo).
+    const freightById = new Map(
+      [...freightsAsShipper, ...freightsAsCarrier].map((dto) => [dto.id, dto]),
+    )
+    market.applyFreightsSnapshot([...freightById.values()].map(mapFreightContract))
     finance.applyLedgerAccountsSnapshot(accounts.map(mapLedgerAccount))
 
     // Tablón: pull inicial (efímero) + reconstrucción de MIS publicaciones
@@ -379,6 +416,20 @@ export function useGameSync(): GameSync {
     ])
     buildings.applyInventorySnapshot(branded, inventory.map(mapInventoryItem))
     buildings.applyBuildingBatchesSnapshot(branded, batches.map(mapProductionBatch))
+  }
+
+  async function refetchFreightContract(freightContractId: string): Promise<void> {
+    try {
+      market.applyFreightContract(
+        mapFreightContract(await apis.market.getFreightContract(freightContractId)),
+      )
+    } catch (error) {
+      if (isNotFound(error)) {
+        market.removeFreightContract(asEntityId<'FreightContract'>(freightContractId))
+        return
+      }
+      throw error
+    }
   }
 
   async function refetchLedgerAccounts(): Promise<void> {
@@ -452,7 +503,13 @@ export function useGameSync(): GameSync {
       sync.registerApplier(
         'shipment.',
         applier(async (event) => {
-          fleet.applyShipment(mapShipment(await apis.fleet.getShipment(event.aggregateId)))
+          const shipment = mapShipment(await apis.fleet.getShipment(event.aggregateId))
+          fleet.applyShipment(shipment)
+          // Cargamento de flete: refresca también el freight contract (fill/
+          // status cambian con cada hito físico; defensa si un push se pierde).
+          if (shipment.freightContractId !== null) {
+            await refetchFreightContract(shipment.freightContractId)
+          }
         }),
       ),
       sync.registerApplier(
@@ -460,6 +517,11 @@ export function useGameSync(): GameSync {
         applier(async (event) => {
           market.applyContract(mapContract(await apis.market.getContract(event.aggregateId)))
         }),
+      ),
+      // freight.confirmed/settled/expired_undelivered (agregado freight_contract).
+      sync.registerApplier(
+        'freight.',
+        applier(async (event) => refetchFreightContract(event.aggregateId)),
       ),
       sync.registerApplier(
         'publication.',
@@ -476,6 +538,9 @@ export function useGameSync(): GameSync {
           market.applyAcceptance(acceptance)
           if (acceptance.contractId !== null) {
             market.applyContract(mapContract(await apis.market.getContract(acceptance.contractId)))
+          }
+          if (acceptance.freightContractId !== null) {
+            await refetchFreightContract(acceptance.freightContractId)
           }
         }),
       ),

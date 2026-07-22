@@ -98,6 +98,16 @@ describe('app/stores/fleet.store — cargamentos', () => {
     expect(store.shipmentsForContract(uid<'Contract'>(999))).toEqual([])
   })
 
+  it('índice por freight contract (la carga que lleva el transportista)', () => {
+    const store = useFleetStore()
+    const FREIGHT_1 = uid<'FreightContract'>(185)
+    const cargo = shipment({ id: uid<'Shipment'>(152), freightContractId: FREIGHT_1 })
+    store.applyShipmentsSnapshot([shipment(), cargo])
+
+    expect(store.shipmentsForFreight(FREIGHT_1)).toEqual([cargo])
+    expect(store.shipmentsForFreight(uid<'FreightContract'>(999))).toEqual([])
+  })
+
   it('remove es no-op sobre inexistentes y clear purga todo', () => {
     const store = useFleetStore()
     store.applyVehicle(vehicle())

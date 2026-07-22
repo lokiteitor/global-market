@@ -21,7 +21,7 @@ import type {
 } from '~domain/fleet'
 import { VEHICLE_STATUSES } from '~domain/fleet'
 import type { NodeId } from '~domain/logistics'
-import type { ContractId } from '~domain/market'
+import type { ContractId, FreightContractId } from '~domain/market'
 import { createEntityCollection, indexBy } from './entity-collection'
 
 export const useFleetStore = defineStore('fleet', () => {
@@ -34,6 +34,7 @@ export const useFleetStore = defineStore('fleet', () => {
   const vehicleIdsByStatus = indexBy(vehicles, (v) => v.status)
   const vehicleIdsByRoute = indexBy(vehicles, (v) => v.routeId)
   const shipmentIdsByContract = indexBy(shipments, (s) => s.contractId)
+  const shipmentIdsByFreightContract = indexBy(shipments, (s) => s.freightContractId)
   const shipmentIdsByVehicle = indexBy(shipments, (s) => s.vehicleId)
   const shipmentIdsByNode = indexBy(shipments, (s) => s.atNodeId)
 
@@ -59,6 +60,14 @@ export const useFleetStore = defineStore('fleet', () => {
 
   function shipmentsForContract(contractId: ContractId): readonly Shipment[] {
     return (shipmentIdsByContract.value[contractId] ?? []).flatMap((id) => {
+      const shipment = shipments.get(id)
+      return shipment === null ? [] : [shipment]
+    })
+  }
+
+  /** Cargamentos de un CCRI-Flete (la carga que el carrier lleva en custodia). */
+  function shipmentsForFreight(freightContractId: FreightContractId): readonly Shipment[] {
+    return (shipmentIdsByFreightContract.value[freightContractId] ?? []).flatMap((id) => {
       const shipment = shipments.get(id)
       return shipment === null ? [] : [shipment]
     })
@@ -110,9 +119,11 @@ export const useFleetStore = defineStore('fleet', () => {
     applyShipment: shipments.applyOne,
     removeShipment: shipments.remove,
     shipmentIdsByContract,
+    shipmentIdsByFreightContract,
     shipmentIdsByVehicle,
     shipmentIdsByNode,
     shipmentsForContract,
+    shipmentsForFreight,
     shipmentsAboard,
     shipmentsAtNode,
     // Global
