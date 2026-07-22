@@ -1,6 +1,6 @@
 # Protocolo WebSocket del Notification/Event Gateway — referencia para integradores
 
-**Protocolo v1** · Decidido en [ADR-023](../adr/ADR-023-notification-gateway-ws.md) (el ADR decide; este documento explica el *cómo*) · Complementa el contrato REST [`openapi.yaml`](openapi.yaml) (v1.3.0), que declara el WS explícitamente fuera de su alcance.
+**Protocolo v1** · Decidido en [ADR-023](../adr/ADR-023-notification-gateway-ws.md) (el ADR decide; este documento explica el *cómo*) · Complementa el contrato REST [`openapi.yaml`](openapi.yaml) (v1.7.0), que declara el WS explícitamente fuera de su alcance.
 
 Audiencia: cualquier cliente de la API pública — el cliente web (FAD ADR-FE-004, `GatewayTransportAdapter`) y el SDK de bots (`backend/pkg/botsdk`). Ambos hablan **exactamente** este protocolo; no hay canales privilegiados.
 
@@ -169,7 +169,8 @@ El fan-out lo alimenta el consumidor de outbox **`notification_gateway`** (proce
 | `publication.created` / `.cancelled` / `.expired` | el publicador |
 | `acceptance.registered` / `.resolved` | el aceptante **y** el publicador |
 | `contract.confirmed` / `.delivered` / `.settled` / `.expired_undelivered` | el comprador **y** el vendedor |
-| `shipment.created` / `.dispatched` / `.released` | el dueño del cargamento |
+| `freight.confirmed` / `.settled` / `.expired_undelivered` | el cargador **y** el transportista del CCRI-Flete |
+| `shipment.created` / `.dispatched` / `.at_terminal` / `.released` | el dueño del cargamento |
 | `shipment.arrived` | el dueño **y** el comprador del contrato |
 | `vehicle.purchased` / `.updated` / `.repositioned` / `.arrived` / `.broken` / `.stranded` | el dueño |
 | `building.created` / `.updated` / `.upgraded` / `.constructed` | el dueño |

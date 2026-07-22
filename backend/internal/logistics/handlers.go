@@ -412,13 +412,14 @@ type networkNodeJSON struct {
 	BuildingID string          `json:"building_id,omitempty"`
 	CityID     string          `json:"city_id,omitempty"`
 	Location   json.RawMessage `json:"location"`
+	TerminalID string          `json:"terminal_id,omitempty"`
 }
 
 func toNetworkNodeJSON(n NetworkNode) networkNodeJSON {
 	return networkNodeJSON{
 		ID: n.ID.String(), Kind: n.Kind, RegionID: n.RegionID.String(),
 		BuildingID: uuidPtrOrEmpty(n.BuildingID), CityID: uuidPtrOrEmpty(n.CityID),
-		Location: rawGeo(n.Location),
+		Location: rawGeo(n.Location), TerminalID: uuidPtrOrEmpty(n.TerminalID),
 	}
 }
 

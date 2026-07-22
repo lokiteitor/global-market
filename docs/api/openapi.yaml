@@ -3,7 +3,7 @@ $self: https://play.imperio-industrial.example/api/v1/openapi.yaml
 
 info:
   title: Imperio Industrial — API pública
-  version: 1.6.0
+  version: 1.7.0
   summary: API REST del MMO de simulación económica, industrial y logística "Imperio Industrial".
   description: |
     API pública del servidor autoritativo de **Imperio Industrial** (GDD/SAD v1.2).
@@ -47,6 +47,14 @@ info:
 
     ## Changelog
 
+    - **v1.7.0** (2026-07-21): **descubrimiento de terminales** — nuevo campo opcional
+      `NetworkNode.terminal_id`: identifica la terminal intermodal del nodo, si la tiene.
+      Hasta ahora el contrato solo permitía leer una terminal por su id
+      (`GET /world/terminals/{terminalId}`) sin ninguna vía para descubrir ese id desde el
+      grafo replicado, de modo que un cliente no podía inspeccionar la cola ni los slots del
+      nodo seleccionado. Además se documenta el enrutado WS de los eventos `freight.*`
+      (cargador y transportista) y `shipment.at_terminal` en `ws-protocol.md`. Cambios
+      **aditivos** retrocompatibles.
     - **v1.6.0** (2026-07-21): **red eléctrica regional** (GDD 5.8 Fase 3, ADR-025) — se activa
       el último elemento diferido del diseño. Nuevos endpoints: `GET/POST /world/power-lines` y
       `GET /world/power-lines/{powerLineId}` (líneas de transmisión con huella LineString y
@@ -4545,6 +4553,9 @@ components:
           $ref: '#/components/schemas/CityId'
         location:
           $ref: '#/components/schemas/GeoPoint'
+        terminal_id:
+          $ref: '#/components/schemas/TerminalId'
+          description: Terminal intermodal que opera en este nodo, si la tiene (v1.7.0). Permite consultar su cola y sus slots con `GET /world/terminals/{terminalId}`.
     LinkSegment:
       type: object
       required: [id, region_id, seq, length_m, congestion_ema, updated_at_sim]

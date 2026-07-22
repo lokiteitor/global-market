@@ -35,6 +35,8 @@ var RoutedEventTypes = []string{
 	// contract.* → corps de comprador y vendedor
 	"contract.confirmed", "contract.delivered", "contract.settled",
 	"contract.expired_undelivered",
+	// freight.* → corps del cargador y del transportista (CCRI-Flete)
+	"freight.confirmed", "freight.settled", "freight.expired_undelivered",
 	// shipment.* → corp del dueño (+ comprador en shipment.arrived)
 	"shipment.created", "shipment.dispatched", "shipment.at_terminal", "shipment.arrived", "shipment.released",
 	// vehicle.* / building.* / batch.* → corp del dueño
@@ -172,6 +174,8 @@ type routingPayload struct {
 	HolderAccountID    string `json:"holder_account_id"`
 	FromAccountID      string `json:"from_account_id"`
 	ToAccountID        string `json:"to_account_id"`
+	ShipperAccountID   string `json:"shipper_account_id"`
+	CarrierAccountID   string `json:"carrier_account_id"`
 	PublicationID      string `json:"publication_id"`
 	ContractID         string `json:"contract_id"`
 	BuildingID         string `json:"building_id"`
@@ -223,6 +227,16 @@ func (r *Router) resolveTargets(ctx context.Context, tx pgx.Tx, ev outbox.Event)
 			return []uuid.UUID{buyer, seller}, nil
 		}
 		return r.lookup(ctx, tx, "contract", ev.AggregateID, sqlContractParties)
+
+	case "freight":
+		// freight.confirmed/settled traen ambas cuentas en el payload;
+		// freight.expired_undelivered solo el id → lookup del contrato.
+		shipper, okS := parseUUID(p.ShipperAccountID)
+		carrier, okC := parseUUID(p.CarrierAccountID)
+		if okS && okC {
+			return []uuid.UUID{shipper, carrier}, nil
+		}
+		return r.lookup(ctx, tx, "freight_contract", ev.AggregateID, sqlFreightParties)
 
 	case "shipment":
 		var targets []uuid.UUID
@@ -314,6 +328,7 @@ FROM ledger.publication_acceptances a
 JOIN ledger.publications p ON p.id = a.publication_id
 WHERE a.id = $1`
 	sqlContractParties = `SELECT buyer_account_id, seller_account_id FROM ledger.contracts WHERE id = $1`
+	sqlFreightParties  = `SELECT shipper_account_id, carrier_account_id FROM ledger.freight_contracts WHERE id = $1`
 	sqlContractBuyer   = `SELECT buyer_account_id FROM ledger.contracts WHERE id = $1`
 	sqlShipmentOwner   = `SELECT owner_account_id, contract_id FROM world.shipments WHERE id = $1`
 	sqlVehicleOwner    = `SELECT owner_account_id FROM world.vehicles WHERE id = $1`

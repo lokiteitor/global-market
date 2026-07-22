@@ -50,6 +50,7 @@ func (r *Repo) ListNetworkNodes(ctx context.Context, f NodeFilter, afterID *uuid
 		nodes[i] = NetworkNode{
 			ID: row.ID, Kind: string(row.Kind), RegionID: row.RegionID,
 			BuildingID: row.BuildingID, CityID: row.CityID, Location: row.Location,
+			TerminalID: row.TerminalID,
 		}
 	}
 	return nodes, nil

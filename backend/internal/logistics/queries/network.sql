@@ -21,14 +21,18 @@
 
 -- ListNetworkNodes devuelve los nodos con filtros opcionales por región y clase,
 -- y paginación keyset por id. location sale como GeoJSON plano (SRID 0).
+-- terminal_id (v1.7.0) identifica la terminal intermodal del nodo, si la tiene:
+-- es la única vía del contrato para descubrir terminales desde el grafo.
 -- name: ListNetworkNodes :many
-SELECT id, kind, region_id, building_id, city_id,
-       ST_AsGeoJSON(location)::text AS location
-FROM world.network_nodes
-WHERE (sqlc.narg(region_id)::uuid IS NULL OR region_id = sqlc.narg(region_id)::uuid)
-  AND (sqlc.narg(kind)::world.node_kind IS NULL OR kind = sqlc.narg(kind)::world.node_kind)
-  AND (sqlc.narg(after_id)::uuid IS NULL OR id > sqlc.narg(after_id)::uuid)
-ORDER BY id
+SELECT n.id, n.kind, n.region_id, n.building_id, n.city_id,
+       ST_AsGeoJSON(n.location)::text AS location,
+       t.id AS terminal_id
+FROM world.network_nodes n
+LEFT JOIN world.terminals t ON t.node_id = n.id
+WHERE (sqlc.narg(region_id)::uuid IS NULL OR n.region_id = sqlc.narg(region_id)::uuid)
+  AND (sqlc.narg(kind)::world.node_kind IS NULL OR n.kind = sqlc.narg(kind)::world.node_kind)
+  AND (sqlc.narg(after_id)::uuid IS NULL OR n.id > sqlc.narg(after_id)::uuid)
+ORDER BY n.id
 LIMIT sqlc.arg(page_limit);
 
 -- NetworkNodeExists comprueba la existencia de un nodo del grafo (validación de

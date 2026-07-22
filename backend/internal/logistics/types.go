@@ -54,6 +54,7 @@ type NetworkNode struct {
 	BuildingID *uuid.UUID
 	CityID     *uuid.UUID
 	Location   string
+	TerminalID *uuid.UUID
 }
 
 // LinkSegment es un segmento de un enlace, con su congestión suavizada (EMA)

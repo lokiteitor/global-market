@@ -139,13 +139,15 @@ func (q *Queries) ListNetworkLinks(ctx context.Context, arg ListNetworkLinksPara
 const listNetworkNodes = `-- name: ListNetworkNodes :many
 
 
-SELECT id, kind, region_id, building_id, city_id,
-       ST_AsGeoJSON(location)::text AS location
-FROM world.network_nodes
-WHERE ($1::uuid IS NULL OR region_id = $1::uuid)
-  AND ($2::world.node_kind IS NULL OR kind = $2::world.node_kind)
-  AND ($3::uuid IS NULL OR id > $3::uuid)
-ORDER BY id
+SELECT n.id, n.kind, n.region_id, n.building_id, n.city_id,
+       ST_AsGeoJSON(n.location)::text AS location,
+       t.id AS terminal_id
+FROM world.network_nodes n
+LEFT JOIN world.terminals t ON t.node_id = n.id
+WHERE ($1::uuid IS NULL OR n.region_id = $1::uuid)
+  AND ($2::world.node_kind IS NULL OR n.kind = $2::world.node_kind)
+  AND ($3::uuid IS NULL OR n.id > $3::uuid)
+ORDER BY n.id
 LIMIT $4
 `
 
@@ -163,6 +165,7 @@ type ListNetworkNodesRow struct {
 	BuildingID *uuid.UUID
 	CityID     *uuid.UUID
 	Location   string
+	TerminalID *uuid.UUID
 }
 
 // =============================================================================
@@ -186,6 +189,8 @@ type ListNetworkNodesRow struct {
 // ─── Nodos del grafo ──────────────────────────────────────────────────────────
 // ListNetworkNodes devuelve los nodos con filtros opcionales por región y clase,
 // y paginación keyset por id. location sale como GeoJSON plano (SRID 0).
+// terminal_id (v1.7.0) identifica la terminal intermodal del nodo, si la tiene:
+// es la única vía del contrato para descubrir terminales desde el grafo.
 func (q *Queries) ListNetworkNodes(ctx context.Context, arg ListNetworkNodesParams) ([]ListNetworkNodesRow, error) {
 	rows, err := q.db.Query(ctx, listNetworkNodes,
 		arg.RegionID,
@@ -207,6 +212,7 @@ func (q *Queries) ListNetworkNodes(ctx context.Context, arg ListNetworkNodesPara
 			&i.BuildingID,
 			&i.CityID,
 			&i.Location,
+			&i.TerminalID,
 		); err != nil {
 			return nil, err
 		}

@@ -59,6 +59,13 @@ Ping WS a nivel de protocolo cada ~20 s; cierre ante 2 fallos. Consumidor lento:
 
 Cuando el payload no contiene las cuentas necesarias, el router las resuelve con lecturas puntuales a la BD (el gateway ya tiene acceso de lectura).
 
+> **Nota (2026-07-21):** esta tabla es la del momento de la decisión. Los incrementos
+> posteriores la ampliaron aditivamente sin alterar el protocolo: `freight.*` (cargador y
+> transportista, CCRI-Flete), `shipment.at_terminal` (dueño), `power.curtailed` y
+> `power_line.abandoned` (ADR-025). La referencia viva del enrutado es
+> [`ws-protocol.md` §7](../api/ws-protocol.md) y `backend/internal/notify/router.go`
+> (`RoutedEventTypes`).
+
 ## Consecuencias
 
 - (+) Protocolo mínimo, extensible aditivamente (rooms nuevas), coherente con "el tablón es pull" (C10 del FAD) y con el motor event-driven.

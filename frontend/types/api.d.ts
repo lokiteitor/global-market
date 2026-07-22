@@ -2226,6 +2226,8 @@ export interface components {
             building_id?: components["schemas"]["BuildingId"];
             city_id?: components["schemas"]["CityId"];
             location: components["schemas"]["GeoPoint"];
+            /** @description Terminal intermodal que opera en este nodo, si la tiene (v1.7.0). Permite consultar su cola y sus slots con `GET /world/terminals/{terminalId}`. */
+            terminal_id?: components["schemas"]["TerminalId"];
         };
         LinkSegment: {
             id: components["schemas"]["SegmentId"];
