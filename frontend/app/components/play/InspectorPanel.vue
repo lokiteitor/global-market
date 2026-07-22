@@ -19,6 +19,7 @@ import { asEntityId } from '~shared/ids'
 import BasePanel from '~/components/base/BasePanel.vue'
 import InspectorBuilding from '~/components/play/InspectorBuilding.vue'
 import InspectorCity from '~/components/play/InspectorCity.vue'
+import InspectorTerminal from '~/components/play/InspectorTerminal.vue'
 import InspectorVehicle from '~/components/play/InspectorVehicle.vue'
 import { NODE_KIND_LABEL } from '~/components/play/labels'
 import { useLogisticsStore } from '~/stores/logistics.store'
@@ -136,6 +137,9 @@ function nodeId(id: string): NodeId {
             </div>
           </dl>
           <p class="inspector__muted">{{ t('ownership.systemResource') }}</p>
+
+          <!-- Nodo con terminal intermodal (v1.7.0): cola y slots de prioridad. -->
+          <InspectorTerminal v-if="node.terminalId !== null" :node-id="nodeId(selection.id)" />
         </template>
       </div>
     </BasePanel>
