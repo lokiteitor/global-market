@@ -13,6 +13,7 @@
 
 import type { AccountId } from './auth'
 import type { VehicleStatus } from './fleet'
+import type { FreightContractId } from './market'
 
 /**
  * Forma mínima de una entidad con propietario. El campo es opcional/null
@@ -61,4 +62,28 @@ export function isVehicleCommandable(
   myAccountId: AccountId | null,
 ): boolean {
   return isCommandable(vehicle, myAccountId) && vehicle.status !== 'sealed'
+}
+
+/**
+ * Caso especial del CCRI-Flete: un cargamento de bienes lo despacha su DUEÑO,
+ * pero uno de flete lo despacha el TRANSPORTISTA del freight contract (el
+ * dueño sigue siendo el cargador; el servidor autoriza al carrier y respondería
+ * 403 al cargador). Espejo de la regla de despacho del servidor.
+ *
+ * `freight` es el FreightContract del cargamento cuando
+ * `shipment.freightContractId !== null`; si aún no está replicado (`null`),
+ * no se ofrece el mando (UX honesta: sin datos no hay affordance).
+ */
+export function canDispatchShipment(
+  shipment: {
+    readonly ownerAccountId: AccountId
+    readonly freightContractId: FreightContractId | null
+  },
+  freight: { readonly carrierAccountId: AccountId } | null,
+  myAccountId: AccountId | null,
+): boolean {
+  if (shipment.freightContractId === null) {
+    return isMine(shipment.ownerAccountId, myAccountId)
+  }
+  return freight !== null && isMine(freight.carrierAccountId, myAccountId)
 }

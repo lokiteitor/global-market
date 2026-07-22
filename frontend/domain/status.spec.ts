@@ -17,6 +17,7 @@ import {
   VEHICLE_STATUS_PRESENTATION,
   batchStatusPresentation,
   buildingStatusPresentation,
+  conditionSeverity,
   contractStatusPresentation,
   publicationStatusPresentation,
   shipmentStatusPresentation,
@@ -96,5 +97,18 @@ describe('domain/status — severidades clave para la UI', () => {
     expect(vehicleStatusPresentation('in_transit').severity).toBe('busy')
     expect(batchStatusPresentation('running').severity).toBe('busy')
     expect(publicationStatusPresentation('draw_window').severity).toBe('busy')
+  })
+})
+
+describe('domain/status — conditionSeverity (estado físico del edificio)', () => {
+  it.each([
+    [0, 'danger'],
+    [24, 'danger'],
+    [25, 'warn'],
+    [49, 'warn'],
+    [50, 'ok'],
+    [100, 'ok'],
+  ] as const)('condición %i%% → %s', (pct, severity) => {
+    expect(conditionSeverity(pct)).toBe(severity)
   })
 })

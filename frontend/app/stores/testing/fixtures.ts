@@ -15,9 +15,22 @@ import type { Quantity } from '~domain/quantity'
 import { parseQuantity } from '~domain/quantity'
 import type { Concession } from '~domain/cadastre'
 import type { Building, InventoryItem, ProductionBatch } from '~domain/buildings'
-import type { LinkSegment, NetworkLink, NetworkNode, Route } from '~domain/logistics'
+import type {
+  LinkSegment,
+  NetworkLink,
+  NetworkNode,
+  Route,
+  Terminal,
+  TerminalSlot,
+} from '~domain/logistics'
 import type { Shipment, Vehicle } from '~domain/fleet'
-import type { Acceptance, Contract, OhlcCandle, Publication } from '~domain/market'
+import type {
+  Acceptance,
+  Contract,
+  FreightContract,
+  OhlcCandle,
+  Publication,
+} from '~domain/market'
 import type { LedgerAccount, LedgerEntry } from '~domain/finance'
 import type { BuildingType, City, Product, Recipe, Region, ResourceDeposit } from '~domain/world'
 
@@ -238,6 +251,31 @@ export function node(over: Partial<NetworkNode> = {}): NetworkNode {
     buildingId: null,
     cityId: null,
     locationM: [1_000, 1_000],
+    terminalId: null,
+    ...over,
+  }
+}
+
+export function terminal(over: Partial<Terminal> = {}): Terminal {
+  return {
+    id: uid(120),
+    nodeId: uid(100),
+    ownerAccountId: OTHER_ACCOUNT,
+    transshipmentPerHour: 40,
+    queueLength: 0,
+    updatedAtSim: st(100),
+    ...over,
+  }
+}
+
+export function terminalSlot(over: Partial<TerminalSlot> = {}): TerminalSlot {
+  return {
+    id: uid(125),
+    terminalId: uid(120),
+    priorityTier: 1,
+    price: mon('30000'),
+    holderAccountId: null,
+    validUntilSim: null,
     ...over,
   }
 }
@@ -362,6 +400,29 @@ export function contract(over: Partial<Contract> = {}): Contract {
     deadlineSim: st(200_000),
     status: 'active',
     fillBp: null,
+    confirmedAtSim: st(2_000),
+    settledAtSim: null,
+    ...over,
+  }
+}
+
+export function freightContract(over: Partial<FreightContract> = {}): FreightContract {
+  return {
+    id: uid(185),
+    publicationId: uid(160),
+    channel: 'board',
+    shipperAccountId: MY_ACCOUNT,
+    carrierAccountId: OTHER_ACCOUNT,
+    originNodeId: uid(100),
+    destinationNodeId: uid(101),
+    freightPrice: mon('5000'),
+    declaredValue: mon('60000'),
+    deadlineSim: st(200_000),
+    status: 'active',
+    fillBp: null,
+    escrowAccountId: uid(191),
+    carrierGuaranteeAccountId: uid(192),
+    custodyAccountId: uid(193),
     confirmedAtSim: st(2_000),
     settledAtSim: null,
     ...over,

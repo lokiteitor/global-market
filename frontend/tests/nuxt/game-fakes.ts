@@ -66,6 +66,8 @@ export function fakeApis(): FakeApis {
       'listContracts',
       'getContract',
       'listContractDeliveries',
+      'listFreightContracts',
+      'getFreightContract',
       'getMarketOhlc',
     ]),
     fleet: make<FleetApi>([
@@ -77,6 +79,10 @@ export function fakeApis(): FakeApis {
       'listShipments',
       'getShipment',
       'dispatchShipment',
+      'repositionVehicle',
+      'getTerminal',
+      'listTerminalSlots',
+      'purchaseTerminalSlot',
     ]),
     logistics: make<LogisticsApi>([
       'listNetworkNodes',

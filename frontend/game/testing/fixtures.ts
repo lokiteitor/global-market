@@ -146,6 +146,7 @@ export function node(over: Partial<NetworkNode> = {}): NetworkNode {
     buildingId: null,
     cityId: null,
     locationM: [1_000, 1_000],
+    terminalId: null,
     ...over,
   }
 }

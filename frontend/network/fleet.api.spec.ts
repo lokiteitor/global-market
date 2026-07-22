@@ -77,6 +77,53 @@ describe('network/fleet.api — contratos de endpoint', () => {
     expect(shipment).toEqual({ id: SHIPMENT_ID, status: 'in_transit' })
   })
 
+  it('repositionVehicle hace POST al reposition con route_id (viaje en vacío)', async () => {
+    const { rest, requested } = fakeRest({ id: VEHICLE_ID, status: 'in_transit' })
+    const vehicle = await createFleetApi(rest).repositionVehicle(VEHICLE_ID, ROUTE_ID)
+
+    expect(requested[0]).toMatchObject({
+      method: 'POST',
+      path: `/world/vehicles/${VEHICLE_ID}/reposition`,
+      body: { route_id: ROUTE_ID },
+    })
+    expect(vehicle).toEqual({ id: VEHICLE_ID, status: 'in_transit' })
+  })
+
+  it('getTerminal y listTerminalSlots consultan la terminal y sus slots', async () => {
+    const TERMINAL_ID = '01981c5e-7d2a-7f3b-9e41-a2c4d6e8f040'
+    const { rest, requested } = fakeRest({ id: TERMINAL_ID })
+    const api = createFleetApi(rest)
+
+    await api.getTerminal(TERMINAL_ID)
+    await api.listTerminalSlots(TERMINAL_ID, true)
+    await api.listTerminalSlots(TERMINAL_ID)
+
+    expect(requested[0]).toMatchObject({
+      method: 'GET',
+      path: `/world/terminals/${TERMINAL_ID}`,
+    })
+    expect(requested[1]).toMatchObject({
+      method: 'GET',
+      path: `/world/terminals/${TERMINAL_ID}/slots`,
+      query: { only_available: true },
+    })
+    // Sin onlyAvailable, la clave se OMITE (no viaja como undefined).
+    expect(requested[2]?.query).toEqual({})
+  })
+
+  it('purchaseTerminalSlot hace POST sin body (Idempotency-Key la pone el cliente REST)', async () => {
+    const SLOT_ID = '01981c5e-7d2a-7f3b-9e41-a2c4d6e8f041'
+    const { rest, requested } = fakeRest({ id: SLOT_ID })
+    const slot = await createFleetApi(rest).purchaseTerminalSlot(SLOT_ID)
+
+    expect(requested[0]).toMatchObject({
+      method: 'POST',
+      path: `/world/terminal-slots/${SLOT_ID}/purchase`,
+    })
+    expect(requested[0]?.body).toBeUndefined()
+    expect(slot).toEqual({ id: SLOT_ID })
+  })
+
   it('propaga el AppError tipado del cliente REST (p. ej. VEHICLE_SEALED)', async () => {
     const error = new AppError({
       kind: 'http',

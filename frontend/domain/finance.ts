@@ -55,6 +55,7 @@ export const LEDGER_TRANSACTION_KINDS = [
   'transfer',
   'auction',
   'reconciliation',
+  'power_spot',
 ] as const
 export type LedgerTransactionKind = (typeof LEDGER_TRANSACTION_KINDS)[number]
 

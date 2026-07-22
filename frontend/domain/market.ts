@@ -12,6 +12,7 @@ import type { EntityId } from '~shared/ids'
 import type { Money } from '~shared/money'
 import type { SimTime } from '~shared/simtime'
 import type { AccountId } from './auth'
+import type { LedgerAccountId } from './finance'
 import type { NodeId } from './logistics'
 import type { Quantity } from './quantity'
 import type { ProductId, RegionId } from './world'
@@ -55,7 +56,11 @@ export interface Publication {
   readonly publisherAccountId: AccountId
   readonly channel: ContractChannel
   readonly counterpartyAccountId: AccountId | null
-  /** Presente en `sell`/`buy`; ausente en `freight`. */
+  /**
+   * Producto de la publicación. Requerido en los tres tipos desde v1.4.0 (en
+   * `freight` es el producto de la carga: la custodia del ledger es por
+   * producto); se conserva `| null` por tolerancia con datos previos.
+   */
   readonly productId: ProductId | null
   readonly quantityTotal: Quantity
   readonly quantityRemaining: Quantity
@@ -114,6 +119,46 @@ export interface Contract {
   readonly confirmedAtSim: SimTime
   readonly settledAtSim: SimTime | null
 }
+
+/**
+ * CCRI-Flete — contrato de transporte (GDD §5.3.2). El cargador bloqueó el
+ * flete en escrow; el transportista depositó su garantía sobre el valor
+ * declarado y lleva la carga en custodia (no puede venderla). El schema NO
+ * lleva producto ni cantidad: se leen del Shipment ligado
+ * (`Shipment.freightContractId`) o de la publicación de origen.
+ */
+export interface FreightContract {
+  readonly id: FreightContractId
+  readonly publicationId: PublicationId | null
+  readonly channel: ContractChannel
+  /** Cargador: dueño de la mercancía, paga el flete (escrow). */
+  readonly shipperAccountId: AccountId
+  /** Transportista: deposita la garantía y ejecuta el transporte. */
+  readonly carrierAccountId: AccountId
+  readonly originNodeId: NodeId
+  readonly destinationNodeId: NodeId
+  /** Importe TOTAL del flete servido (tarifa unitaria × cantidad), no tarifa. */
+  readonly freightPrice: Money
+  /** Valor declarado prorrateado a lo servido: base de la garantía del carrier. */
+  readonly declaredValue: Money
+  readonly deadlineSim: SimTime
+  readonly status: ContractStatus
+  /** Porcentaje entregado a tiempo, en puntos básicos (presente al liquidar). */
+  readonly fillBp: number | null
+  readonly escrowAccountId: LedgerAccountId | null
+  readonly carrierGuaranteeAccountId: LedgerAccountId | null
+  readonly custodyAccountId: LedgerAccountId | null
+  readonly confirmedAtSim: SimTime
+  readonly settledAtSim: SimTime | null
+}
+
+/**
+ * Garantía del transportista por defecto, en puntos básicos del valor
+ * declarado prorrateado (II_FREIGHT_GUARANTEE_BP, default del servidor). Es
+ * configuración de servidor no expuesta por la API: toda previsualización
+ * cliente construida con ella es una ESTIMACIÓN y debe rotularse como tal.
+ */
+export const DEFAULT_FREIGHT_GUARANTEE_BP = 1000
 
 export interface OhlcCandle {
   readonly productId: ProductId

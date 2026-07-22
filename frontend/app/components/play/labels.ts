@@ -63,4 +63,5 @@ export const LEDGER_TX_KIND_LABEL: Readonly<Record<LedgerTransactionKind, Messag
   transfer: 'ledger.tx.transfer',
   auction: 'ledger.tx.auction',
   reconciliation: 'ledger.tx.reconciliation',
+  power_spot: 'ledger.tx.power_spot',
 }

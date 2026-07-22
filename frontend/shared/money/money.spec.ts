@@ -1,7 +1,20 @@
 import { describe, expect, it } from 'vitest'
 
 import type { Money } from './index'
-import { ZERO, add, compare, format, isMoney, multiplyByInt, parseMoney, subtract } from './index'
+import {
+  ZERO,
+  add,
+  applyBasisPoints,
+  compare,
+  format,
+  isMoney,
+  multiplyByInt,
+  multiplyByUnits,
+  parseMoney,
+  prorate,
+  subtract,
+  toApproxNumber,
+} from './index'
 
 const m = (value: string): Money => {
   const result = parseMoney(value)
@@ -146,6 +159,91 @@ describe('shared/money — multiplyByInt', () => {
       expect(() => multiplyByInt(m('10'), factor)).toThrow(RangeError)
     },
   )
+})
+
+describe('shared/money — multiplyByUnits (importe × cantidad de punto fijo)', () => {
+  it('multiplica tarifa unitaria por cantidad (preview de escrow de flete)', () => {
+    expect(multiplyByUnits(m('120'), '500')).toBe('60000')
+  })
+
+  it('cantidad cero da cero', () => {
+    expect(multiplyByUnits(m('120'), '0')).toBe('0')
+  })
+
+  it('no pierde precisión por encima de 2^53', () => {
+    expect(multiplyByUnits(m('9007199254740993'), '1000')).toBe('9007199254740993000')
+  })
+
+  it.each(['', '-1', '1.5', '1e3', 'abc'])('lanza RangeError ante unidades "%s"', (units) => {
+    expect(() => multiplyByUnits(m('10'), units)).toThrow(RangeError)
+  })
+})
+
+describe('shared/money — prorate (floor(amount × num / den), como el ledger)', () => {
+  it('prorratea el valor declarado a la cantidad aceptada (K de N)', () => {
+    // declared=60000, aceptadas 3 de 7 → floor(60000×3/7) = 25714
+    expect(prorate(m('60000'), '3', '7')).toBe('25714')
+  })
+
+  it('K = N devuelve el importe íntegro', () => {
+    expect(prorate(m('60000'), '7', '7')).toBe('60000')
+  })
+
+  it('numerador cero devuelve cero', () => {
+    expect(prorate(m('60000'), '0', '7')).toBe('0')
+  })
+
+  it('redondea SIEMPRE a suelo (división entera BigInt)', () => {
+    expect(prorate(m('10'), '1', '3')).toBe('3')
+    expect(prorate(m('10'), '2', '3')).toBe('6')
+  })
+
+  it('lanza RangeError con denominador cero', () => {
+    expect(() => prorate(m('10'), '1', '0')).toThrow(RangeError)
+  })
+
+  it.each(['-1', '1.5', ''])('lanza RangeError ante operando "%s"', (bad) => {
+    expect(() => prorate(m('10'), bad, '3')).toThrow(RangeError)
+    expect(() => prorate(m('10'), '1', bad)).toThrow(RangeError)
+  })
+})
+
+describe('shared/money — applyBasisPoints (floor(amount × bp / 10000))', () => {
+  it('1000 bp = 10% (garantía del transportista)', () => {
+    expect(applyBasisPoints(m('60000'), 1000)).toBe('6000')
+  })
+
+  it('redondea a suelo', () => {
+    expect(applyBasisPoints(m('999'), 1000)).toBe('99')
+  })
+
+  it('0 bp da cero y 10000 bp el importe íntegro', () => {
+    expect(applyBasisPoints(m('123'), 0)).toBe('0')
+    expect(applyBasisPoints(m('123'), 10_000)).toBe('123')
+  })
+
+  it('compone con prorate igual que el servidor (floor anidado)', () => {
+    // floor(floor(60000×3/7) × 1000/10000) = floor(25714×0.1) = 2571
+    expect(applyBasisPoints(prorate(m('60000'), '3', '7'), 1000)).toBe('2571')
+  })
+
+  it.each([-1, 10_001, 1.5, Number.NaN])('lanza RangeError ante bp inválido (%s)', (bp) => {
+    expect(() => applyBasisPoints(m('10'), bp)).toThrow(RangeError)
+  })
+})
+
+describe('shared/money — toApproxNumber (SOLO presentación)', () => {
+  it('convierte magnitudes pequeñas con exactitud', () => {
+    expect(toApproxNumber('125000')).toBe(125_000)
+  })
+
+  it('acepta magnitudes por encima de 2^53 (con pérdida, documentada)', () => {
+    expect(toApproxNumber('9007199254740993')).toBeCloseTo(9007199254740992, -1)
+  })
+
+  it.each(['', '-1', '1.5', 'abc'])('lanza RangeError ante magnitud "%s"', (value) => {
+    expect(() => toApproxNumber(value)).toThrow(RangeError)
+  })
 })
 
 describe('shared/money — format (es-ES, sin decimales)', () => {

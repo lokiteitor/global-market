@@ -28,6 +28,9 @@ export type VehiclePurchaseDto = Schemas['VehiclePurchase']
 export type VehicleUpdateDto = Schemas['VehicleUpdate']
 export type ShipmentDto = Schemas['Shipment']
 export type ShipmentDispatchDto = Schemas['ShipmentDispatch']
+export type VehicleRepositionDto = Schemas['VehicleReposition']
+export type TerminalDto = Schemas['Terminal']
+export type TerminalSlotDto = Schemas['TerminalSlot']
 
 // ——— Filtros de query, derivados de `operations` (nunca a mano) ———
 export type VehicleTypeListQuery = NonNullable<
@@ -63,6 +66,30 @@ export interface FleetApi {
     vehicleId: Schemas['VehicleId'],
     routeId: Schemas['RouteId'],
   ): Promise<ShipmentDto>
+
+  /**
+   * POST /world/vehicles/{vehicleId}/reposition — viaje en vacío (deadhead):
+   * pone en ruta un vehículo propio `idle` SIN carga por una ruta propia del
+   * modo del vehículo que empieza en su nodo actual (403 `VEHICLE_SEALED`,
+   * 409 `VEHICLE_NOT_IDLE`).
+   */
+  repositionVehicle(
+    vehicleId: Schemas['VehicleId'],
+    routeId: Schemas['RouteId'],
+  ): Promise<VehicleDto>
+
+  /** GET /world/terminals/{terminalId} — capacidad de transbordo y cola actual. */
+  getTerminal(terminalId: Schemas['TerminalId']): Promise<TerminalDto>
+  /** GET /world/terminals/{terminalId}/slots — slots de prioridad (sin cursor). */
+  listTerminalSlots(
+    terminalId: Schemas['TerminalId'],
+    onlyAvailable?: boolean,
+  ): Promise<readonly TerminalSlotDto[]>
+  /**
+   * POST /world/terminal-slots/{slotId}/purchase — compra el slot al dueño de
+   * la terminal (409 con titular vigente, 422 `INSUFFICIENT_FUNDS`). Sin body.
+   */
+  purchaseTerminalSlot(slotId: Schemas['SlotId']): Promise<TerminalSlotDto>
 }
 
 export function createFleetApi(rest: RestClient): FleetApi {
@@ -131,6 +158,41 @@ export function createFleetApi(rest: RestClient): FleetApi {
         method: 'POST',
         path: `/world/shipments/${encodeURIComponent(shipmentId)}/dispatch`,
         body,
+      })
+      return data
+    },
+
+    async repositionVehicle(vehicleId, routeId) {
+      const body: VehicleRepositionDto = { route_id: routeId }
+      const { data } = await rest.request<VehicleDto>({
+        method: 'POST',
+        path: `/world/vehicles/${encodeURIComponent(vehicleId)}/reposition`,
+        body,
+      })
+      return data
+    },
+
+    async getTerminal(terminalId) {
+      const { data } = await rest.request<TerminalDto>({
+        method: 'GET',
+        path: `/world/terminals/${encodeURIComponent(terminalId)}`,
+      })
+      return data
+    },
+
+    async listTerminalSlots(terminalId, onlyAvailable) {
+      const { data } = await rest.request<readonly TerminalSlotDto[]>({
+        method: 'GET',
+        path: `/world/terminals/${encodeURIComponent(terminalId)}/slots`,
+        query: onlyAvailable === undefined ? {} : { only_available: onlyAvailable },
+      })
+      return data
+    },
+
+    async purchaseTerminalSlot(slotId) {
+      const { data } = await rest.request<TerminalSlotDto>({
+        method: 'POST',
+        path: `/world/terminal-slots/${encodeURIComponent(slotId)}/purchase`,
       })
       return data
     },

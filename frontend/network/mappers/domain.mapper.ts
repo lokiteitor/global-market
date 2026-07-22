@@ -35,8 +35,21 @@ import type { Concession } from '~domain/cadastre'
 import type { LedgerAccount, LedgerEntry, SignedAmount } from '~domain/finance'
 import { isSignedAmount } from '~domain/finance'
 import type { Shipment, Vehicle, VehiclePosition, VehicleType } from '~domain/fleet'
-import type { LinkSegment, NetworkLink, NetworkNode, Route } from '~domain/logistics'
-import type { Acceptance, Contract, Publication } from '~domain/market'
+import type {
+  LinkSegment,
+  NetworkLink,
+  NetworkNode,
+  Route,
+  Terminal,
+  TerminalSlot,
+} from '~domain/logistics'
+import type {
+  Acceptance,
+  Contract,
+  FreightContract,
+  OhlcCandle,
+  Publication,
+} from '~domain/market'
 import type {
   BuildingType,
   City,
@@ -63,9 +76,22 @@ import type {
   ResourceDepositDto,
 } from '../world.api'
 import type { LedgerAccountDto, LedgerEntryDto } from '../ledger.api'
-import type { ShipmentDto, VehicleDto, VehiclePositionDto, VehicleTypeDto } from '../fleet.api'
+import type {
+  ShipmentDto,
+  TerminalDto,
+  TerminalSlotDto,
+  VehicleDto,
+  VehiclePositionDto,
+  VehicleTypeDto,
+} from '../fleet.api'
 import type { LinkSegmentDto, NetworkLinkDto, NetworkNodeDto, RouteDto } from '../logistics.api'
-import type { AcceptanceDto, ContractDto, PublicationDto } from '../market.api'
+import type {
+  AcceptanceDto,
+  ContractDto,
+  FreightContractDto,
+  OhlcCandleDto,
+  PublicationDto,
+} from '../market.api'
 
 // ── Helpers de forma (violación ⇒ AppError `protocol`) ──────────────────────
 
@@ -340,6 +366,29 @@ export function mapNode(dto: NetworkNodeDto): NetworkNode {
     buildingId: idOrNull(dto.building_id, 'NetworkNode.building_id'),
     cityId: idOrNull(dto.city_id, 'NetworkNode.city_id'),
     locationM: pointM(dto.location, 'NetworkNode.location'),
+    terminalId: idOrNull(dto.terminal_id, 'NetworkNode.terminal_id'),
+  }
+}
+
+export function mapTerminal(dto: TerminalDto): Terminal {
+  return {
+    id: id(dto.id, 'Terminal.id'),
+    nodeId: id(dto.node_id, 'Terminal.node_id'),
+    ownerAccountId: id(dto.owner_account_id, 'Terminal.owner_account_id'),
+    transshipmentPerHour: dto.transshipment_per_hour,
+    queueLength: dto.queue_length,
+    updatedAtSim: simOrNull(dto.updated_at_sim, 'Terminal.updated_at_sim'),
+  }
+}
+
+export function mapTerminalSlot(dto: TerminalSlotDto): TerminalSlot {
+  return {
+    id: id(dto.id, 'TerminalSlot.id'),
+    terminalId: id(dto.terminal_id, 'TerminalSlot.terminal_id'),
+    priorityTier: dto.priority_tier,
+    price: money(dto.price, 'TerminalSlot.price'),
+    holderAccountId: idOrNull(dto.holder_account_id, 'TerminalSlot.holder_account_id'),
+    validUntilSim: simOrNull(dto.valid_until_sim, 'TerminalSlot.valid_until_sim'),
   }
 }
 
@@ -525,6 +574,46 @@ export function mapContract(dto: ContractDto): Contract {
     fillBp: dto.fill_bp ?? null,
     confirmedAtSim: sim(dto.confirmed_at_sim, 'Contract.confirmed_at_sim'),
     settledAtSim: simOrNull(dto.settled_at_sim, 'Contract.settled_at_sim'),
+  }
+}
+
+export function mapFreightContract(dto: FreightContractDto): FreightContract {
+  return {
+    id: id(dto.id, 'FreightContract.id'),
+    publicationId: idOrNull(dto.publication_id, 'FreightContract.publication_id'),
+    channel: dto.channel,
+    shipperAccountId: id(dto.shipper_account_id, 'FreightContract.shipper_account_id'),
+    carrierAccountId: id(dto.carrier_account_id, 'FreightContract.carrier_account_id'),
+    originNodeId: id(dto.origin_node_id, 'FreightContract.origin_node_id'),
+    destinationNodeId: id(dto.destination_node_id, 'FreightContract.destination_node_id'),
+    freightPrice: money(dto.freight_price, 'FreightContract.freight_price'),
+    declaredValue: money(dto.declared_value, 'FreightContract.declared_value'),
+    deadlineSim: sim(dto.deadline_sim, 'FreightContract.deadline_sim'),
+    status: dto.status,
+    fillBp: dto.fill_bp ?? null,
+    escrowAccountId: idOrNull(dto.escrow_account_id, 'FreightContract.escrow_account_id'),
+    carrierGuaranteeAccountId: idOrNull(
+      dto.carrier_guarantee_account_id,
+      'FreightContract.carrier_guarantee_account_id',
+    ),
+    custodyAccountId: idOrNull(dto.custody_account_id, 'FreightContract.custody_account_id'),
+    confirmedAtSim: sim(dto.confirmed_at_sim, 'FreightContract.confirmed_at_sim'),
+    settledAtSim: simOrNull(dto.settled_at_sim, 'FreightContract.settled_at_sim'),
+  }
+}
+
+export function mapOhlcCandle(dto: OhlcCandleDto): OhlcCandle {
+  return {
+    productId: id(dto.product_id, 'OhlcCandle.product_id'),
+    regionId: id(dto.region_id, 'OhlcCandle.region_id'),
+    bucketStartSim: sim(dto.bucket_start_sim, 'OhlcCandle.bucket_start_sim'),
+    bucketSimSecs: dto.bucket_sim_secs,
+    openPrice: money(dto.open_price, 'OhlcCandle.open_price'),
+    highPrice: money(dto.high_price, 'OhlcCandle.high_price'),
+    lowPrice: money(dto.low_price, 'OhlcCandle.low_price'),
+    closePrice: money(dto.close_price, 'OhlcCandle.close_price'),
+    volume: qty(dto.volume, 'OhlcCandle.volume'),
+    contractCount: dto.contract_count,
   }
 }
 

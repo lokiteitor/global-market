@@ -7,6 +7,7 @@
  */
 
 import type { EntityId } from '~shared/ids'
+import type { Money } from '~shared/money'
 import type { SimTime } from '~shared/simtime'
 import type { AccountId } from './auth'
 import type { BuildingId } from './buildings'
@@ -17,6 +18,8 @@ export type NodeId = EntityId<'Node'>
 export type LinkId = EntityId<'Link'>
 export type SegmentId = EntityId<'Segment'>
 export type RouteId = EntityId<'Route'>
+export type TerminalId = EntityId<'Terminal'>
+export type TerminalSlotId = EntityId<'TerminalSlot'>
 
 export const NODE_KINDS = [
   'mine',
@@ -44,6 +47,43 @@ export interface NetworkNode {
   readonly buildingId: BuildingId | null
   readonly cityId: CityId | null
   readonly locationM: WorldPointM
+  /** Terminal intermodal que opera en el nodo, si la tiene (v1.7.0). */
+  readonly terminalId: TerminalId | null
+}
+
+/**
+ * Terminal intermodal (GDD §7.3): infraestructura con dueño que sirve la cola
+ * de transbordo a `transshipmentPerHour` y vende slots de prioridad. Es
+ * información ambiental compartida: se consulta por pull al inspeccionar
+ * (C10), no se replica en store.
+ */
+export interface Terminal {
+  readonly id: TerminalId
+  readonly nodeId: NodeId
+  readonly ownerAccountId: AccountId
+  readonly transshipmentPerHour: number
+  readonly queueLength: number
+  readonly updatedAtSim: SimTime | null
+}
+
+/** Slot de prioridad de una terminal (menor `priorityTier` = antes en cola). */
+export interface TerminalSlot {
+  readonly id: TerminalSlotId
+  readonly terminalId: TerminalId
+  readonly priorityTier: number
+  readonly price: Money
+  /** Titular actual; `null` = a la venta. */
+  readonly holderAccountId: AccountId | null
+  readonly validUntilSim: SimTime | null
+}
+
+/**
+ * ¿El slot tiene titular vigente en `simNow`? Espejo de la regla de compra del
+ * servidor: con titular y sin vencimiento (o vencimiento futuro) el slot no es
+ * comprable (409 SLOT_HELD).
+ */
+export function isSlotHeld(slot: TerminalSlot, simNow: SimTime): boolean {
+  return slot.holderAccountId !== null && (slot.validUntilSim === null || slot.validUntilSim >= simNow)
 }
 
 export interface LinkSegment {

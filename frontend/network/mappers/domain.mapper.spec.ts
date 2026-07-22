@@ -3,9 +3,20 @@ import { describe, expect, it } from 'vitest'
 import { simTime } from '~shared/simtime'
 import { AppError } from '../rest'
 import type { ProductDto, RegionDto } from '../world.api'
-import type { VehicleDto } from '../fleet.api'
-import type { PublicationDto } from '../market.api'
-import { mapProduct, mapPublication, mapRegion, mapVehicle } from './domain.mapper'
+import type { TerminalDto, TerminalSlotDto, VehicleDto } from '../fleet.api'
+import type { NetworkNodeDto } from '../logistics.api'
+import type { FreightContractDto, OhlcCandleDto, PublicationDto } from '../market.api'
+import {
+  mapFreightContract,
+  mapNode,
+  mapOhlcCandle,
+  mapProduct,
+  mapPublication,
+  mapRegion,
+  mapTerminal,
+  mapTerminalSlot,
+  mapVehicle,
+} from './domain.mapper'
 
 const UUID_A = '01981c5e-84b6-7c2a-8d3f-5b7a9c1e3f04'
 const UUID_B = '01981c5e-91d8-7e4b-a2c6-4d8e0f6a2b93'
@@ -121,5 +132,116 @@ describe('network/mappers/domain.mapper', () => {
     expect(publication.destinationNodeId).toBeNull()
     expect(publication.declaredValue).toBeNull()
     expect(publication.quantityRemaining).toBe('300')
+  })
+
+  it('mapFreightContract: cuentas del ledger opcionales a null y Money canónico', () => {
+    const dto: FreightContractDto = {
+      id: UUID_A,
+      channel: 'board',
+      shipper_account_id: UUID_B,
+      carrier_account_id: UUID_C,
+      origin_node_id: UUID_B,
+      destination_node_id: UUID_C,
+      freight_price: '0005000',
+      declared_value: '60000',
+      deadline_sim: 200_000,
+      status: 'active',
+      confirmed_at_sim: 2_000,
+    }
+
+    const freight = mapFreightContract(dto)
+
+    expect(freight.id).toBe(UUID_A)
+    expect(freight.publicationId).toBeNull()
+    expect(freight.freightPrice).toBe('5000')
+    expect(freight.declaredValue).toBe('60000')
+    expect(freight.deadlineSim).toBe(simTime(200_000))
+    expect(freight.fillBp).toBeNull()
+    expect(freight.escrowAccountId).toBeNull()
+    expect(freight.carrierGuaranteeAccountId).toBeNull()
+    expect(freight.custodyAccountId).toBeNull()
+    expect(freight.settledAtSim).toBeNull()
+  })
+
+  it('mapFreightContract: importe fuera de contrato ⇒ AppError kind protocol', () => {
+    const dto: FreightContractDto = {
+      id: UUID_A,
+      channel: 'board',
+      shipper_account_id: UUID_B,
+      carrier_account_id: UUID_C,
+      origin_node_id: UUID_B,
+      destination_node_id: UUID_C,
+      freight_price: '50.5',
+      declared_value: '60000',
+      deadline_sim: 200_000,
+      status: 'active',
+      confirmed_at_sim: 2_000,
+    }
+
+    expect(() => mapFreightContract(dto)).toThrowError(AppError)
+    try {
+      mapFreightContract(dto)
+    } catch (error) {
+      expect(error instanceof AppError && error.kind).toBe('protocol')
+    }
+  })
+
+  it('mapOhlcCandle: precios Money canónicos y bucket a SimTime', () => {
+    const dto: OhlcCandleDto = {
+      product_id: UUID_A,
+      region_id: UUID_B,
+      bucket_start_sim: 86_400,
+      bucket_sim_secs: 3_600,
+      open_price: '100',
+      high_price: '0130',
+      low_price: '90',
+      close_price: '120',
+      volume: '1000',
+      contract_count: 4,
+    }
+
+    const candle = mapOhlcCandle(dto)
+
+    expect(candle.bucketStartSim).toBe(simTime(86_400))
+    expect(candle.highPrice).toBe('130')
+    expect(candle.volume).toBe('1000')
+    expect(candle.contractCount).toBe(4)
+  })
+
+  it('mapNode: terminal_id opcional a null o id con brand', () => {
+    const dto: NetworkNodeDto = {
+      id: UUID_A,
+      kind: 'port',
+      region_id: UUID_B,
+      location: { type: 'Point', coordinates: [1_000, 2_000] },
+    }
+
+    expect(mapNode(dto).terminalId).toBeNull()
+    expect(mapNode({ ...dto, terminal_id: UUID_C }).terminalId).toBe(UUID_C)
+  })
+
+  it('mapTerminal y mapTerminalSlot: opcionales a null y precio canónico', () => {
+    const terminalDto: TerminalDto = {
+      id: UUID_A,
+      node_id: UUID_B,
+      owner_account_id: UUID_C,
+      transshipment_per_hour: 40,
+      queue_length: 3,
+    }
+    const slotDto: TerminalSlotDto = {
+      id: UUID_B,
+      terminal_id: UUID_A,
+      priority_tier: 2,
+      price: '020000',
+    }
+
+    const terminal = mapTerminal(terminalDto)
+    expect(terminal.updatedAtSim).toBeNull()
+    expect(terminal.transshipmentPerHour).toBe(40)
+
+    const slot = mapTerminalSlot(slotDto)
+    expect(slot.price).toBe('20000')
+    expect(slot.holderAccountId).toBeNull()
+    expect(slot.validUntilSim).toBeNull()
   })
 })

@@ -101,6 +101,18 @@ export const ACCEPTANCE_STATUS_PRESENTATION: Readonly<
   released: { labelKey: 'status.acceptance.released', severity: 'warn' },
 }
 
+/**
+ * Severidad visual del estado físico (`conditionPct`, 0–100) de un edificio:
+ * el deterioro por mantenimiento impagado (GDD §5.9, 3er escalón) que antecede
+ * al abandono. Umbrales de presentación del cliente (el servidor no publica
+ * los suyos): < 25 crítico, < 50 atención, resto normal.
+ */
+export function conditionSeverity(pct: number): StatusSeverity {
+  if (pct < 25) return 'danger'
+  if (pct < 50) return 'warn'
+  return 'ok'
+}
+
 export function buildingStatusPresentation(status: BuildingStatus): StatusPresentation {
   return BUILDING_STATUS_PRESENTATION[status]
 }

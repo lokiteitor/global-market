@@ -90,6 +90,37 @@ describe('network/market.api — contratos de endpoint', () => {
     expect(candles).toEqual([{ product_id: PRODUCT_ID }])
   })
 
+  it('listFreightContracts hace GET /contracts/freight-contracts con role/status y devuelve Page', async () => {
+    const FREIGHT_ID = '01981c5e-a3f1-7d5c-b4e8-6f0a2c4e6081'
+    const { rest, requested } = fakeRest([{ id: FREIGHT_ID }], 'cursor-f2')
+    const page = await createMarketApi(rest).listFreightContracts({
+      role: 'carrier',
+      status: 'active',
+      cursor: 'cursor-f1',
+      limit: 50,
+    })
+
+    expect(requested[0]).toMatchObject({
+      method: 'GET',
+      path: '/contracts/freight-contracts',
+      query: { role: 'carrier', status: 'active', cursor: 'cursor-f1', limit: 50 },
+    })
+    expect(page.items).toEqual([{ id: FREIGHT_ID }])
+    expect(page.nextCursor).toBe('cursor-f2')
+  })
+
+  it('getFreightContract hace GET por id', async () => {
+    const FREIGHT_ID = '01981c5e-a3f1-7d5c-b4e8-6f0a2c4e6081'
+    const { rest, requested } = fakeRest({ id: FREIGHT_ID })
+    const dto = await createMarketApi(rest).getFreightContract(FREIGHT_ID)
+
+    expect(requested[0]).toMatchObject({
+      method: 'GET',
+      path: `/contracts/freight-contracts/${FREIGHT_ID}`,
+    })
+    expect(dto).toEqual({ id: FREIGHT_ID })
+  })
+
   it('propaga el AppError tipado del cliente REST (p. ej. INSUFFICIENT_COLLATERAL)', async () => {
     const error = new AppError({
       kind: 'http',

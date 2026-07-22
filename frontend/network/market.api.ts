@@ -26,11 +26,15 @@ export type AcceptanceDto = Schemas['Acceptance']
 export type AcceptanceCreateDto = Schemas['AcceptanceCreate']
 export type ContractDto = Schemas['Contract']
 export type ContractDeliveryDto = Schemas['ContractDelivery']
+export type FreightContractDto = Schemas['FreightContract']
 export type OhlcCandleDto = Schemas['OhlcCandle']
 
 // ——— Filtros de query, derivados de `operations` (nunca a mano) ———
 export type BoardQuery = NonNullable<operations['queryBoard']['parameters']['query']>
 export type ContractListQuery = NonNullable<operations['listContracts']['parameters']['query']>
+export type FreightContractListQuery = NonNullable<
+  operations['listFreightContracts']['parameters']['query']
+>
 /** Query de OHLC: `product_id` es REQUERIDO por contrato. */
 export type OhlcQuery = operations['getMarketOhlc']['parameters']['query']
 
@@ -63,6 +67,11 @@ export interface MarketApi {
   getContract(contractId: Schemas['ContractId']): Promise<ContractDto>
   /** GET /contracts/contracts/{contractId}/deliveries — entregas parciales (sin cursor). */
   listContractDeliveries(contractId: Schemas['ContractId']): Promise<readonly ContractDeliveryDto[]>
+
+  /** GET /contracts/freight-contracts — fletes propios como cargador o transportista. */
+  listFreightContracts(query?: FreightContractListQuery): Promise<Page<FreightContractDto>>
+  /** GET /contracts/freight-contracts/{freightContractId} */
+  getFreightContract(freightContractId: Schemas['FreightContractId']): Promise<FreightContractDto>
 
   /** GET /market/ohlc — velas de contratos liquidados, buckets en sim-time (sin cursor). */
   getMarketOhlc(query: OhlcQuery): Promise<readonly OhlcCandleDto[]>
@@ -144,6 +153,22 @@ export function createMarketApi(rest: RestClient): MarketApi {
       const { data } = await rest.request<readonly ContractDeliveryDto[]>({
         method: 'GET',
         path: `/contracts/contracts/${encodeURIComponent(contractId)}/deliveries`,
+      })
+      return data
+    },
+
+    listFreightContracts(query) {
+      return requestPage<FreightContractDto>(rest, {
+        method: 'GET',
+        path: '/contracts/freight-contracts',
+        query: query ?? {},
+      })
+    },
+
+    async getFreightContract(freightContractId) {
+      const { data } = await rest.request<FreightContractDto>({
+        method: 'GET',
+        path: `/contracts/freight-contracts/${encodeURIComponent(freightContractId)}`,
       })
       return data
     },
